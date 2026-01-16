@@ -33,16 +33,43 @@ jobs:
       - uses: actions/checkout@v6
       - name: dtolnay/rust-toolchain@stable
         uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7
-      - name: actions/cache@v5
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb
+      - name: Restore Cargo cache
+        id: cache-cargo-restore
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+      - name: Restore build cache
+        id: cache-target-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: target/
+          key: target-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
+          restore-keys: |
+            target-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-
+            target-${{ runner.os }}-
       - name: Lint
         run: |
           cargo clippy --all-features --all-targets
+      - name: Save Cargo cache
+        if: steps.cache-cargo-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ steps.cache-cargo-restore.outputs.cache-primary-key }}
+      - name: Save build cache
+        if: steps.cache-target-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target/
+          key: ${{ steps.cache-target-restore.outputs.cache-primary-key }}

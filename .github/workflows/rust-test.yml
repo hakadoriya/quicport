@@ -37,16 +37,27 @@ jobs:
           components: llvm-tools-preview
       - name: taiki-e/install-action@cargo-llvm-cov
         uses: taiki-e/install-action@9fef977cc78d9c6fecc249b5ee8f282a3a603584
-      - name: actions/cache@v5
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb
+      - name: Restore Cargo cache
+        id: cache-cargo-restore
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+      - name: Restore build cache
+        id: cache-target-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: target/
+          key: target-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
+          restore-keys: |
+            target-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-
+            target-${{ runner.os }}-
       - name: Build check
         run: |
           cargo check --all-features --all-targets
@@ -61,3 +72,19 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
           fail_ci_if_error: true
+      - name: Save Cargo cache
+        if: steps.cache-cargo-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ steps.cache-cargo-restore.outputs.cache-primary-key }}
+      - name: Save build cache
+        if: steps.cache-target-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target/
+          key: ${{ steps.cache-target-restore.outputs.cache-primary-key }}
