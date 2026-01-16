@@ -1,0 +1,54 @@
+# cSpell Configuration File
+# - ref: https://github.com/streetsidesoftware/cspell
+#
+# ## To run locally;
+# $ cspell "**/*"
+$schema: https://raw.githubusercontent.com/streetsidesoftware/cspell/main/cspell.schema.json
+version: "0.2"
+allowCompoundWords: true
+ignorePaths:
+  - ".bin/**"
+  - ".git/**"
+  - ".tmp/**"
+  - "Cargo.lock"
+  - "target/**"
+  - "lcov.info"
+  - "vendor/**"
+words:
+  - addrs # addresses
+  - ALPN # ALPN
+  - CEFF # a part of color code
+  - clippy # cargo clippy
+  - dalek # curve25519-dalek
+  - diffie # diffie-hellman
+  - direnv # https://github.com/direnv/direnv
+  - dotenv # .env
+  - dtolnay # https://github.com/dtolnay/rust-toolchain
+  - EEEF # a part of color code
+  - Eeuo # set -Eeuo pipefail
+  - envrc # https://github.com/direnv/direnv
+  - ginokent # https://github.com/ginokent
+  - GOBIN # go env GOBIN
+  - godotenv # github.com/joho/godotenv
+  - hakadoriya # https://github.com/hakadoriya
+  - HMAC # Hash-based Message Authentication Code
+  - joho # github.com/joho/godotenv
+  - libc # C library bindings
+  - mlugg # https://github.com/mlugg
+  - msvc # x86_64-pc-windows-msvc
+  - NISTP # NISTP256
+  - ocsp # Online Certificate Status Protocol
+  - Pqml # a part of test key (Base64)
+  - pwsh # PowerShell
+  - qgtf # a part of test key (Base64)
+  - quic # quic
+  - quicport # quic port
+  - rcgen # Rust certificate generation library
+  - repr # Rust attribute #[repr(...)]
+  - reuseaddr # reuse addr
+  - rngs # random number generators
+  - rustc # rustc
+  - rustls # rustls
+  - serde # Rust serialization library
+  - taiki-e # https://github.com/taiki-e
+  - versenv # https://github.com/versenv/versenv

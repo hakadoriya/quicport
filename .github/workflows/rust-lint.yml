@@ -1,0 +1,48 @@
+name: rust-lint
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  paths-filter:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.paths-filter.outputs.skip }}
+    steps:
+      - uses: hakadoriya-actions/paths-filter-alternative@v1.0.1
+        id: paths-filter
+        with:
+          paths: |-
+            # If any of these regular expressions match, it returns skip=false
+            # This setting takes precedence over paths-ignore
+            ^\.github/workflows/rust-lint\.yml$
+            ^Cargo\.toml$
+            ^Cargo\.lock$
+            ^src/.*\.rs$
+  # > Note: A job that is skipped will report its status as "Success".
+  # > It will not prevent a pull request from merging, even if it is a required check.
+  # ref. https://docs.github.com/en/actions/using-jobs/using-conditions-to-control-job-execution#overview
+  rust-lint:
+    runs-on: ubuntu-latest
+    needs: paths-filter
+    if: ${{ needs.paths-filter.outputs.skip != 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7
+      - name: actions/cache@v5
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
+      - name: Lint
+        run: |
+          cargo clippy --all-features --all-targets

@@ -1,0 +1,66 @@
+version: 2
+updates:
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "11:00"
+      timezone: "Asia/Tokyo"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "ci(github-actions): "
+    labels:
+      - "build"
+      - "dependencies"
+      - "github_actions"
+    assignees:
+      - "ginokent"
+    groups:
+      dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "11:00"
+      timezone: "Asia/Tokyo"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "build(rust): "
+    labels:
+      - "build"
+      - "dependencies"
+      - "rust"
+    assignees:
+      - "ginokent"
+    groups:
+      dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "11:00"
+      timezone: "Asia/Tokyo"
+    cooldown:
+      default-days: 7
+    labels:
+      - "build"
+      - "dependencies"
+      - "docker"
+    assignees:
+      - "ginokent"
+    groups:
+      dependencies:
+        patterns:
+          - "*"
