@@ -1,0 +1,68 @@
+[package]
+name = "quicport"
+authors = ["hakadoriya <178937319+hakadoriyaco@users.noreply.github.com>"]
+version = "0.0.1"
+edition = "2021"
+description = "QUIC-based port forwarding / tunneling tool"
+license = "Apache-2.0"
+
+[dependencies]
+# QUIC
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"
+rand = "0.8"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+
+# Socket options
+socket2 = "0.5"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Serialization (for protocol messages)
+bytes = "1"
+
+# X25519 authentication
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+subtle = "2.5"
+
+# Certificate parsing (for TOFU)
+x509-parser = "0.16"
+dirs = "5"
+
+# API server
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# File locking (Unix)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+# Testing
+tokio-test = "0.4"
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+portpicker = "0.1"
+libc = "0.2"
+
+[profile.release]
+lto = true
+strip = true
