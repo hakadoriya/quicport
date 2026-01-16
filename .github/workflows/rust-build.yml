@@ -54,6 +54,29 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Restore Cargo cache
+        id: cache-cargo-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ matrix.runner }}-${{ matrix.target }}-
+
+      - name: Restore build cache
+        id: cache-target-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: target/
+          key: target-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
+          restore-keys: |
+            target-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}-
+            target-${{ matrix.runner }}-${{ matrix.target }}-
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -139,3 +162,21 @@ jobs:
         with:
           name: ${{ matrix.os_name }}-${{ matrix.arch }}
           path: out/*
+
+      - name: Save Cargo cache
+        if: steps.cache-cargo-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ steps.cache-cargo-restore.outputs.cache-primary-key }}
+
+      - name: Save build cache
+        if: steps.cache-target-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target/
+          key: ${{ steps.cache-target-restore.outputs.cache-primary-key }}
