@@ -459,6 +459,13 @@ Reason:
   0x03 = Error
 ```
 
+**双方向での使用:**
+
+| 方向 | トリガー | 動作 |
+|------|---------|------|
+| Server → Client | 外部クライアントが TCP 接続を切断 | クライアントにローカル接続の終了を通知 |
+| Client → Server | ローカルサービスが TCP 接続を切断 | サーバーが該当の QUIC Stream と TCP 接続をクローズ |
+
 ### データ転送 (QUIC Stream)
 
 各 TCP/UDP 接続に対して **専用の QUIC Stream** を開きます。
@@ -607,7 +614,7 @@ External Client                 Server                          quicport Client
 
 > **注意:** UDP は送信元アドレス (IP:port) で「仮想接続」を識別します。
 > 同じ送信元からの後続パケットは既存の QUIC Stream を再利用します。
-> 一定時間パケットがない場合、仮想接続はタイムアウトでクリーンアップされます。
+> 仮想接続は、QUIC Stream がクローズされた時点でクリーンアップされます。
 
 ## セキュリティ考慮事項
 
@@ -714,3 +721,4 @@ quicport_bytes_received_total 5242880
 - [ ] 設定ファイル対応 (TOML/YAML)
 - [ ] Web UI での接続状況モニタリング
 - [ ] 鍵生成コマンド (`quicport keygen`)
+- [ ] UDP 仮想接続のアイドルタイムアウト
