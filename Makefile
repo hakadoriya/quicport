@@ -39,8 +39,12 @@ generate:  ## Generate code
 update:  ## Update dependencies
 	cargo update
 
+.PHONY: build-debug
+build-debug:  ## Build binary for debug
+	cargo build --offline
+
 .PHONY: build
-build:  ## Build binary
+build:  ## Build binary for release
 	cargo build --offline --release
 
 .PHONY: clean
