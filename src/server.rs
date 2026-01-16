@@ -500,6 +500,10 @@ async fn start_port_listener(
             // UDP "仮想接続" を管理
             // キー: 送信元アドレス (IP:port)
             // 値: (conn_id, QUIC SendStream への送信用チャネル)
+            //
+            // 【ロック順序】デッドロック防止のため、複数ロック取得時は以下の順序を厳守:
+            //   conn_manager → udp_connections
+            // また、ロック保持中の await は最小限に抑える（tx.clone() 後に解放してから send）
             let udp_connections: Arc<Mutex<HashMap<SocketAddr, (u32, tokio::sync::mpsc::Sender<Vec<u8>>)>>> =
                 Arc::new(Mutex::new(HashMap::new()));
 
@@ -521,21 +525,25 @@ async fn start_port_listener(
                                 let packet = recv_buf[..len].to_vec();
                                 debug!("UDP packet from {}: {} bytes", src_addr, len);
 
-                                // 既存の仮想接続を確認
-                                let mut conns = udp_connections.lock().await;
-                                if let Some((conn_id, tx)) = conns.get(&src_addr) {
-                                    // 既存の接続にパケットを送信
+                                // 既存の仮想接続を確認（ロックを短く保持）
+                                let maybe_existing = {
+                                    let conns = udp_connections.lock().await;
+                                    conns.get(&src_addr).map(|(id, tx)| (*id, tx.clone()))
+                                };
+
+                                if let Some((conn_id, tx)) = maybe_existing {
+                                    // 既存の接続にパケットを送信（ロック外で await）
                                     if tx.send(packet).await.is_err() {
                                         // チャネルが閉じている場合は接続を削除
                                         debug!("UDP connection {} channel closed, removing", conn_id);
-                                        conns.remove(&src_addr);
+                                        udp_connections.lock().await.remove(&src_addr);
                                     }
                                 } else {
                                     // 新しい仮想接続を作成
                                     let conn_id = CONNECTION_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
                                     info!("New UDP connection {} from {}", conn_id, src_addr);
 
-                                    // QUIC ストリームを開く
+                                    // QUIC ストリームを開く（ロック外で await）
                                     let (mut quic_send, quic_recv) = match quic_conn.open_bi().await {
                                         Ok(s) => s,
                                         Err(e) => {
@@ -562,18 +570,20 @@ async fn start_port_listener(
 
                                     // パケット送信用チャネルを作成
                                     let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
-
-                                    // 接続を登録
                                     let cancel_token = CancellationToken::new();
-                                    conn_manager.lock().await.add_connection(
-                                        conn_id,
-                                        Protocol::Udp,
-                                        src_addr,
-                                        cancel_token.clone(),
-                                    );
-                                    conns.insert(src_addr, (conn_id, tx.clone()));
 
-                                    // 最初のパケットを送信
+                                    // 接続を登録（ロック順序を統一: conn_manager → udp_connections）
+                                    {
+                                        conn_manager.lock().await.add_connection(
+                                            conn_id,
+                                            Protocol::Udp,
+                                            src_addr,
+                                            cancel_token.clone(),
+                                        );
+                                        udp_connections.lock().await.insert(src_addr, (conn_id, tx.clone()));
+                                    }
+
+                                    // 最初のパケットを送信（ロック外で await）
                                     let _ = tx.send(packet).await;
 
                                     // UDP リレータスクを起動
@@ -596,6 +606,7 @@ async fn start_port_listener(
                                         {
                                             debug!("UDP relay ended for {}: {}", conn_id, e);
                                         }
+                                        // ロック順序を統一: conn_manager → udp_connections
                                         conn_manager_clone.lock().await.remove_connection(conn_id);
                                         udp_connections_clone.lock().await.remove(&src_addr);
                                     });
