@@ -210,7 +210,7 @@ async fn handle_client(
     // 接続マネージャ
     let conn_manager = Arc::new(Mutex::new(ConnectionManager::new()));
 
-    // PortRequest または LocalForwardRequest を待機
+    // RemoteForwardRequest または LocalForwardRequest を待機
     let msg = control_stream
         .recv_message()
         .await
@@ -218,13 +218,13 @@ async fn handle_client(
 
     match msg {
         // Remote Port Forwarding (RPF): サーバー側でリッスン
-        ControlMessage::PortRequest {
+        ControlMessage::RemoteForwardRequest {
             port,
             protocol,
             local_destination,
         } => {
             info!(
-                "PortRequest from {}: port={}, protocol={}, local_destination={}",
+                "RemoteForwardRequest from {}: port={}, protocol={}, local_destination={}",
                 remote_addr, port, protocol, local_destination
             );
 
@@ -279,9 +279,9 @@ async fn handle_client(
         }
         _ => {
             warn!("Unexpected message type from {}", remote_addr);
-            let response = ControlMessage::PortResponse {
+            let response = ControlMessage::RemoteForwardResponse {
                 status: ResponseStatus::InternalError,
-                message: "Expected PortRequest or LocalForwardRequest".to_string(),
+                message: "Expected RemoteForwardRequest or LocalForwardRequest".to_string(),
             };
             control_stream.send_message(&response).await?;
         }
@@ -328,7 +328,7 @@ async fn start_port_listener(
                         info!("TCP listener started on port {}", port);
 
                         // 成功レスポンスを送信
-                        let response = ControlMessage::PortResponse {
+                        let response = ControlMessage::RemoteForwardResponse {
                             status: ResponseStatus::Success,
                             message: format!("Listening on port {}", port),
                         };
@@ -337,7 +337,7 @@ async fn start_port_listener(
                         l
                     }
                     Err(e) => {
-                        let response = ControlMessage::PortResponse {
+                        let response = ControlMessage::RemoteForwardResponse {
                             status: ResponseStatus::InternalError,
                             message: e.to_string(),
                         };
@@ -354,7 +354,7 @@ async fn start_port_listener(
                         ResponseStatus::InternalError
                     };
 
-                    let response = ControlMessage::PortResponse {
+                    let response = ControlMessage::RemoteForwardResponse {
                         status,
                         message: e.to_string(),
                     };
@@ -395,15 +395,15 @@ async fn start_port_listener(
                                     continue;
                                 }
 
-                                // 3. NewConnection を送信（情報提供のみ、応答は待たない）
+                                // 3. RemoteNewConnection を送信（情報提供のみ、応答は待たない）
                                 //    クライアントは QUIC Stream の先頭 4 bytes から conn_id を読み取るため、
-                                //    NewConnection と Stream の到着順序に依存しない設計
-                                let new_conn_msg = ControlMessage::NewConnection {
+                                //    RemoteNewConnection と Stream の到着順序に依存しない設計
+                                let new_conn_msg = ControlMessage::RemoteNewConnection {
                                     connection_id: conn_id,
                                     protocol: Protocol::Tcp,
                                 };
                                 if let Err(e) = control_stream.send_message(&new_conn_msg).await {
-                                    error!("Failed to send NewConnection: {}", e);
+                                    error!("Failed to send RemoteNewConnection: {}", e);
                                     continue;
                                 }
 
@@ -502,7 +502,7 @@ async fn start_port_listener(
                     info!("UDP listener started on port {}", port);
 
                     // 成功レスポンスを送信
-                    let response = ControlMessage::PortResponse {
+                    let response = ControlMessage::RemoteForwardResponse {
                         status: ResponseStatus::Success,
                         message: format!("Listening on UDP port {}", port),
                     };
@@ -519,7 +519,7 @@ async fn start_port_listener(
                         ResponseStatus::InternalError
                     };
 
-                    let response = ControlMessage::PortResponse {
+                    let response = ControlMessage::RemoteForwardResponse {
                         status,
                         message: e.to_string(),
                     };
@@ -589,13 +589,13 @@ async fn start_port_listener(
                                         continue;
                                     }
 
-                                    // NewConnection を送信
-                                    let new_conn_msg = ControlMessage::NewConnection {
+                                    // RemoteNewConnection を送信
+                                    let new_conn_msg = ControlMessage::RemoteNewConnection {
                                         connection_id: conn_id,
                                         protocol: Protocol::Udp,
                                     };
                                     if let Err(e) = control_stream.send_message(&new_conn_msg).await {
-                                        error!("Failed to send NewConnection: {}", e);
+                                        error!("Failed to send RemoteNewConnection: {}", e);
                                         continue;
                                     }
 
