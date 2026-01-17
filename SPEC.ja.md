@@ -7,11 +7,21 @@
 
 ## ユースケース
 
+### Remote Port Forwarding (RPF) - リモートポートフォワーディング
+
 ```
-[外部クライアント] --> [サーバー:9022/tcp] --QUIC--> [クライアント:22/tcp]
+[外部クライアント] --> [サーバー:9022/tcp] --QUIC--> [クライアント] --> [ローカルサービス:22/tcp]
 ```
 
 例: NAT 配下にある SSH サーバーを、インターネット経由でアクセス可能にする。
+
+### Local Port Forwarding (LPF) - ローカルポートフォワーディング
+
+```
+[ローカルクライアント] --> [クライアント:9022/tcp] --QUIC--> [サーバー] --> [リモートサービス:22/tcp]
+```
+
+例: リモートネットワーク内の SSH サーバーに、ローカルポートを通じてアクセスする。
 
 ## コマンドライン仕様
 
@@ -58,8 +68,25 @@ quicport server --listen 0.0.0.0:9000 \
 
 ### クライアントモード
 
+クライアントは 2 つのモードをサポートしています:
+
+- **Remote Port Forwarding (RPF)**: `--remote-source` + `--local-destination`
+- **Local Port Forwarding (LPF)**: `--local-source` + `--remote-destination`
+
+#### RPF (Remote Port Forwarding)
+
+サーバー側でポートをリッスンし、クライアント側のローカルサービスに転送します。
+
 ```bash
-quicport client --server <server_address>:<port> --remote-source <port>[/protocol] --local-destination [addr:]<port>[/protocol] --privkey <private_key> --server-pubkey <server_public_key>
+quicport client --server <server_address>:<port> --remote-source <port>[/protocol] --local-destination [addr:]<port>[/protocol] [auth options]
+```
+
+#### LPF (Local Port Forwarding)
+
+クライアント側でポートをリッスンし、サーバー経由でリモートサービスに転送します。
+
+```bash
+quicport client --server <server_address>:<port> --local-source <port>[/protocol] --remote-destination [addr:]<port>[/protocol] [auth options]
 ```
 
 **オプション:**
@@ -67,8 +94,13 @@ quicport client --server <server_address>:<port> --remote-source <port>[/protoco
 | オプション | 必須 | 説明 |
 |-----------|------|------|
 | `--server`, `-s` | Yes | 接続先サーバーのアドレスとポート |
-| `--remote-source`, `-r` | Yes | サーバー側で開くポート（例: `9022`, `9022/tcp`）。プロトコル省略時は TCP |
-| `--local-destination`, `-l` | Yes | 転送先のアドレスとポート（例: `22`, `22/tcp`, `192.168.1.100:22`）。アドレス省略時は `127.0.0.1`、プロトコル省略時は TCP |
+| **RPF オプション** |||
+| `--remote-source`, `-r` | RPF 時 | サーバー側で開くポート（例: `9022`, `9022/tcp`）。`--local-source` と排他 |
+| `--local-destination`, `-l` | RPF 時 | 転送先のアドレスとポート（例: `22`, `22/tcp`, `192.168.1.100:22`）。`--remote-destination` と排他 |
+| **LPF オプション** |||
+| `--local-source`, `-L` | LPF 時 | クライアント側で開くポート（例: `9022`, `9022/tcp`）。`--remote-source` と排他 |
+| `--remote-destination`, `-R` | LPF 時 | サーバー経由での転送先（例: `22`, `22/tcp`, `192.168.1.100:22`）。`--local-destination` と排他 |
+| **認証オプション** |||
 | `--privkey` | Yes* | X25519 秘密鍵（Base64 形式）。環境変数 `QUICPORT_PRIVKEY` でも指定可 |
 | `--privkey-file` | Yes* | 秘密鍵を読み込むファイルパス。環境変数 `QUICPORT_PRIVKEY_FILE` でも指定可 |
 | `--server-pubkey` | Yes** | 期待するサーバーの公開鍵（Base64 形式、相互認証用）。環境変数 `QUICPORT_SERVER_PUBKEY` でも指定可 |
@@ -79,7 +111,7 @@ quicport client --server <server_address>:<port> --remote-source <port>[/protoco
 \* `--privkey` または `--privkey-file` のいずれかが必須（`--psk` を使用する場合を除く）
 \** X25519 認証（`--privkey` / `--privkey-file`）使用時は `--server-pubkey` または `--server-pubkey-file` が必須（MITM 攻撃防止のため）
 
-**--local-destination の形式:**
+**--local-destination / --remote-destination の形式:**
 
 | 形式 | 例 | 解釈 |
 |------|-----|------|
@@ -89,7 +121,7 @@ quicport client --server <server_address>:<port> --remote-source <port>[/protoco
 | `addr:port/protocol` | `192.168.1.100:22/tcp` | `192.168.1.100:22/tcp` |
 | `[ipv6]:port` | `[::1]:22` | `[::1]:22/tcp` |
 
-**例:**
+**例 (RPF - Remote Port Forwarding):**
 
 ```bash
 # 相互認証（クライアント秘密鍵 + サーバー公開鍵）
@@ -109,6 +141,28 @@ quicport client -s quicport.foobar.com:9000 \
 quicport client -s quicport.foobar.com:9000 -r 9022 -l 22 \
   --privkey-file ~/.quicport/client.key \
   --server-pubkey-file ~/.quicport/server.pub
+```
+
+**例 (LPF - Local Port Forwarding):**
+
+```bash
+# ローカルポートをリモートサービスに転送
+quicport client -s quicport.foobar.com:9000 \
+  --local-source 9022 \
+  --remote-destination 22 \
+  --psk "secret"
+
+# リモートネットワーク内の別のサーバーに転送
+quicport client -s quicport.foobar.com:9000 \
+  --local-source 9022 \
+  --remote-destination 192.168.1.100:22 \
+  --psk "secret"
+
+# UDP トンネリング（例: DNS）
+quicport client -s quicport.foobar.com:9000 \
+  --local-source 5353/udp \
+  --remote-destination 8.8.8.8:53/udp \
+  --psk "secret"
 ```
 
 ## アーキテクチャ
@@ -384,13 +438,20 @@ Client                          Server
 
 | Type | 名前 | 方向 | 説明 |
 |------|------|------|------|
+| **RPF (Remote Port Forwarding)** ||||
 | 0x01 | PortRequest | Client → Server | ポート開放リクエスト |
 | 0x02 | PortResponse | Server → Client | ポート開放レスポンス |
+| **共通** ||||
 | 0x03 | Heartbeat | 双方向 | 接続維持（※現在は QUIC keep-alive を使用、将来拡張用に予約） |
 | 0x04 | SessionClose | 双方向 | QUIC セッション終了 |
-| 0x10 | NewConnection | Server → Client | 新しい TCP/UDP 接続の通知 |
+| **LPF (Local Port Forwarding)** ||||
+| 0x05 | LocalForwardRequest | Client → Server | ローカルフォワードリクエスト |
+| 0x06 | LocalForwardResponse | Server → Client | ローカルフォワードレスポンス |
+| **接続管理** ||||
+| 0x10 | NewConnection | Server → Client | 新しい TCP/UDP 接続の通知 (RPF) |
 | 0x11 | (予約) | - | 将来の拡張用に予約 |
 | 0x12 | ConnectionClose | 双方向 | 個別接続の終了通知 |
+| 0x13 | LocalNewConnection | Client → Server | 新しいローカル接続の通知 (LPF) |
 
 #### PortRequest ペイロード
 
@@ -424,7 +485,43 @@ Status:
   0x03 = Internal error
 ```
 
-#### NewConnection ペイロード
+#### LocalForwardRequest ペイロード (0x05)
+
+```
++----------------+--------------------+------------------------+-------------------+
+| Protocol       | Remote Dest Length | Remote Destination     | Local Source      |
+| (1 byte)       | (2 bytes, BE)      | (variable, UTF-8)      | (remaining, UTF-8)|
++----------------+--------------------+------------------------+-------------------+
+
+Protocol:
+  0x01 = TCP
+  0x02 = UDP
+
+Remote Destination:
+  サーバー側の転送先アドレス
+  例: "192.168.1.100:22", "127.0.0.1:22"
+
+Local Source:
+  クライアント側のリッスンポート（サーバーのログ用メタデータ）
+  例: "9022/tcp"
+```
+
+#### LocalForwardResponse ペイロード (0x06)
+
+```
++----------------+-------------------+
+| Status         | Message (UTF-8)   |
+| (1 byte)       | (remaining bytes) |
++----------------+-------------------+
+
+Status:
+  0x00 = Success
+  0x01 = Port in use
+  0x02 = Permission denied
+  0x03 = Internal error
+```
+
+#### NewConnection ペイロード (0x10) - RPF
 
 ```
 +------------------+------------------+
@@ -437,12 +534,29 @@ Protocol:
   0x02 = UDP
 ```
 
-サーバーが新しい外部接続を受け付けた際にクライアントへ通知します。
+**RPF モード:** サーバーが新しい外部接続を受け付けた際にクライアントへ通知します。
 - **Connection ID:** 論理的な接続識別子（管理用）
 - クライアントは QUIC Stream の先頭 4 バイトから Connection ID を読み取ります
 
 > **注意:** Connection ID は QUIC Stream のヘッダー（先頭 4 バイト、big-endian）にも書き込まれます。
 > これにより、NewConnection メッセージと Stream の到着順序に依存せずに接続を識別できます。
+
+#### LocalNewConnection ペイロード (0x13) - LPF
+
+```
++------------------+------------------+
+| Connection ID    | Protocol         |
+| (4 bytes, BE)    | (1 byte)         |
++------------------+------------------+
+
+Protocol:
+  0x01 = TCP
+  0x02 = UDP
+```
+
+**LPF モード:** クライアントがローカルポートで新しい接続を受け付けた際にサーバーへ通知します。
+- **Connection ID:** 論理的な接続識別子（管理用）
+- クライアントは QUIC Stream を開き、先頭 4 バイトに Connection ID を書き込みます
 
 #### ConnectionClose ペイロード
 
@@ -524,7 +638,7 @@ UDP はコネクションレスなため、送信元アドレス (IP:port) で�
 
 ## シーケンス図
 
-### 接続確立
+### RPF (Remote Port Forwarding) 接続確立
 
 ```
 Client                          Server                      External Client
@@ -551,6 +665,38 @@ Client                          Server                      External Client
 > **注意:** サーバーは NewConnection 送信後、即座にデータ転送を開始します。
 > クライアントはローカル接続を確立してから Stream の読み取りを開始するため、QUIC フロー制御により
 > クライアントの準備が整うまでサーバーからの送信は自動的に抑制されます。
+
+### LPF (Local Port Forwarding) 接続確立
+
+```
+Local Client                    Client                          Server                      Remote Service
+      |                            |                               |                               |
+      |                            |------- QUIC Handshake ------->|                               |
+      |                            |    (with X25519 mutual auth)  |                               |
+      |                            |                               |                               |
+      |                            |--- LocalForwardRequest ------>|  remote_dest="192.168.1.100:22"
+      |                            |    (via Stream 0)             |                               |
+      |                            |                               |                               |
+      |                            |<-- LocalForwardResponse ------|  (via Stream 0)               |
+      |                            |                               |                               |
+      |                            |    Start TCP listener on :9022|                               |
+      |                            |                               |                               |
+      |---- TCP Connect (9022) --->|                               |                               |
+      |                            |                               |                               |
+      |                            |--- LocalNewConnection ------->|  conn_id=1, protocol=TCP      |
+      |                            |    (via Stream 0)             |                               |
+      |                            |                               |                               |
+      |                            |--- Open Stream 1 ------------>|  + conn_id ヘッダー            |
+      |                            |                               |                               |
+      |                            |                               |--- TCP Connect to :22 ------->|
+      |                            |                               |                               |
+      |<====== Data ======>========|======= Stream 1 (Data) ======>|<========= Data Relay ========>|
+      |                            |                               |                               |
+```
+
+> **LPF と RPF の主な違い:**
+> - **LPF:** クライアントがローカルでリッスンし、QUIC Stream を開く（クライアント → サーバー）
+> - **RPF:** サーバーがリモートでリッスンし、QUIC Stream を開く（サーバー → クライアント）
 
 ### TCP 接続のライフサイクル
 
