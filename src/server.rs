@@ -488,8 +488,8 @@ async fn start_port_listener(
                             Err(e) => {
                                 // クライアントが正常に切断した場合はエラーではなく INFO レベル
                                 let err_str = e.to_string();
-                                if err_str.contains("closed") || err_str.contains("reset") {
-                                    info!("Client disconnected, releasing port {}", port);
+                                if err_str.contains("closed") || err_str.contains("reset") || err_str.contains("lost") {
+                                    info!("Client disconnected, releasing port {}: {}", port, e);
                                 } else {
                                     error!("Control stream error: {}", e);
                                 }
@@ -686,8 +686,8 @@ async fn start_port_listener(
                             }
                             Err(e) => {
                                 let err_str = e.to_string();
-                                if err_str.contains("closed") || err_str.contains("reset") {
-                                    info!("Client disconnected, releasing UDP port {}", port);
+                                if err_str.contains("closed") || err_str.contains("reset") || err_str.contains("lost") {
+                                    info!("Client disconnected, releasing UDP port {}: {}", port, e);
                                 } else {
                                     error!("Control stream error: {}", e);
                                 }
@@ -1124,8 +1124,8 @@ async fn handle_local_port_forwarding(
                     }
                     Err(e) => {
                         let err_str = e.to_string();
-                        if err_str.contains("closed") || err_str.contains("reset") {
-                            info!("Client disconnected (LPF)");
+                        if err_str.contains("closed") || err_str.contains("reset") || err_str.contains("lost") {
+                            info!("Client disconnected (LPF): {}", e);
                         } else {
                             error!("Control stream error: {}", e);
                         }
