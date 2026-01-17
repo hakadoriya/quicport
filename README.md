@@ -29,10 +29,7 @@ Download the latest binary for your platform from [GitHub Releases](https://gith
 
 ```bash
 # Example for *nix
-VERSION=v0.0.1
-curl -LRSs -o /tmp/quicport.zip https://github.com/hakadoriya/quicport/releases/download/${VERSION}/quicport_$(uname -s)_$(uname -m).zip
-unzip /tmp/quicport.zip quicport
-sudo mv quicport /usr/local/bin/
+sh -cx 'VERSION=v0.0.1 && curl -LRSs https://github.com/hakadoriya/quicport/releases/download/${VERSION}/quicport_$(uname -s)_$(uname -m).zip -o /tmp/quicport.zip && unzip -d /tmp -o /tmp/quicport.zip quicport && sudo mv /tmp/quicport /usr/local/bin/quicport'
 ```
 
 Available binaries follow the naming convention: `quicport_<OS>_<arch>.zip`
