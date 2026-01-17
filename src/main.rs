@@ -59,18 +59,50 @@ enum Commands {
     },
 
     /// Run as client (connect to server and forward ports)
+    ///
+    /// Supports two modes:
+    /// - Remote Port Forwarding (RPF): --remote-source + --local-destination
+    ///   Server listens on remote-source, forwards to client's local-destination
+    /// - Local Port Forwarding (LPF): --local-source + --remote-destination
+    ///   Client listens on local-source, forwards to server's remote-destination
     Client {
         /// Server address to connect to
         #[arg(short = 's', long)]
         server: String,
 
-        /// Remote source port to open on server (e.g., "9022/tcp")
-        #[arg(short = 'r', long)]
-        remote_source: String,
+        // =========================================================================
+        // Remote Port Forwarding (RPF) オプション
+        // サーバー側でポートをリッスンし、クライアント側のローカルサービスに転送
+        // =========================================================================
 
-        /// Local destination to forward to (e.g., "22/tcp" or "192.168.1.100:22/tcp")
-        #[arg(short = 'l', long)]
-        local_destination: String,
+        /// [RPF] Remote source port to open on server (e.g., "9022/tcp")
+        /// Mutually exclusive with --local-source
+        #[arg(short = 'r', long, conflicts_with = "local_source")]
+        remote_source: Option<String>,
+
+        /// [RPF] Local destination to forward to (e.g., "22/tcp" or "192.168.1.100:22/tcp")
+        /// Mutually exclusive with --remote-destination
+        #[arg(short = 'l', long, conflicts_with = "remote_destination")]
+        local_destination: Option<String>,
+
+        // =========================================================================
+        // Local Port Forwarding (LPF) オプション
+        // クライアント側でポートをリッスンし、サーバー側のリモートサービスに転送
+        // =========================================================================
+
+        /// [LPF] Local source port to listen on client (e.g., "9022/tcp")
+        /// Mutually exclusive with --remote-source
+        #[arg(short = 'L', long, conflicts_with = "remote_source")]
+        local_source: Option<String>,
+
+        /// [LPF] Remote destination to forward to via server (e.g., "22/tcp" or "192.168.1.100:22/tcp")
+        /// Mutually exclusive with --local-destination
+        #[arg(short = 'R', long, conflicts_with = "local_destination")]
+        remote_destination: Option<String>,
+
+        // =========================================================================
+        // 認証オプション
+        // =========================================================================
 
         /// Private key in Base64 format
         #[arg(long, env = "QUICPORT_PRIVKEY")]
@@ -289,6 +321,8 @@ async fn main() -> Result<()> {
             server,
             remote_source,
             local_destination,
+            local_source,
+            remote_destination,
             privkey,
             privkey_file,
             server_pubkey,
@@ -303,18 +337,34 @@ async fn main() -> Result<()> {
                 server_pubkey_file,
                 psk,
             )?;
-            info!(
-                "Connecting to {} (remote: {}, local: {})",
-                server, remote_source, local_destination
-            );
-            client::run(
-                &server,
-                &remote_source,
-                &local_destination,
-                auth_config,
-                insecure,
-            )
-            .await?;
+
+            // フォワーディングモードを判定
+            match (remote_source, local_destination, local_source, remote_destination) {
+                // Remote Port Forwarding (RPF): --remote-source + --local-destination
+                (Some(rs), Some(ld), None, None) => {
+                    info!(
+                        "Connecting to {} (RPF: remote={}, local={})",
+                        server, rs, ld
+                    );
+                    client::run(&server, &rs, &ld, auth_config, insecure).await?;
+                }
+                // Local Port Forwarding (LPF): --local-source + --remote-destination
+                (None, None, Some(ls), Some(rd)) => {
+                    info!(
+                        "Connecting to {} (LPF: local={}, remote={})",
+                        server, ls, rd
+                    );
+                    client::run_local_forward(&server, &ls, &rd, auth_config, insecure).await?;
+                }
+                // 不正な組み合わせ
+                _ => {
+                    anyhow::bail!(
+                        "Invalid port forwarding options. Use one of:\n\
+                         - Remote Port Forwarding: --remote-source <port> --local-destination <addr:port>\n\
+                         - Local Port Forwarding: --local-source <port> --remote-destination <addr:port>"
+                    );
+                }
+            }
         }
     }
 
