@@ -439,8 +439,8 @@ Client                          Server
 | Type | 名前 | 方向 | 説明 |
 |------|------|------|------|
 | **RPF (Remote Port Forwarding)** ||||
-| 0x01 | PortRequest | Client → Server | ポート開放リクエスト |
-| 0x02 | PortResponse | Server → Client | ポート開放レスポンス |
+| 0x01 | RemoteForwardRequest | Client → Server | ポート開放リクエスト |
+| 0x02 | RemoteForwardResponse | Server → Client | ポート開放レスポンス |
 | **共通** ||||
 | 0x03 | Heartbeat | 双方向 | 接続維持（※現在は QUIC keep-alive を使用、将来拡張用に予約） |
 | 0x04 | SessionClose | 双方向 | QUIC セッション終了 |
@@ -448,12 +448,12 @@ Client                          Server
 | 0x05 | LocalForwardRequest | Client → Server | ローカルフォワードリクエスト |
 | 0x06 | LocalForwardResponse | Server → Client | ローカルフォワードレスポンス |
 | **接続管理** ||||
-| 0x10 | NewConnection | Server → Client | 新しい TCP/UDP 接続の通知 (RPF) |
+| 0x10 | RemoteNewConnection | Server → Client | 新しい TCP/UDP 接続の通知 (RPF) |
 | 0x11 | (予約) | - | 将来の拡張用に予約 |
 | 0x12 | ConnectionClose | 双方向 | 個別接続の終了通知 |
 | 0x13 | LocalNewConnection | Client → Server | 新しいローカル接続の通知 (LPF) |
 
-#### PortRequest ペイロード
+#### RemoteForwardRequest ペイロード
 
 ```
 +----------------+----------------+------------------------+
@@ -470,7 +470,7 @@ Local Destination:
   例: "22", "192.168.1.100:22/tcp"
 ```
 
-#### PortResponse ペイロード
+#### RemoteForwardResponse ペイロード
 
 ```
 +----------------+-------------------+
@@ -521,7 +521,7 @@ Status:
   0x03 = Internal error
 ```
 
-#### NewConnection ペイロード (0x10) - RPF
+#### RemoteNewConnection ペイロード (0x10) - RPF
 
 ```
 +------------------+------------------+
@@ -539,7 +539,7 @@ Protocol:
 - クライアントは QUIC Stream の先頭 4 バイトから Connection ID を読み取ります
 
 > **注意:** Connection ID は QUIC Stream のヘッダー（先頭 4 バイト、big-endian）にも書き込まれます。
-> これにより、NewConnection メッセージと Stream の到着順序に依存せずに接続を識別できます。
+> これにより、RemoteNewConnection メッセージと Stream の到着順序に依存せずに接続を識別できます。
 
 #### LocalNewConnection ペイロード (0x13) - LPF
 
@@ -611,7 +611,7 @@ Stream は双方向のバイトストリームなので、メッセージ境界�
 #### TCP トンネリングの動作
 
 1. サーバーが外部 TCP 接続を受け付ける
-2. クライアントへ NewConnection を通知（Stream 0 経由）
+2. クライアントへ RemoteNewConnection を通知（Stream 0 経由）
 3. サーバーが新しい QUIC Stream を開く
 4. クライアントはローカル TCP 接続を確立
 5. 双方向でデータを中継（Length フレーミングなし、バイトストリームをそのまま転送）
@@ -623,7 +623,7 @@ UDP はコネクションレスなため、送信元アドレス (IP:port) で�
 1. サーバーが UDP パケットを受信
 2. 送信元アドレス+ポートで「仮想接続」を識別
 3. 新規の送信元の場合:
-   - NewConnection を通知（Stream 0 経由）
+   - RemoteNewConnection を通知（Stream 0 経由）
    - 新しい QUIC Stream を開く
 4. Length-prefixed framing でパケット境界を保持して送信:
    ```
@@ -646,13 +646,13 @@ Client                          Server                      External Client
    |------- QUIC Handshake ------->|                               |
    |    (with X25519 mutual auth)  |                               |
    |                               |                               |
-   |--- PortRequest (9022/tcp) --->|  (via Stream 0)               |
+   |--- RemoteForwardRequest (9022/tcp) --->|  (via Stream 0)               |
    |                               |                               |
-   |<-- PortResponse (Success) ----|  (via Stream 0)               |
+   |<-- RemoteForwardResponse (Success) ----|  (via Stream 0)               |
    |                               |                               |
    |                               |<----- TCP Connect (9022) -----|
    |                               |                               |
-   |<-- NewConnection (Stream 0) --|  conn_id=1, protocol=TCP      |
+   |<-- RemoteNewConnection (Stream 0) --|  conn_id=1, protocol=TCP      |
    |                               |                               |
    |<-- Open Stream 1 -------------|  データ転送用 + conn_id ヘッダー |
    |                               |                               |
@@ -662,7 +662,7 @@ Client                          Server                      External Client
    |                               |                               |
 ```
 
-> **注意:** サーバーは NewConnection 送信後、即座にデータ転送を開始します。
+> **注意:** サーバーは RemoteNewConnection 送信後、即座にデータ転送を開始します。
 > クライアントはローカル接続を確立してから Stream の読み取りを開始するため、QUIC フロー制御により
 > クライアントの準備が整うまでサーバーからの送信は自動的に抑制されます。
 
@@ -707,7 +707,7 @@ External Client                 Server                          quicport Client
       |<--- TCP SYN-ACK -----------|                                   |
       |---- TCP ACK -------------->|                                   |
       |                            |                                   |
-      |                            |-- NewConnection (Stream 0) ------>|
+      |                            |-- RemoteNewConnection (Stream 0) ------>|
       |                            |   (conn_id=N, protocol=TCP)       |
       |                            |                                   |
       |                            |-- Open Stream N (conn_id header)->|
@@ -725,7 +725,7 @@ External Client                 Server                          quicport Client
       |                            |                                   |
 ```
 
-> **注意:** サーバーは NewConnection 送信後、即座に Stream を開いてデータ転送を開始します。
+> **注意:** サーバーは RemoteNewConnection 送信後、即座に Stream を開いてデータ転送を開始します。
 > クライアントがローカル接続を確立するまで Stream の読み取りを行わないため、
 > QUIC フロー制御により送信側（サーバー）も自動的にブロックされます。
 > これにより、データロスなく同期が取れます。
@@ -738,7 +738,7 @@ External Client                 Server                          quicport Client
       |---- UDP Packet ----------->|                                   |
       |    (src=1.2.3.4:5678)      |                                   |
       |                            |                                   |
-      |                            |-- NewConnection (Stream 0) ------>|
+      |                            |-- RemoteNewConnection (Stream 0) ------>|
       |                            |   (conn_id=N, protocol=UDP)       |
       |                            |                                   |
       |                            |-- Open Stream N (conn_id header)->|

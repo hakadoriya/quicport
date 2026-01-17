@@ -277,8 +277,8 @@ pub async fn run(
     // 認証完了後、ControlStream でラップしてメッセージフレーミングを有効化
     let mut control_stream = ControlStream::new(control_send, control_recv);
 
-    // PortRequest を送信
-    let port_request = ControlMessage::PortRequest {
+    // RemoteForwardRequest を送信
+    let port_request = ControlMessage::RemoteForwardRequest {
         port: remote_port_num,
         protocol: remote_protocol,
         local_destination: local_destination.to_string(),
@@ -286,25 +286,25 @@ pub async fn run(
     control_stream
         .send_message(&port_request)
         .await
-        .context("Failed to send PortRequest")?;
+        .context("Failed to send RemoteForwardRequest")?;
 
     debug!(
-        "PortRequest sent: port={}, protocol={}",
+        "RemoteForwardRequest sent: port={}, protocol={}",
         remote_port_num, remote_protocol
     );
 
-    // PortResponse を待機（正しいフレーミングで読み取り）
+    // RemoteForwardResponse を待機（正しいフレーミングで読み取り）
     let response = control_stream
         .recv_message()
         .await
-        .context("Failed to read PortResponse")?;
+        .context("Failed to read RemoteForwardResponse")?;
 
     match response {
-        ControlMessage::PortResponse { status, message } => {
+        ControlMessage::RemoteForwardResponse { status, message } => {
             if status != ResponseStatus::Success {
-                anyhow::bail!("Server rejected PortRequest: {:?} - {}", status, message);
+                anyhow::bail!("Server rejected RemoteForwardRequest: {:?} - {}", status, message);
             }
-            info!("Server accepted PortRequest: {}", message);
+            info!("Server accepted RemoteForwardRequest: {}", message);
         }
         _ => {
             anyhow::bail!("Unexpected response from server");
@@ -320,7 +320,7 @@ pub async fn run(
         remote_port_num, remote_protocol, local_addr
     );
 
-    // NewConnection を待機してデータ転送を処理
+    // RemoteNewConnection を待機してデータ転送を処理
     handle_incoming_connections(
         connection,
         control_stream,
@@ -362,10 +362,10 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
-/// 受信した NewConnection を処理
+/// 受信した RemoteNewConnection を処理
 ///
 /// QUIC ストリームの先頭 4 bytes に conn_id が書き込まれているため、
-/// それを読み取って接続を識別する。NewConnection メッセージは情報提供のみ。
+/// それを読み取って接続を識別する。RemoteNewConnection メッセージは情報提供のみ。
 async fn handle_incoming_connections(
     quic_conn: Connection,
     mut control_stream: ControlStream,
@@ -419,7 +419,7 @@ async fn handle_incoming_connections(
                                 debug!("Read conn_id from stream: {}", conn_id);
 
                                 // 接続を処理
-                                process_new_connection(
+                                process_remote_new_connection(
                                     conn_id,
                                     protocol,
                                     send,
@@ -444,16 +444,16 @@ async fn handle_incoming_connections(
             }
 
             // サーバーからのメッセージを待機（正しいフレーミング）
-            // NewConnection は情報提供のみ（conn_id はストリームから取得済み）
+            // RemoteNewConnection は情報提供のみ（conn_id はストリームから取得済み）
             result = control_stream.recv_message() => {
                 match result {
-                    Ok(ControlMessage::NewConnection {
+                    Ok(ControlMessage::RemoteNewConnection {
                         connection_id,
                         protocol: conn_protocol,
                     }) => {
-                        // NewConnection は情報提供のみ（実際の conn_id はストリームから取得済み）
+                        // RemoteNewConnection は情報提供のみ（実際の conn_id はストリームから取得済み）
                         debug!(
-                            "NewConnection notification: conn_id={}, protocol={}",
+                            "RemoteNewConnection notification: conn_id={}, protocol={}",
                             connection_id, conn_protocol
                         );
                     }
@@ -480,12 +480,12 @@ async fn handle_incoming_connections(
     Ok(())
 }
 
-/// NewConnection を処理してデータ転送を開始
+/// RemoteNewConnection を処理してデータ転送を開始
 ///
 /// conn_id はストリームから読み取り済み。
 /// ローカルサービスへの接続を確立してからデータ転送を開始する。
 /// 接続失敗時は ConnectionClose を送信して Stream を閉じる。
-async fn process_new_connection(
+async fn process_remote_new_connection(
     connection_id: u32,
     conn_protocol: Protocol,
     quic_send: SendStream,
