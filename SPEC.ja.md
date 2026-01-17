@@ -23,6 +23,14 @@
 
 例: リモートネットワーク内の SSH サーバーに、ローカルポートを通じてアクセスする。
 
+### SSH ProxyCommand モード
+
+```
+[SSH Client] <-> stdin/stdout <-> [ssh-proxy] <-> QUIC Tunnel <-> [Server] <-> [Remote SSH (port 22)]
+```
+
+例: SSH の ProxyCommand として使用し、QUIC トンネル経由で SSH 接続を行う。
+
 ## コマンドライン仕様
 
 ### 共通オプション
@@ -185,6 +193,56 @@ quicport client -s quicport.foobar.com:9000 \
   --remote-destination 8.8.8.8:53/udp \
   --psk "secret"
 ```
+
+### SSH ProxyCommand モード (ssh-proxy)
+
+SSH の ProxyCommand として使用し、stdin/stdout を QUIC トンネル経由でリモートサービスに接続します。
+
+```bash
+quicport ssh-proxy --server <server_address>:<port> --remote-destination [addr:]<port> [auth options]
+```
+
+**オプション:**
+
+| オプション | 必須 | 説明 |
+|-----------|------|------|
+| `--server`, `-s` | Yes | 接続先サーバーのアドレスとポート |
+| `--remote-destination`, `-R` | Yes | リモート転送先（例: `22`, `192.168.1.100:22`） |
+| **認証オプション** |||
+| `--privkey` | Yes* | X25519 秘密鍵（Base64 形式）。環境変数 `QUICPORT_PRIVKEY` でも指定可 |
+| `--privkey-file` | Yes* | 秘密鍵を読み込むファイルパス。環境変数 `QUICPORT_PRIVKEY_FILE` でも指定可 |
+| `--server-pubkey` | Yes** | 期待するサーバーの公開鍵（Base64 形式）。環境変数 `QUICPORT_SERVER_PUBKEY` でも指定可 |
+| `--server-pubkey-file` | Yes** | サーバーの公開鍵ファイルパス。環境変数 `QUICPORT_SERVER_PUBKEY_FILE` でも指定可 |
+| `--psk` | No | 事前共有キー。環境変数 `QUICPORT_PSK` でも指定可 |
+| `--insecure` | No | サーバー証明書検証をスキップ（テスト用、本番環境では非推奨） |
+
+\* `--privkey` または `--privkey-file` のいずれかが必須（`--psk` を使用する場合を除く）
+\** X25519 認証使用時は `--server-pubkey` または `--server-pubkey-file` が必須
+
+**例:**
+
+```bash
+# 基本的な使い方
+ssh -o ProxyCommand='quicport ssh-proxy --server example.com:39000 --psk secret --remote-destination 22' ubuntu@example.com
+
+# SSH の %h と %p を使用
+ssh -o ProxyCommand='quicport ssh-proxy --server %h:39000 --psk secret --remote-destination %p' ubuntu@example.com
+
+# X25519 認証
+ssh -o ProxyCommand='quicport ssh-proxy --server %h:39000 --privkey KEY --server-pubkey PUBKEY --remote-destination %p' ubuntu@example.com
+
+# ~/.ssh/config に設定
+Host myserver
+    HostName example.com
+    User ubuntu
+    ProxyCommand quicport ssh-proxy --server %h:39000 --psk secret --remote-destination %p
+```
+
+**注意事項:**
+
+- **ログ出力は stderr**: stdout は SSH プロトコルデータ専用のため、ログは stderr に出力されます
+- **非対話モード**: TOFU の未知ホスト確認は行えません。事前に `quicport client` で known_hosts に登録するか、`--insecure` を使用してください
+- **プロトコル**: 内部的には LPF (Local Port Forwarding) プロトコルを使用します
 
 ## アーキテクチャ
 
@@ -841,7 +899,8 @@ IPv6 アドレスを正しく扱うための設計:
 
 ### ログ出力
 
-- **出力先**: stdout（stderr ではない）
+- **出力先**: 通常は stdout、ssh-proxy モードでは stderr
+  - ssh-proxy では stdout が SSH プロトコルデータ専用のため stderr を使用
 - **理由**: systemd などのプロセス管理ツールとの連携、ログ集約ツールでの扱いやすさ
 - **フォーマット**: `--log-format` オプションで `console`（人間向け）または `json`（構造化ログ）を選択可能
 - **ログレベル**: 環境変数 `RUST_LOG` で制御（デフォルト: `info`）
