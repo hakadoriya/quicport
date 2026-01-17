@@ -83,22 +83,27 @@ impl std::str::FromStr for Protocol {
 }
 
 /// 制御メッセージのタイプ
+///
+/// 番号体系:
+/// - 0x0X: Local Port Forwarding (LPF)
+/// - 0x2X: Remote Port Forwarding (RPF)
+/// - 0x4X: Session Control
+/// - 0x6X: Connection Control
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MessageType {
-    // Remote Port Forwarding (RPF) 用メッセージ
-    RemoteForwardRequest = 0x01,
-    RemoteForwardResponse = 0x02,
-    Heartbeat = 0x03,
-    SessionClose = 0x04,
     // Local Port Forwarding (LPF) 用メッセージ
-    LocalForwardRequest = 0x05,
-    LocalForwardResponse = 0x06,
-    // 接続管理メッセージ
-    RemoteNewConnection = 0x10,
-    // 0x11 は未使用（将来の拡張用に予約）
-    ConnectionClose = 0x12,
-    LocalNewConnection = 0x13,
+    LocalForwardRequest = 0x01,
+    LocalForwardResponse = 0x02,
+    LocalNewConnection = 0x03,
+    // Remote Port Forwarding (RPF) 用メッセージ
+    RemoteForwardRequest = 0x21,
+    RemoteForwardResponse = 0x22,
+    RemoteNewConnection = 0x23,
+    // セッション制御メッセージ
+    SessionClose = 0x41,
+    // 接続制御メッセージ
+    ConnectionClose = 0x61,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -106,15 +111,18 @@ impl TryFrom<u8> for MessageType {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0x01 => Ok(MessageType::RemoteForwardRequest),
-            0x02 => Ok(MessageType::RemoteForwardResponse),
-            0x03 => Ok(MessageType::Heartbeat),
-            0x04 => Ok(MessageType::SessionClose),
-            0x05 => Ok(MessageType::LocalForwardRequest),
-            0x06 => Ok(MessageType::LocalForwardResponse),
-            0x10 => Ok(MessageType::RemoteNewConnection),
-            0x12 => Ok(MessageType::ConnectionClose),
-            0x13 => Ok(MessageType::LocalNewConnection),
+            // LPF (0x0X)
+            0x01 => Ok(MessageType::LocalForwardRequest),
+            0x02 => Ok(MessageType::LocalForwardResponse),
+            0x03 => Ok(MessageType::LocalNewConnection),
+            // RPF (0x2X)
+            0x21 => Ok(MessageType::RemoteForwardRequest),
+            0x22 => Ok(MessageType::RemoteForwardResponse),
+            0x23 => Ok(MessageType::RemoteNewConnection),
+            // Session Control (0x4X)
+            0x41 => Ok(MessageType::SessionClose),
+            // Connection Control (0x6X)
+            0x61 => Ok(MessageType::ConnectionClose),
             _ => Err(ProtocolError::InvalidMessageType(value)),
         }
     }
@@ -216,11 +224,8 @@ pub enum ControlMessage {
     },
 
     // =========================================================================
-    // 共通メッセージ
+    // セッション制御メッセージ
     // =========================================================================
-
-    /// ハートビート (双方向)
-    Heartbeat,
 
     /// セッション終了 (双方向)
     SessionClose,
@@ -275,10 +280,6 @@ impl ControlMessage {
                 buf.put_u16(1 + msg_bytes.len() as u16);
                 buf.put_u8(*status as u8);
                 buf.put_slice(msg_bytes);
-            }
-            ControlMessage::Heartbeat => {
-                buf.put_u8(MessageType::Heartbeat as u8);
-                buf.put_u16(0);
             }
             ControlMessage::SessionClose => {
                 buf.put_u8(MessageType::SessionClose as u8);
@@ -375,7 +376,6 @@ impl ControlMessage {
                 let message = String::from_utf8_lossy(&buf[..payload_len - 1]).to_string();
                 Ok(ControlMessage::RemoteForwardResponse { status, message })
             }
-            MessageType::Heartbeat => Ok(ControlMessage::Heartbeat),
             MessageType::SessionClose => Ok(ControlMessage::SessionClose),
             MessageType::RemoteNewConnection => {
                 if payload_len < 5 {
@@ -714,46 +714,45 @@ mod tests {
 
     #[test]
     fn test_message_type_try_from() {
-        // RPF メッセージ
+        // LPF メッセージ (0x0X)
         assert_eq!(
             MessageType::try_from(0x01).unwrap(),
-            MessageType::RemoteForwardRequest
-        );
-        assert_eq!(
-            MessageType::try_from(0x02).unwrap(),
-            MessageType::RemoteForwardResponse
-        );
-        assert_eq!(MessageType::try_from(0x03).unwrap(), MessageType::Heartbeat);
-        assert_eq!(
-            MessageType::try_from(0x04).unwrap(),
-            MessageType::SessionClose
-        );
-        // LPF メッセージ
-        assert_eq!(
-            MessageType::try_from(0x05).unwrap(),
             MessageType::LocalForwardRequest
         );
         assert_eq!(
-            MessageType::try_from(0x06).unwrap(),
+            MessageType::try_from(0x02).unwrap(),
             MessageType::LocalForwardResponse
         );
-        // 接続管理メッセージ
         assert_eq!(
-            MessageType::try_from(0x10).unwrap(),
+            MessageType::try_from(0x03).unwrap(),
+            MessageType::LocalNewConnection
+        );
+        // RPF メッセージ (0x2X)
+        assert_eq!(
+            MessageType::try_from(0x21).unwrap(),
+            MessageType::RemoteForwardRequest
+        );
+        assert_eq!(
+            MessageType::try_from(0x22).unwrap(),
+            MessageType::RemoteForwardResponse
+        );
+        assert_eq!(
+            MessageType::try_from(0x23).unwrap(),
             MessageType::RemoteNewConnection
         );
-        // 0x11 は未使用（将来の拡張用に予約）
-        assert!(MessageType::try_from(0x11).is_err());
+        // セッション制御メッセージ (0x4X)
         assert_eq!(
-            MessageType::try_from(0x12).unwrap(),
-            MessageType::ConnectionClose
+            MessageType::try_from(0x41).unwrap(),
+            MessageType::SessionClose
         );
+        // 接続制御メッセージ (0x6X)
         assert_eq!(
-            MessageType::try_from(0x13).unwrap(),
-            MessageType::LocalNewConnection
+            MessageType::try_from(0x61).unwrap(),
+            MessageType::ConnectionClose
         );
         // 無効な値
         assert!(MessageType::try_from(0x00).is_err());
+        assert!(MessageType::try_from(0x10).is_err());
         assert!(MessageType::try_from(0xFF).is_err());
     }
 
@@ -822,15 +821,6 @@ mod tests {
     }
 
     #[test]
-    fn test_heartbeat_encode_decode() {
-        let msg = ControlMessage::Heartbeat;
-        let encoded = msg.encode();
-        let decoded = ControlMessage::decode(&encoded).unwrap();
-
-        assert!(matches!(decoded, ControlMessage::Heartbeat));
-    }
-
-    #[test]
     fn test_session_close_encode_decode() {
         let msg = ControlMessage::SessionClose;
         let encoded = msg.encode();
@@ -889,13 +879,13 @@ mod tests {
     fn test_decode_buffer_too_short() {
         // ヘッダーより短い
         assert!(matches!(
-            ControlMessage::decode(&[0x01, 0x00]),
+            ControlMessage::decode(&[0x21, 0x00]),
             Err(ProtocolError::BufferTooShort)
         ));
 
         // ペイロードが不足
         assert!(matches!(
-            ControlMessage::decode(&[0x01, 0x00, 0x03, 0x00]), // RemoteForwardRequest だが 3 バイト必要で 1 バイトしかない
+            ControlMessage::decode(&[0x21, 0x00, 0x03, 0x00]), // RemoteForwardRequest だが 3 バイト必要で 1 バイトしかない
             Err(ProtocolError::BufferTooShort)
         ));
     }
@@ -911,7 +901,7 @@ mod tests {
     #[test]
     fn test_decode_invalid_protocol() {
         // RemoteForwardRequest with invalid protocol
-        let mut buf = vec![0x01, 0x00, 0x03]; // RemoteForwardRequest header
+        let mut buf = vec![0x21, 0x00, 0x03]; // RemoteForwardRequest header
         buf.extend_from_slice(&9022u16.to_be_bytes()); // port
         buf.push(0xFF); // invalid protocol
 
