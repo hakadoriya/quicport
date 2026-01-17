@@ -333,10 +333,11 @@ pub async fn run(
     Ok(())
 }
 
-/// シャットダウンシグナル (SIGINT/SIGTERM) を待機
+/// シャットダウンシグナル Future を作成
 ///
-/// Unix では SIGINT と SIGTERM の両方を、Windows では Ctrl+C のみを待機
-async fn wait_for_shutdown_signal() {
+/// ループ外で一度だけ呼び出し、tokio::pin! でピン留めして使い回す。
+/// Unix では SIGINT と SIGTERM の両方を、Windows では Ctrl+C のみを待機。
+async fn create_shutdown_signal() {
     #[cfg(unix)]
     {
         let mut sigint = signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
@@ -375,12 +376,17 @@ async fn handle_incoming_connections(
 ) -> Result<()> {
     let local_addr = local_addr.to_string();
 
+    // シグナルハンドラをループ外で一度だけ作成
+    let shutdown_signal = create_shutdown_signal();
+    tokio::pin!(shutdown_signal);
+
     loop {
         debug!("Waiting for events...");
 
         tokio::select! {
             // SIGINT または SIGTERM を受信
-            _ = wait_for_shutdown_signal() => {
+            // ピン留めした Future を参照で使用
+            _ = &mut shutdown_signal => {
                 info!("Sending SessionClose to server...");
 
                 // SessionClose メッセージを送信
@@ -978,11 +984,16 @@ async fn handle_local_connections(
                 }
             };
 
+            // シグナルハンドラをループ外で一度だけ作成
+            let shutdown_signal = create_shutdown_signal();
+            tokio::pin!(shutdown_signal);
+
             // TCP 接続を受け付けるループ
             loop {
                 tokio::select! {
                     // SIGINT または SIGTERM を受信
-                    _ = wait_for_shutdown_signal() => {
+                    // ピン留めした Future を参照で使用
+                    _ = &mut shutdown_signal => {
                         info!("Sending SessionClose to server...");
 
                         let close_msg = ControlMessage::SessionClose;
@@ -1107,10 +1118,15 @@ async fn handle_local_connections(
 
             let mut recv_buf = vec![0u8; 65535];
 
+            // シグナルハンドラをループ外で一度だけ作成
+            let shutdown_signal = create_shutdown_signal();
+            tokio::pin!(shutdown_signal);
+
             loop {
                 tokio::select! {
                     // シャットダウンシグナル
-                    _ = wait_for_shutdown_signal() => {
+                    // ピン留めした Future を参照で使用
+                    _ = &mut shutdown_signal => {
                         info!("Sending SessionClose to server...");
 
                         let close_msg = ControlMessage::SessionClose;
