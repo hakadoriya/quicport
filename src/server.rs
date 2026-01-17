@@ -210,13 +210,14 @@ async fn handle_client(
     // 接続マネージャ
     let conn_manager = Arc::new(Mutex::new(ConnectionManager::new()));
 
-    // PortRequest を待機（正しいフレーミングで読み取り）
+    // PortRequest または LocalForwardRequest を待機
     let msg = control_stream
         .recv_message()
         .await
-        .context("Failed to read PortRequest")?;
+        .context("Failed to read initial request")?;
 
     match msg {
+        // Remote Port Forwarding (RPF): サーバー側でリッスン
         ControlMessage::PortRequest {
             port,
             protocol,
@@ -246,11 +247,41 @@ async fn handle_client(
                 }
             }
         }
+        // Local Port Forwarding (LPF): クライアント側でリッスン、サーバーが転送
+        ControlMessage::LocalForwardRequest {
+            remote_destination,
+            protocol,
+            local_source,
+        } => {
+            info!(
+                "LocalForwardRequest from {}: remote_destination={}, protocol={}, local_source={}",
+                remote_addr, remote_destination, protocol, local_source
+            );
+
+            // LPF モードを開始
+            match handle_local_port_forwarding(
+                connection.clone(),
+                control_stream,
+                &remote_destination,
+                protocol,
+                conn_manager,
+                statistics.clone(),
+            )
+            .await
+            {
+                Ok(_) => {
+                    info!("Local port forwarding closed for {}", remote_destination);
+                }
+                Err(e) => {
+                    error!("Local port forwarding error: {}", e);
+                }
+            }
+        }
         _ => {
             warn!("Unexpected message type from {}", remote_addr);
             let response = ControlMessage::PortResponse {
                 status: ResponseStatus::InternalError,
-                message: "Expected PortRequest".to_string(),
+                message: "Expected PortRequest or LocalForwardRequest".to_string(),
             };
             control_stream.send_message(&response).await?;
         }
@@ -883,5 +914,337 @@ async fn relay_udp_stream(
     }
 
     debug!("[{}] UDP relay completed", conn_id);
+    Ok(())
+}
+
+// =============================================================================
+// Local Port Forwarding (LPF) 実装
+// クライアント側でリッスンし、サーバー側のリモートサービスに転送
+// =============================================================================
+
+/// LPF モードを処理
+///
+/// クライアントからの LocalForwardRequest を受け付け、
+/// クライアントが開いた QUIC ストリームを accept してリモートサービスに転送
+async fn handle_local_port_forwarding(
+    quic_conn: Connection,
+    mut control_stream: ControlStream,
+    remote_destination: &str,
+    protocol: Protocol,
+    conn_manager: Arc<Mutex<ConnectionManager>>,
+    statistics: Arc<ServerStatistics>,
+) -> Result<()> {
+    // LocalForwardResponse を送信
+    let response = ControlMessage::LocalForwardResponse {
+        status: ResponseStatus::Success,
+        message: format!("Ready to forward to {}", remote_destination),
+    };
+    control_stream.send_message(&response).await?;
+    info!("LocalForwardResponse sent: ready to forward to {}", remote_destination);
+
+    let remote_destination = remote_destination.to_string();
+
+    // クライアントからの QUIC ストリームを受け付けるループ
+    loop {
+        tokio::select! {
+            // QUIC コネクションがクローズされた場合
+            reason = quic_conn.closed() => {
+                info!("QUIC connection closed: {:?}, stopping LPF handler", reason);
+                break;
+            }
+
+            // クライアントからの QUIC ストリームを accept
+            result = quic_conn.accept_bi() => {
+                match result {
+                    Ok((send, mut recv)) => {
+                        debug!("QUIC stream accepted (LPF)");
+
+                        // ストリームの先頭 4 bytes から conn_id を読み取る
+                        let mut conn_id_buf = [0u8; 4];
+                        match recv.read_exact(&mut conn_id_buf).await {
+                            Ok(()) => {
+                                let conn_id = u32::from_be_bytes(conn_id_buf);
+                                debug!("Read conn_id from stream (LPF): {}", conn_id);
+
+                                // リモートサービスに接続してデータ転送を開始
+                                let remote_dest = remote_destination.clone();
+                                let cancel_token = CancellationToken::new();
+
+                                match protocol {
+                                    Protocol::Tcp => {
+                                        // TCP: リモートサービスに接続
+                                        match TcpStream::connect(&remote_dest).await {
+                                            Ok(tcp_stream) => {
+                                                info!("Connected to remote TCP service: {} (conn_id={})", remote_dest, conn_id);
+
+                                                let remote_addr = tcp_stream.peer_addr().unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
+                                                conn_manager.lock().await.add_connection(
+                                                    conn_id,
+                                                    Protocol::Tcp,
+                                                    remote_addr,
+                                                    cancel_token.clone(),
+                                                );
+
+                                                let conn_manager_clone = conn_manager.clone();
+                                                let statistics_clone = statistics.clone();
+                                                tokio::spawn(async move {
+                                                    if let Err(e) = relay_tcp_stream(
+                                                        conn_id,
+                                                        tcp_stream,
+                                                        send,
+                                                        recv,
+                                                        &statistics_clone,
+                                                        cancel_token,
+                                                    )
+                                                    .await
+                                                    {
+                                                        debug!("LPF TCP relay ended for {}: {}", conn_id, e);
+                                                    }
+                                                    conn_manager_clone.lock().await.remove_connection(conn_id);
+                                                });
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to connect to remote TCP service {}: {}", remote_dest, e);
+                                                // ConnectionClose を送信
+                                                let close_msg = ControlMessage::ConnectionClose {
+                                                    connection_id: conn_id,
+                                                    reason: crate::protocol::CloseReason::ConnectionRefused,
+                                                };
+                                                let _ = control_stream.send_message(&close_msg).await;
+                                            }
+                                        }
+                                    }
+                                    Protocol::Udp => {
+                                        // UDP: リモートサービスに接続
+                                        match UdpSocket::bind("0.0.0.0:0").await {
+                                            Ok(udp_socket) => {
+                                                if let Err(e) = udp_socket.connect(&remote_dest).await {
+                                                    error!("Failed to connect UDP socket to remote service {}: {}", remote_dest, e);
+                                                    let close_msg = ControlMessage::ConnectionClose {
+                                                        connection_id: conn_id,
+                                                        reason: crate::protocol::CloseReason::ConnectionRefused,
+                                                    };
+                                                    let _ = control_stream.send_message(&close_msg).await;
+                                                    continue;
+                                                }
+
+                                                info!("Connected UDP socket to remote service: {} (conn_id={})", remote_dest, conn_id);
+
+                                                let remote_addr: SocketAddr = remote_dest.parse().unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
+                                                conn_manager.lock().await.add_connection(
+                                                    conn_id,
+                                                    Protocol::Udp,
+                                                    remote_addr,
+                                                    cancel_token.clone(),
+                                                );
+
+                                                let conn_manager_clone = conn_manager.clone();
+                                                let statistics_clone = statistics.clone();
+                                                tokio::spawn(async move {
+                                                    if let Err(e) = relay_lpf_udp_stream(
+                                                        conn_id,
+                                                        udp_socket,
+                                                        send,
+                                                        recv,
+                                                        &statistics_clone,
+                                                        cancel_token,
+                                                    )
+                                                    .await
+                                                    {
+                                                        debug!("LPF UDP relay ended for {}: {}", conn_id, e);
+                                                    }
+                                                    conn_manager_clone.lock().await.remove_connection(conn_id);
+                                                });
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to create UDP socket: {}", e);
+                                                let close_msg = ControlMessage::ConnectionClose {
+                                                    connection_id: conn_id,
+                                                    reason: crate::protocol::CloseReason::OtherError,
+                                                };
+                                                let _ = control_stream.send_message(&close_msg).await;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to read conn_id from stream: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Failed to accept QUIC stream: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            // 制御メッセージを待機
+            result = control_stream.recv_message() => {
+                match result {
+                    Ok(ControlMessage::SessionClose) => {
+                        info!("Client requested session close (LPF)");
+                        break;
+                    }
+                    Ok(ControlMessage::LocalNewConnection {
+                        connection_id,
+                        protocol: conn_protocol,
+                    }) => {
+                        // LocalNewConnection は情報提供のみ（conn_id はストリームから取得済み）
+                        debug!(
+                            "LocalNewConnection notification: conn_id={}, protocol={}",
+                            connection_id, conn_protocol
+                        );
+                    }
+                    Ok(ControlMessage::ConnectionClose {
+                        connection_id,
+                        reason,
+                    }) => {
+                        info!(
+                            "Client requested connection close for conn_id={}: {:?}",
+                            connection_id, reason
+                        );
+                        let cancelled = conn_manager.lock().await.cancel_connection(connection_id);
+                        if cancelled {
+                            debug!("Connection {} cancelled", connection_id);
+                        }
+                    }
+                    Ok(msg) => {
+                        debug!("Received control message: {:?}", msg);
+                    }
+                    Err(ProtocolError::StreamClosed) => {
+                        info!("Control stream closed");
+                        break;
+                    }
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        if err_str.contains("closed") || err_str.contains("reset") {
+                            info!("Client disconnected (LPF)");
+                        } else {
+                            error!("Control stream error: {}", e);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// LPF: UDP パケットと QUIC ストリーム間でデータを中継
+async fn relay_lpf_udp_stream(
+    conn_id: u32,
+    udp_socket: UdpSocket,
+    mut quic_send: SendStream,
+    mut quic_recv: RecvStream,
+    statistics: &Arc<ServerStatistics>,
+    cancel_token: CancellationToken,
+) -> Result<()> {
+    debug!("[{}] Starting LPF UDP relay", conn_id);
+
+    let udp_socket = Arc::new(udp_socket);
+
+    // QUIC -> UDP (クライアントからのパケットをリモートサービスに送信)
+    let socket_for_send = udp_socket.clone();
+    let stats_for_recv = statistics.clone();
+    let cancel_for_recv = cancel_token.clone();
+    let quic_to_udp = tokio::spawn(async move {
+        debug!("[{}] QUIC->UDP task started", conn_id);
+        loop {
+            tokio::select! {
+                _ = cancel_for_recv.cancelled() => {
+                    debug!("[{}] QUIC->UDP cancelled", conn_id);
+                    break;
+                }
+                // Length-prefixed framing で読み取り
+                result = async {
+                    let mut len_buf = [0u8; 4];
+                    quic_recv.read_exact(&mut len_buf).await?;
+                    let len = u32::from_be_bytes(len_buf) as usize;
+
+                    let mut payload = vec![0u8; len];
+                    quic_recv.read_exact(&mut payload).await?;
+
+                    Ok::<_, quinn::ReadExactError>((len, payload))
+                } => {
+                    match result {
+                        Ok((len, payload)) => {
+                            stats_for_recv.add_bytes_received(4 + len as u64);
+                            // リモートサービスに送信
+                            if let Err(e) = socket_for_send.send(&payload).await {
+                                debug!("[{}] UDP send error: {}", conn_id, e);
+                                break;
+                            }
+                            debug!("[{}] QUIC->UDP {} bytes", conn_id, len);
+                        }
+                        Err(e) => {
+                            debug!("[{}] QUIC read error: {}", conn_id, e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+
+    // UDP -> QUIC (リモートサービスからの応答をクライアントに返す)
+    let stats_for_send = statistics.clone();
+    let cancel_for_send = cancel_token.clone();
+    let udp_to_quic = tokio::spawn(async move {
+        let mut buf = vec![0u8; 65535];
+        debug!("[{}] UDP->QUIC task started", conn_id);
+        loop {
+            tokio::select! {
+                _ = cancel_for_send.cancelled() => {
+                    debug!("[{}] UDP->QUIC cancelled", conn_id);
+                    break;
+                }
+                result = udp_socket.recv(&mut buf) => {
+                    match result {
+                        Ok(len) if len > 0 => {
+                            // Length-prefixed framing で送信
+                            let len_u32 = len as u32;
+                            if let Err(e) = quic_send.write_all(&len_u32.to_be_bytes()).await {
+                                debug!("[{}] QUIC write length error: {}", conn_id, e);
+                                break;
+                            }
+                            if let Err(e) = quic_send.write_all(&buf[..len]).await {
+                                debug!("[{}] QUIC write payload error: {}", conn_id, e);
+                                break;
+                            }
+                            stats_for_send.add_bytes_sent(4 + len as u64);
+                            debug!("[{}] UDP->QUIC {} bytes", conn_id, len);
+                        }
+                        Ok(_) => {
+                            debug!("[{}] UDP recv returned 0", conn_id);
+                            break;
+                        }
+                        Err(e) => {
+                            debug!("[{}] UDP recv error: {}", conn_id, e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let _ = quic_send.finish();
+        Ok::<_, anyhow::Error>(())
+    });
+
+    // 両方向の完了を待つ
+    let (recv_result, send_result) = tokio::join!(quic_to_udp, udp_to_quic);
+
+    if let Err(e) = recv_result {
+        debug!("QUIC->UDP task error for {}: {}", conn_id, e);
+    }
+    if let Err(e) = send_result {
+        debug!("UDP->QUIC task error for {}: {}", conn_id, e);
+    }
+
+    debug!("[{}] LPF UDP relay completed", conn_id);
     Ok(())
 }
