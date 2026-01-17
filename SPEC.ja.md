@@ -25,6 +25,24 @@
 
 ## コマンドライン仕様
 
+### 共通オプション
+
+サーバー・クライアント両方で使用可能なグローバルオプション:
+
+| オプション | 必須 | 説明 |
+|-----------|------|------|
+| `--log-format` | No | ログ出力形式。`console`（デフォルト）または `json`。環境変数 `QUICPORT_LOG_FORMAT` でも指定可 |
+
+**例:**
+
+```bash
+# JSON 形式でログ出力（構造化ログ、監視ツール連携向け）
+quicport --log-format json server --listen 0.0.0.0:9000
+
+# 環境変数で指定
+QUICPORT_LOG_FORMAT=json quicport server --listen 0.0.0.0:9000
+```
+
 ### サーバーモード
 
 ```bash
@@ -46,6 +64,9 @@ quicport server --listen <bind_address>:<port> --privkey <server_private_key> --
 
 \* `--client-pubkeys` または `--client-pubkeys-file` のいずれかが必須（`--psk` を使用する場合を除く）
 \** X25519 認証（`--client-pubkeys` / `--client-pubkeys-file`）使用時は `--privkey` または `--privkey-file` が必須（相互認証のため）
+
+> **PSK 自動生成:** 認証オプション（`--psk`, `--client-pubkeys`, `--client-pubkeys-file`）が何も指定されていない場合、
+> PSK が自動生成され `~/.config/quicport/psk` に保存されます。次回以降の起動では既存の PSK を読み込みます。
 
 **例:**
 
@@ -285,6 +306,16 @@ Client                                  Server
 事前共有鍵（PSK）による認証も利用可能です。
 鍵管理の観点から X25519 公開鍵認証を推奨しますが、PSK も HMAC-SHA256 とエフェメラル DH により安全に実装されています。
 
+#### PSK 自動生成
+
+サーバー起動時に認証オプション（`--psk`, `--client-pubkeys`, `--client-pubkeys-file`）が何も指定されていない場合、
+PSK が自動生成されます:
+
+1. `~/.config/quicport/psk` が存在すれば、既存の PSK を読み込む
+2. 存在しなければ、32 バイトのランダムデータを生成し、Base64 エンコードして保存
+
+これにより、初回起動時でも認証なしでサーバーが公開されることはありません。
+
 #### PSK 認証フロー
 
 ```
@@ -365,6 +396,7 @@ quicport は以下のディレクトリにファイルを配置します（XDG B
 |------|------|
 | `~/.config/quicport/server.crt` | サーバー証明書（DER 形式） |
 | `~/.config/quicport/server.key` | サーバー秘密鍵（DER 形式、パーミッション 0600） |
+| `~/.config/quicport/psk` | 自動生成された PSK（Base64 形式、32 バイト） |
 | `~/.local/share/quicport/known_hosts` | クライアントの既知ホスト一覧 |
 
 #### サーバー証明書の永続化

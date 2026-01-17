@@ -13,7 +13,7 @@ User=quicport
 Group=quicport
 
 # NOTE: The binary path
-ExecStart=/usr/local/bin/quicport server
+ExecStart=/usr/local/bin/quicport --log-format json server
 
 # NOTE: The environment variable file (authentication key, etc.)
 EnvironmentFile=-/etc/quicport/quicport.env

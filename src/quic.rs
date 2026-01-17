@@ -372,6 +372,19 @@ pub fn server_config_dir() -> Result<PathBuf> {
     Ok(config_dir)
 }
 
+/// PSK ファイルのパスを取得（~/.config/quicport/psk）
+pub fn psk_file_path() -> Result<PathBuf> {
+    Ok(server_config_dir()?.join("psk"))
+}
+
+/// ランダムな PSK を生成（32 バイト → Base64 エンコード）
+pub fn generate_psk() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 /// 証明書ファイルのパス
 fn server_cert_path() -> Result<PathBuf> {
     Ok(server_config_dir()?.join("server.crt"))
