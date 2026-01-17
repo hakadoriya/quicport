@@ -80,6 +80,19 @@ fn prompt_yes_no(prompt: &str) -> Result<bool> {
     Ok(input == "y" || input == "yes")
 }
 
+/// ホストとポートをソケットアドレス文字列に整形
+///
+/// IPv6 アドレスは `[addr]:port` 形式に、IPv4 アドレスは `addr:port` 形式にする
+fn format_socket_addr(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        // IPv6 アドレス
+        format!("[{}]:{}", host, port)
+    } else {
+        // IPv4 アドレスまたはホスト名
+        format!("{}:{}", host, port)
+    }
+}
+
 /// TOFU 検証結果を処理
 ///
 /// 未知のホストや証明書が変更されたホストに対して、ユーザーに確認を求める
@@ -313,7 +326,7 @@ pub async fn run(
 
     // 接続マネージャ
     let conn_manager = Arc::new(Mutex::new(ConnectionManager::new()));
-    let local_addr = format!("{}:{}", local_host, local_port_num);
+    let local_addr = format_socket_addr(&local_host, local_port_num);
 
     info!(
         "Tunnel established: server:{}:{} -> {}",
@@ -899,7 +912,7 @@ pub async fn run_local_forward(
     let mut control_stream = ControlStream::new(control_send, control_recv);
 
     // リモート転送先のアドレス文字列を構築
-    let remote_addr_str = format!("{}:{}", remote_host, remote_port_num);
+    let remote_addr_str = format_socket_addr(&remote_host, remote_port_num);
 
     // LocalForwardRequest を送信
     let forward_request = ControlMessage::LocalForwardRequest {
