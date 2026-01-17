@@ -21,6 +21,16 @@ pub struct ServerStatistics {
     bytes_sent: AtomicU64,
     /// 受信バイト数の累計
     bytes_received: AtomicU64,
+
+    // 認証メトリクス（方式別）
+    /// PSK 認証成功回数
+    auth_psk_success: AtomicU64,
+    /// PSK 認証失敗回数
+    auth_psk_failed: AtomicU64,
+    /// X25519 認証成功回数
+    auth_x25519_success: AtomicU64,
+    /// X25519 認証失敗回数
+    auth_x25519_failed: AtomicU64,
 }
 
 impl ServerStatistics {
@@ -32,6 +42,10 @@ impl ServerStatistics {
             active_connections: AtomicU64::new(0),
             bytes_sent: AtomicU64::new(0),
             bytes_received: AtomicU64::new(0),
+            auth_psk_success: AtomicU64::new(0),
+            auth_psk_failed: AtomicU64::new(0),
+            auth_x25519_success: AtomicU64::new(0),
+            auth_x25519_failed: AtomicU64::new(0),
         }
     }
 
@@ -60,6 +74,26 @@ impl ServerStatistics {
         self.bytes_received.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    /// PSK 認証成功時にインクリメント
+    pub fn auth_psk_success(&self) {
+        self.auth_psk_success.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// PSK 認証失敗時にインクリメント
+    pub fn auth_psk_failed(&self) {
+        self.auth_psk_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// X25519 認証成功時にインクリメント
+    pub fn auth_x25519_success(&self) {
+        self.auth_x25519_success.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// X25519 認証失敗時にインクリメント
+    pub fn auth_x25519_failed(&self) {
+        self.auth_x25519_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Prometheus 形式でメトリクスを出力
     pub fn to_prometheus(&self) -> String {
         let uptime = self.start_time.elapsed().as_secs();
@@ -67,6 +101,10 @@ impl ServerStatistics {
         let active_connections = self.active_connections.load(Ordering::Relaxed);
         let bytes_sent = self.bytes_sent.load(Ordering::Relaxed);
         let bytes_received = self.bytes_received.load(Ordering::Relaxed);
+        let auth_psk_success = self.auth_psk_success.load(Ordering::Relaxed);
+        let auth_psk_failed = self.auth_psk_failed.load(Ordering::Relaxed);
+        let auth_x25519_success = self.auth_x25519_success.load(Ordering::Relaxed);
+        let auth_x25519_failed = self.auth_x25519_failed.load(Ordering::Relaxed);
 
         let mut output = String::new();
 
@@ -110,6 +148,42 @@ impl ServerStatistics {
         .unwrap();
         writeln!(output, "# TYPE quicport_bytes_received_total counter").unwrap();
         writeln!(output, "quicport_bytes_received_total {}", bytes_received).unwrap();
+
+        // auth PSK success
+        writeln!(
+            output,
+            "# HELP quicport_auth_psk_success_total Total number of successful PSK authentications"
+        )
+        .unwrap();
+        writeln!(output, "# TYPE quicport_auth_psk_success_total counter").unwrap();
+        writeln!(output, "quicport_auth_psk_success_total {}", auth_psk_success).unwrap();
+
+        // auth PSK failed
+        writeln!(
+            output,
+            "# HELP quicport_auth_psk_failed_total Total number of failed PSK authentications"
+        )
+        .unwrap();
+        writeln!(output, "# TYPE quicport_auth_psk_failed_total counter").unwrap();
+        writeln!(output, "quicport_auth_psk_failed_total {}", auth_psk_failed).unwrap();
+
+        // auth X25519 success
+        writeln!(
+            output,
+            "# HELP quicport_auth_x25519_success_total Total number of successful X25519 authentications"
+        )
+        .unwrap();
+        writeln!(output, "# TYPE quicport_auth_x25519_success_total counter").unwrap();
+        writeln!(output, "quicport_auth_x25519_success_total {}", auth_x25519_success).unwrap();
+
+        // auth X25519 failed
+        writeln!(
+            output,
+            "# HELP quicport_auth_x25519_failed_total Total number of failed X25519 authentications"
+        )
+        .unwrap();
+        writeln!(output, "# TYPE quicport_auth_x25519_failed_total counter").unwrap();
+        writeln!(output, "quicport_auth_x25519_failed_total {}", auth_x25519_failed).unwrap();
 
         output
     }
