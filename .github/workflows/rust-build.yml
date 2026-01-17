@@ -91,7 +91,10 @@ jobs:
 
       - name: Install cargo-zigbuild (ubuntu only)
         if: startsWith(matrix.runner, 'ubuntu')
-        run: cargo install cargo-zigbuild --locked
+        run: |
+          if ! command -v cargo-zigbuild &> /dev/null; then
+            cargo install cargo-zigbuild --locked
+          fi
 
       - name: Build (unix)
         if: matrix.kind == 'unix'
