@@ -236,7 +236,7 @@ pub async fn run(
         let known_hosts = Arc::new(KnownHosts::new(known_hosts_path)?);
 
         let (endpoint, tofu_verifier) =
-            create_client_endpoint_with_tofu(&server_addr, &server_addr.to_string(), known_hosts.clone())?;
+            create_client_endpoint_with_tofu(&server_addr, destination, known_hosts.clone())?;
 
         let connection = endpoint
             .connect(server_addr, "quicport")
@@ -858,7 +858,7 @@ pub async fn run_local_forward(
         let known_hosts = Arc::new(KnownHosts::new(known_hosts_path)?);
 
         let (endpoint, tofu_verifier) =
-            create_client_endpoint_with_tofu(&server_addr, &server_addr.to_string(), known_hosts.clone())?;
+            create_client_endpoint_with_tofu(&server_addr, destination, known_hosts.clone())?;
 
         let connection = endpoint
             .connect(server_addr, "quicport")
