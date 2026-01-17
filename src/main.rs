@@ -39,6 +39,44 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// SSH ProxyCommand mode (for use with ssh -o ProxyCommand)
+    ///
+    /// Connects stdin/stdout to a remote destination via QUIC tunnel.
+    /// Example: ssh -o ProxyCommand='quicport ssh-proxy --server %h:39000 --psk SECRET --remote-destination 22' user@host
+    SshProxy {
+        /// Server address (host:port)
+        #[arg(short = 's', long)]
+        server: String,
+
+        /// Remote destination (host:port or just port, e.g., "22" or "192.168.1.100:22")
+        #[arg(short = 'R', long)]
+        remote_destination: String,
+
+        /// Private key in Base64 format
+        #[arg(long, env = "QUICPORT_PRIVKEY")]
+        privkey: Option<String>,
+
+        /// Path to file containing the private key
+        #[arg(long, env = "QUICPORT_PRIVKEY_FILE")]
+        privkey_file: Option<PathBuf>,
+
+        /// Expected server's public key in Base64 format (for mutual authentication)
+        #[arg(long, env = "QUICPORT_SERVER_PUBKEY")]
+        server_pubkey: Option<String>,
+
+        /// Path to file containing the expected server's public key
+        #[arg(long, env = "QUICPORT_SERVER_PUBKEY_FILE")]
+        server_pubkey_file: Option<PathBuf>,
+
+        /// Pre-shared key for authentication
+        #[arg(long, env = "QUICPORT_PSK")]
+        psk: Option<String>,
+
+        /// Skip server certificate verification (insecure, for testing only)
+        #[arg(long, default_value = "false")]
+        insecure: bool,
+    },
+
     /// Run as server (listen for QUIC connections)
     Server {
         /// Address and port to listen on for QUIC
@@ -292,26 +330,74 @@ fn build_client_auth_config(
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging (stdout に出力)
+    // ssh-proxy コマンドの場合はログを stderr に出力（stdout は SSH データ専用）
+    let use_stderr = matches!(cli.command, Commands::SshProxy { .. });
+
+    // Initialize logging
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    match cli.log_format {
-        LogFormat::Console => {
-            tracing_subscriber::fmt()
-                .with_writer(std::io::stdout)
-                .with_env_filter(env_filter)
-                .init();
+    if use_stderr {
+        // ssh-proxy: ログを stderr に出力
+        match cli.log_format {
+            LogFormat::Console => {
+                tracing_subscriber::fmt()
+                    .with_writer(std::io::stderr)
+                    .with_env_filter(env_filter)
+                    .init();
+            }
+            LogFormat::Json => {
+                tracing_subscriber::fmt()
+                    .with_writer(std::io::stderr)
+                    .with_env_filter(env_filter)
+                    .json()
+                    .init();
+            }
         }
-        LogFormat::Json => {
-            tracing_subscriber::fmt()
-                .with_writer(std::io::stdout)
-                .with_env_filter(env_filter)
-                .json()
-                .init();
+    } else {
+        // 通常モード: ログを stdout に出力
+        match cli.log_format {
+            LogFormat::Console => {
+                tracing_subscriber::fmt()
+                    .with_writer(std::io::stdout)
+                    .with_env_filter(env_filter)
+                    .init();
+            }
+            LogFormat::Json => {
+                tracing_subscriber::fmt()
+                    .with_writer(std::io::stdout)
+                    .with_env_filter(env_filter)
+                    .json()
+                    .init();
+            }
         }
     }
 
     match cli.command {
+        Commands::SshProxy {
+            server,
+            remote_destination,
+            privkey,
+            privkey_file,
+            server_pubkey,
+            server_pubkey_file,
+            psk,
+            insecure,
+        } => {
+            let auth_config = build_client_auth_config(
+                privkey,
+                privkey_file,
+                server_pubkey,
+                server_pubkey_file,
+                psk,
+            )?;
+
+            info!(
+                "SSH proxy connecting to {} (remote={})",
+                server, remote_destination
+            );
+            client::run_ssh_proxy(&server, &remote_destination, auth_config, insecure).await?;
+        }
+
         Commands::Server {
             listen,
             api_listen,
