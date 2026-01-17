@@ -908,3 +908,368 @@ fn test_udp_tunnel() {
         "Echo response mismatch"
     );
 }
+
+// ============================================================================
+// Local Port Forwarding (LPF) テスト
+// ============================================================================
+
+/// リモートサービス（エコーサーバー）をシミュレート
+///
+/// LPF モードでは、サーバー側がリモートサービスに接続するため、
+/// テスト用のリモートサービスを起動する。
+struct RemoteService {
+    listener: TcpListener,
+}
+
+impl RemoteService {
+    fn new(port: u16) -> Self {
+        let addr = format!("127.0.0.1:{}", port);
+        let listener = TcpListener::bind(&addr).expect("Failed to bind remote service");
+        listener
+            .set_nonblocking(false)
+            .expect("Failed to set blocking mode");
+        Self { listener }
+    }
+
+    /// 接続を受け入れてエコーバック
+    fn accept_and_echo(&self, timeout: Duration) -> std::io::Result<String> {
+        self.listener
+            .set_nonblocking(false)
+            .expect("Failed to set blocking mode");
+
+        let start = std::time::Instant::now();
+
+        loop {
+            if start.elapsed() > timeout {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Timeout waiting for valid connection",
+                ));
+            }
+
+            eprintln!("[RemoteService] Waiting for connection...");
+
+            let (mut stream, peer_addr) = self.listener.accept()?;
+            eprintln!("[RemoteService] Accepted connection from {}", peer_addr);
+
+            let remaining = timeout.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Timeout after accepting connection",
+                ));
+            }
+            stream.set_read_timeout(Some(remaining))?;
+            stream.set_write_timeout(Some(remaining))?;
+
+            let mut data = Vec::new();
+            let mut buf = vec![0u8; 8192];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => data.extend_from_slice(&buf[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if !data.is_empty() {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) => {
+                        eprintln!("[RemoteService] Read error: {}", e);
+                        return Err(e);
+                    }
+                }
+            }
+
+            eprintln!("[RemoteService] Read {} bytes", data.len());
+
+            if data.is_empty() {
+                eprintln!("[RemoteService] Empty connection (probe?), waiting for next...");
+                continue;
+            }
+
+            let received = String::from_utf8_lossy(&data).to_string();
+
+            stream.write_all(&data)?;
+            stream.flush()?;
+            eprintln!("[RemoteService] Echoed {} bytes", data.len());
+
+            thread::sleep(Duration::from_millis(200));
+
+            return Ok(received);
+        }
+    }
+}
+
+/// リモート UDP サービス（エコーサーバー）をシミュレート
+struct RemoteUdpService {
+    socket: UdpSocket,
+}
+
+impl RemoteUdpService {
+    fn new(port: u16) -> Self {
+        let addr = format!("127.0.0.1:{}", port);
+        let socket = UdpSocket::bind(&addr).expect("Failed to bind UDP socket");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("Failed to set read timeout");
+        socket
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .expect("Failed to set write timeout");
+        Self { socket }
+    }
+
+    /// パケットを受信してエコーバック
+    fn recv_and_echo(&self, timeout: Duration) -> std::io::Result<String> {
+        self.socket.set_read_timeout(Some(timeout))?;
+
+        let mut buf = vec![0u8; 65535];
+        let (len, src_addr) = self.socket.recv_from(&mut buf)?;
+
+        eprintln!(
+            "[RemoteUdpService] Received {} bytes from {}",
+            len, src_addr
+        );
+
+        let received = String::from_utf8_lossy(&buf[..len]).to_string();
+
+        self.socket.send_to(&buf[..len], src_addr)?;
+        eprintln!("[RemoteUdpService] Echoed {} bytes to {}", len, src_addr);
+
+        Ok(received)
+    }
+}
+
+/// LPF クライアントヘルパー
+struct TestLpfClient {
+    process: Child,
+}
+
+impl TestLpfClient {
+    /// PSK 認証で LPF クライアントを起動
+    fn start_with_psk(
+        server_addr: &str,
+        local_port: u16,
+        remote_destination: &str,
+        psk: &str,
+    ) -> Self {
+        eprintln!(
+            "[TestLpfClient] Starting with PSK: server={}, local_source={}, remote_dest={}",
+            server_addr, local_port, remote_destination
+        );
+
+        let process = Command::new(quicport_binary())
+            .args([
+                "client",
+                "-s",
+                server_addr,
+                "--local-source",
+                &format!("{}/tcp", local_port),
+                "--remote-destination",
+                remote_destination,
+                "--psk",
+                psk,
+                "--insecure",
+            ])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("Failed to start quicport LPF client");
+
+        // クライアントがサーバーに接続し、トンネルを確立するまで待機
+        thread::sleep(Duration::from_secs(2));
+
+        Self { process }
+    }
+}
+
+impl Drop for TestLpfClient {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            unsafe {
+                libc::kill(self.process.id() as i32, libc::SIGTERM);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = self.process.kill();
+        }
+        let _ = self.process.wait();
+    }
+}
+
+/// LPF (Local Port Forwarding) 基本テスト - TCP
+#[test]
+fn test_local_port_forwarding_tcp() {
+    // ポート番号を取得
+    let server_port = get_test_port();
+    let local_source_port = get_test_port();
+    let remote_service_port = get_test_port();
+
+    // 1. リモートサービス（サーバー側の転送先）を起動
+    let remote_service = RemoteService::new(remote_service_port);
+
+    // 2. quicport サーバーを起動
+    let _server = TestServer::start_with_psk(server_port, test_keys::TEST_PSK);
+
+    // 3. quicport クライアントを起動（LPF モード）
+    let _client = TestLpfClient::start_with_psk(
+        &format!("127.0.0.1:{}", server_port),
+        local_source_port,
+        &format!("127.0.0.1:{}/tcp", remote_service_port),
+        test_keys::TEST_PSK,
+    );
+
+    // 4. ローカルポートが開くまで待機
+    let local_addr = format!("127.0.0.1:{}", local_source_port);
+    assert!(
+        wait_for_server_ready(&local_addr, Duration::from_secs(5)),
+        "Local port {} did not become available",
+        local_source_port
+    );
+
+    // 5. トンネル経由でデータを送受信
+    let test_message = b"Hello through LPF tunnel!";
+
+    // リモートサービスを別スレッドで待機
+    let remote_service_handle =
+        thread::spawn(move || remote_service.accept_and_echo(Duration::from_secs(5)));
+
+    // トンネル経由で接続（クライアント側のローカルポートに接続）
+    thread::sleep(Duration::from_millis(100));
+    let mut tunnel_conn = TcpStream::connect(&local_addr).expect("Failed to connect to LPF tunnel");
+    tunnel_conn
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    tunnel_conn
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+
+    // データを送信
+    tunnel_conn
+        .write_all(test_message)
+        .expect("Failed to write to tunnel");
+    tunnel_conn.flush().expect("Failed to flush");
+
+    // 書き込み完了をシグナル（EOF を送信）
+    tunnel_conn
+        .shutdown(std::net::Shutdown::Write)
+        .expect("Failed to shutdown write");
+
+    // レスポンスを受信
+    let mut response = vec![0u8; 1024];
+    let n = tunnel_conn
+        .read(&mut response)
+        .expect("Failed to read response");
+    let response_str = String::from_utf8_lossy(&response[..n]);
+
+    // リモートサービスが受信したデータを確認
+    let received = remote_service_handle
+        .join()
+        .expect("Remote service thread panicked");
+    assert!(received.is_ok(), "Remote service failed: {:?}", received);
+    assert_eq!(
+        received.unwrap(),
+        String::from_utf8_lossy(test_message),
+        "Data mismatch at remote service"
+    );
+
+    // エコーバックされたデータを確認
+    assert_eq!(
+        response_str,
+        String::from_utf8_lossy(test_message),
+        "Echo response mismatch"
+    );
+}
+
+/// LPF (Local Port Forwarding) UDP テスト
+#[test]
+fn test_local_port_forwarding_udp() {
+    // ポート番号を取得
+    let server_port = get_test_port();
+    let local_source_port = get_test_port();
+    let remote_service_port = get_test_port();
+
+    // 1. リモート UDP サービス（サーバー側の転送先）を起動
+    let remote_service = RemoteUdpService::new(remote_service_port);
+
+    // 2. quicport サーバーを起動
+    let _server = TestServer::start_with_psk(server_port, test_keys::TEST_PSK);
+
+    // 3. quicport クライアントを起動（LPF モード、UDP）
+    eprintln!(
+        "[TestLpfClient] Starting UDP LPF: server=127.0.0.1:{}, local={}/udp, remote=127.0.0.1:{}/udp",
+        server_port, local_source_port, remote_service_port
+    );
+
+    let _client_process = Command::new(quicport_binary())
+        .args([
+            "client",
+            "-s",
+            &format!("127.0.0.1:{}", server_port),
+            "--local-source",
+            &format!("{}/udp", local_source_port),
+            "--remote-destination",
+            &format!("127.0.0.1:{}/udp", remote_service_port),
+            "--psk",
+            test_keys::TEST_PSK,
+            "--insecure",
+        ])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("Failed to start quicport LPF client");
+
+    // クライアントがサーバーに接続し、トンネルを確立するまで待機
+    thread::sleep(Duration::from_secs(2));
+
+    // 4. トンネル経由で UDP パケットを送受信
+    let test_message = b"Hello LPF UDP tunnel!";
+
+    // リモートサービスを別スレッドで待機
+    let remote_service_handle =
+        thread::spawn(move || remote_service.recv_and_echo(Duration::from_secs(5)));
+
+    // 少し待機してからパケット送信
+    thread::sleep(Duration::from_millis(100));
+
+    // トンネル経由で UDP パケットを送信（クライアント側のローカルポートに送信）
+    let client_socket = UdpSocket::bind("127.0.0.1:0").expect("Failed to bind client UDP socket");
+    client_socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("Failed to set read timeout");
+
+    let local_addr = format!("127.0.0.1:{}", local_source_port);
+    client_socket
+        .send_to(test_message, &local_addr)
+        .expect("Failed to send UDP packet");
+    eprintln!("[Test] Sent UDP packet to {}", local_addr);
+
+    // レスポンスを受信
+    let mut response = vec![0u8; 1024];
+    let (n, _) = client_socket
+        .recv_from(&mut response)
+        .expect("Failed to receive UDP response");
+    let response_str = String::from_utf8_lossy(&response[..n]);
+    eprintln!("[Test] Received UDP response: {} bytes", n);
+
+    // リモートサービスが受信したデータを確認
+    let received = remote_service_handle
+        .join()
+        .expect("Remote service thread panicked");
+    assert!(received.is_ok(), "Remote service failed: {:?}", received);
+    assert_eq!(
+        received.unwrap(),
+        String::from_utf8_lossy(test_message),
+        "Data mismatch at remote service"
+    );
+
+    // エコーバックされたデータを確認
+    assert_eq!(
+        response_str,
+        String::from_utf8_lossy(test_message),
+        "Echo response mismatch"
+    );
+}

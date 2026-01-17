@@ -86,13 +86,19 @@ impl std::str::FromStr for Protocol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MessageType {
+    // Remote Port Forwarding (RPF) 用メッセージ
     PortRequest = 0x01,
     PortResponse = 0x02,
     Heartbeat = 0x03,
     SessionClose = 0x04,
+    // Local Port Forwarding (LPF) 用メッセージ
+    LocalForwardRequest = 0x05,
+    LocalForwardResponse = 0x06,
+    // 接続管理メッセージ
     NewConnection = 0x10,
     // 0x11 は未使用（将来の拡張用に予約）
     ConnectionClose = 0x12,
+    LocalNewConnection = 0x13,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -104,8 +110,11 @@ impl TryFrom<u8> for MessageType {
             0x02 => Ok(MessageType::PortResponse),
             0x03 => Ok(MessageType::Heartbeat),
             0x04 => Ok(MessageType::SessionClose),
+            0x05 => Ok(MessageType::LocalForwardRequest),
+            0x06 => Ok(MessageType::LocalForwardResponse),
             0x10 => Ok(MessageType::NewConnection),
             0x12 => Ok(MessageType::ConnectionClose),
+            0x13 => Ok(MessageType::LocalNewConnection),
             _ => Err(ProtocolError::InvalidMessageType(value)),
         }
     }
@@ -162,6 +171,11 @@ impl TryFrom<u8> for CloseReason {
 /// 制御メッセージ
 #[derive(Debug, Clone)]
 pub enum ControlMessage {
+    // =========================================================================
+    // Remote Port Forwarding (RPF) 用メッセージ
+    // サーバー側でポートをリッスンし、クライアント側のローカルサービスに転送
+    // =========================================================================
+
     /// ポート開放リクエスト (Client → Server)
     ///
     /// - port: サーバー側でリッスンするポート番号
@@ -179,13 +193,43 @@ pub enum ControlMessage {
         message: String,
     },
 
+    // =========================================================================
+    // Local Port Forwarding (LPF) 用メッセージ
+    // クライアント側でポートをリッスンし、サーバー側のリモートサービスに転送
+    // =========================================================================
+
+    /// ローカルフォワードリクエスト (Client → Server)
+    ///
+    /// - remote_destination: サーバー側の転送先 (例: "192.168.1.100:22")
+    /// - protocol: プロトコル (TCP/UDP)
+    /// - local_source: クライアント側のリッスンポート（ログ用メタデータ）
+    LocalForwardRequest {
+        remote_destination: String,
+        protocol: Protocol,
+        local_source: String,
+    },
+
+    /// ローカルフォワードレスポンス (Server → Client)
+    LocalForwardResponse {
+        status: ResponseStatus,
+        message: String,
+    },
+
+    // =========================================================================
+    // 共通メッセージ
+    // =========================================================================
+
     /// ハートビート (双方向)
     Heartbeat,
 
     /// セッション終了 (双方向)
     SessionClose,
 
-    /// 新しい接続の通知 (Server → Client)
+    // =========================================================================
+    // 接続管理メッセージ
+    // =========================================================================
+
+    /// 新しい接続の通知 (Server → Client) - RPF 用
     NewConnection {
         connection_id: u32,
         protocol: Protocol,
@@ -195,6 +239,14 @@ pub enum ControlMessage {
     ConnectionClose {
         connection_id: u32,
         reason: CloseReason,
+    },
+
+    /// 新しいローカル接続の通知 (Client → Server) - LPF 用
+    ///
+    /// クライアントがローカルポートで新しい接続を受け付けた際に送信
+    LocalNewConnection {
+        connection_id: u32,
+        protocol: Protocol,
     },
 }
 
@@ -249,6 +301,37 @@ impl ControlMessage {
                 buf.put_u16(5);
                 buf.put_u32(*connection_id);
                 buf.put_u8(*reason as u8);
+            }
+            ControlMessage::LocalForwardRequest {
+                remote_destination,
+                protocol,
+                local_source,
+            } => {
+                // payload: protocol(1) + remote_dest_len(2) + remote_dest + local_source
+                let remote_bytes = remote_destination.as_bytes();
+                let local_bytes = local_source.as_bytes();
+                buf.put_u8(MessageType::LocalForwardRequest as u8);
+                buf.put_u16((1 + 2 + remote_bytes.len() + local_bytes.len()) as u16);
+                buf.put_u8(*protocol as u8);
+                buf.put_u16(remote_bytes.len() as u16);
+                buf.put_slice(remote_bytes);
+                buf.put_slice(local_bytes);
+            }
+            ControlMessage::LocalForwardResponse { status, message } => {
+                let msg_bytes = message.as_bytes();
+                buf.put_u8(MessageType::LocalForwardResponse as u8);
+                buf.put_u16(1 + msg_bytes.len() as u16);
+                buf.put_u8(*status as u8);
+                buf.put_slice(msg_bytes);
+            }
+            ControlMessage::LocalNewConnection {
+                connection_id,
+                protocol,
+            } => {
+                buf.put_u8(MessageType::LocalNewConnection as u8);
+                buf.put_u16(5); // 4 + 1
+                buf.put_u32(*connection_id);
+                buf.put_u8(*protocol as u8);
             }
         }
 
@@ -314,6 +397,46 @@ impl ControlMessage {
                 Ok(ControlMessage::ConnectionClose {
                     connection_id,
                     reason,
+                })
+            }
+            MessageType::LocalForwardRequest => {
+                // payload: protocol(1) + remote_dest_len(2) + remote_dest + local_source
+                if payload_len < 3 {
+                    return Err(ProtocolError::BufferTooShort);
+                }
+                let protocol = Protocol::try_from(buf.get_u8())?;
+                let remote_dest_len = buf.get_u16() as usize;
+                if payload_len < 3 + remote_dest_len {
+                    return Err(ProtocolError::BufferTooShort);
+                }
+                let remote_destination =
+                    String::from_utf8_lossy(&buf[..remote_dest_len]).to_string();
+                buf.advance(remote_dest_len);
+                let local_source_len = payload_len - 3 - remote_dest_len;
+                let local_source = String::from_utf8_lossy(&buf[..local_source_len]).to_string();
+                Ok(ControlMessage::LocalForwardRequest {
+                    remote_destination,
+                    protocol,
+                    local_source,
+                })
+            }
+            MessageType::LocalForwardResponse => {
+                if payload_len < 1 {
+                    return Err(ProtocolError::BufferTooShort);
+                }
+                let status = ResponseStatus::try_from(buf.get_u8())?;
+                let message = String::from_utf8_lossy(&buf[..payload_len - 1]).to_string();
+                Ok(ControlMessage::LocalForwardResponse { status, message })
+            }
+            MessageType::LocalNewConnection => {
+                if payload_len < 5 {
+                    return Err(ProtocolError::BufferTooShort);
+                }
+                let connection_id = buf.get_u32();
+                let protocol = Protocol::try_from(buf.get_u8())?;
+                Ok(ControlMessage::LocalNewConnection {
+                    connection_id,
+                    protocol,
                 })
             }
         }
@@ -591,6 +714,7 @@ mod tests {
 
     #[test]
     fn test_message_type_try_from() {
+        // RPF メッセージ
         assert_eq!(
             MessageType::try_from(0x01).unwrap(),
             MessageType::PortRequest
@@ -604,6 +728,16 @@ mod tests {
             MessageType::try_from(0x04).unwrap(),
             MessageType::SessionClose
         );
+        // LPF メッセージ
+        assert_eq!(
+            MessageType::try_from(0x05).unwrap(),
+            MessageType::LocalForwardRequest
+        );
+        assert_eq!(
+            MessageType::try_from(0x06).unwrap(),
+            MessageType::LocalForwardResponse
+        );
+        // 接続管理メッセージ
         assert_eq!(
             MessageType::try_from(0x10).unwrap(),
             MessageType::NewConnection
@@ -614,6 +748,11 @@ mod tests {
             MessageType::try_from(0x12).unwrap(),
             MessageType::ConnectionClose
         );
+        assert_eq!(
+            MessageType::try_from(0x13).unwrap(),
+            MessageType::LocalNewConnection
+        );
+        // 無効な値
         assert!(MessageType::try_from(0x00).is_err());
         assert!(MessageType::try_from(0xFF).is_err());
     }
@@ -987,6 +1126,160 @@ mod tests {
         match decoded {
             ControlMessage::ConnectionClose { connection_id, .. } => {
                 assert_eq!(connection_id, u32::MAX)
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    // ============================================================================
+    // Local Port Forwarding (LPF) メッセージ テスト
+    // ============================================================================
+
+    #[test]
+    fn test_local_forward_request_encode_decode() {
+        let msg = ControlMessage::LocalForwardRequest {
+            remote_destination: "192.168.1.100:22".to_string(),
+            protocol: Protocol::Tcp,
+            local_source: "9022".to_string(),
+        };
+        let encoded = msg.encode();
+        let decoded = ControlMessage::decode(&encoded).unwrap();
+
+        match decoded {
+            ControlMessage::LocalForwardRequest {
+                remote_destination,
+                protocol,
+                local_source,
+            } => {
+                assert_eq!(remote_destination, "192.168.1.100:22");
+                assert_eq!(protocol, Protocol::Tcp);
+                assert_eq!(local_source, "9022");
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_local_forward_request_udp_encode_decode() {
+        let msg = ControlMessage::LocalForwardRequest {
+            remote_destination: "8.8.8.8:53".to_string(),
+            protocol: Protocol::Udp,
+            local_source: "5353".to_string(),
+        };
+        let encoded = msg.encode();
+        let decoded = ControlMessage::decode(&encoded).unwrap();
+
+        match decoded {
+            ControlMessage::LocalForwardRequest {
+                remote_destination,
+                protocol,
+                local_source,
+            } => {
+                assert_eq!(remote_destination, "8.8.8.8:53");
+                assert_eq!(protocol, Protocol::Udp);
+                assert_eq!(local_source, "5353");
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_local_forward_response_encode_decode() {
+        let msg = ControlMessage::LocalForwardResponse {
+            status: ResponseStatus::Success,
+            message: "Ready to forward".to_string(),
+        };
+        let encoded = msg.encode();
+        let decoded = ControlMessage::decode(&encoded).unwrap();
+
+        match decoded {
+            ControlMessage::LocalForwardResponse { status, message } => {
+                assert_eq!(status, ResponseStatus::Success);
+                assert_eq!(message, "Ready to forward");
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_local_forward_response_error_encode_decode() {
+        let msg = ControlMessage::LocalForwardResponse {
+            status: ResponseStatus::PermissionDenied,
+            message: "Cannot connect to remote".to_string(),
+        };
+        let encoded = msg.encode();
+        let decoded = ControlMessage::decode(&encoded).unwrap();
+
+        match decoded {
+            ControlMessage::LocalForwardResponse { status, message } => {
+                assert_eq!(status, ResponseStatus::PermissionDenied);
+                assert_eq!(message, "Cannot connect to remote");
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_local_new_connection_encode_decode() {
+        let msg = ControlMessage::LocalNewConnection {
+            connection_id: 42,
+            protocol: Protocol::Tcp,
+        };
+        let encoded = msg.encode();
+        let decoded = ControlMessage::decode(&encoded).unwrap();
+
+        match decoded {
+            ControlMessage::LocalNewConnection {
+                connection_id,
+                protocol,
+            } => {
+                assert_eq!(connection_id, 42);
+                assert_eq!(protocol, Protocol::Tcp);
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_local_new_connection_udp_encode_decode() {
+        let msg = ControlMessage::LocalNewConnection {
+            connection_id: 12345,
+            protocol: Protocol::Udp,
+        };
+        let encoded = msg.encode();
+        let decoded = ControlMessage::decode(&encoded).unwrap();
+
+        match decoded {
+            ControlMessage::LocalNewConnection {
+                connection_id,
+                protocol,
+            } => {
+                assert_eq!(connection_id, 12345);
+                assert_eq!(protocol, Protocol::Udp);
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_local_forward_request_empty_local_source() {
+        let msg = ControlMessage::LocalForwardRequest {
+            remote_destination: "localhost:22".to_string(),
+            protocol: Protocol::Tcp,
+            local_source: String::new(),
+        };
+        let encoded = msg.encode();
+        let decoded = ControlMessage::decode(&encoded).unwrap();
+
+        match decoded {
+            ControlMessage::LocalForwardRequest {
+                remote_destination,
+                protocol,
+                local_source,
+            } => {
+                assert_eq!(remote_destination, "localhost:22");
+                assert_eq!(protocol, Protocol::Tcp);
+                assert_eq!(local_source, "");
             }
             _ => panic!("Wrong message type"),
         }
