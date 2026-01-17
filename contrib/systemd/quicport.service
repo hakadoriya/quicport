@@ -6,41 +6,31 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Create a group and user for the service
+# $ sudo groupadd --system quicport
+# $ sudo useradd --system --gid quicport --shell /usr/sbin/nologin --create-home --home-dir /var/lib/quicport --comment "quicport service user" quicport
 User=quicport
 Group=quicport
 
-# バイナリのパス
+# NOTE: The binary path
 ExecStart=/usr/local/bin/quicport server
 
-# 環境変数ファイル (認証キーなどを設定)
+# NOTE: The environment variable file (authentication key, etc.)
 EnvironmentFile=-/etc/quicport/quicport.env
 
-# 再起動設定
+# NOTE: Restart settings
 Restart=on-failure
 RestartSec=5
 
-# セキュリティ設定
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-RestrictNamespaces=yes
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-
-# ログ設定
-StandardOutput=journal
-StandardError=journal
+# NOTE: Log settings
+# Create a log directory
+# $ sudo mkdir -m 755 -p /var/log/quicport
+# $ sudo chown quicport:quicport /var/log/quicport
+StandardOutput=append:/var/log/quicport/quicport.log
+StandardError=inherit
 SyslogIdentifier=quicport
 
-# ファイルディスクリプタ制限
+# NOTE: File descriptor limit
 LimitNOFILE=65535
 
 [Install]
