@@ -64,19 +64,25 @@ impl ConnectionManager {
     }
 }
 
-/// ユーザーに yes/no を確認
+/// ユーザーに yes/no を確認（非同期版）
 ///
 /// 標準入力から y/yes または n/no を読み取る
-fn prompt_yes_no(prompt: &str) -> Result<bool> {
+/// ブロッキング I/O は spawn_blocking で実行し、Tokio ランタイムをブロックしない
+async fn prompt_yes_no(prompt: &str) -> Result<bool> {
     use std::io::{self, Write};
 
     print!("{} [y/N]: ", prompt);
     io::stdout().flush()?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
+    // ブロッキング I/O を専用スレッドで実行
+    let result = tokio::task::spawn_blocking(|| {
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        Ok::<_, anyhow::Error>(input)
+    })
+    .await??;
 
-    let input = input.trim().to_lowercase();
+    let input = result.trim().to_lowercase();
     Ok(input == "y" || input == "yes")
 }
 
@@ -93,10 +99,10 @@ fn format_socket_addr(host: &str, port: u16) -> String {
     }
 }
 
-/// TOFU 検証結果を処理
+/// TOFU 検証結果を処理（非同期版）
 ///
 /// 未知のホストや証明書が変更されたホストに対して、ユーザーに確認を求める
-fn handle_tofu_status(
+async fn handle_tofu_status(
     status: &TofuStatus,
     known_hosts: &KnownHosts,
 ) -> Result<()> {
@@ -118,7 +124,7 @@ fn handle_tofu_status(
             eprintln!("{}", cert_info);
             eprintln!();
 
-            if prompt_yes_no("Are you sure you want to continue connecting?")? {
+            if prompt_yes_no("Are you sure you want to continue connecting?").await? {
                 // known_hosts に追加
                 let line_number = known_hosts.add_host(host, fingerprint)?;
                 let file_path = known_hosts.path().display();
@@ -155,7 +161,7 @@ fn handle_tofu_status(
             eprintln!("{}", cert_info);
             eprintln!();
 
-            if prompt_yes_no("Are you sure you want to continue connecting (and update the known host)?")? {
+            if prompt_yes_no("Are you sure you want to continue connecting (and update the known host)?").await? {
                 // known_hosts を更新
                 let line_number = known_hosts.add_host(host, new_fingerprint)?;
                 let file_path = known_hosts.path().display();
@@ -246,7 +252,7 @@ pub async fn run(
 
         // TOFU 検証結果を確認
         if let Some(status) = tofu_verifier.get_status() {
-            handle_tofu_status(&status, &known_hosts)?;
+            handle_tofu_status(&status, &known_hosts).await?;
         }
 
         connection
@@ -868,7 +874,7 @@ pub async fn run_local_forward(
 
         // TOFU 検証結果を確認
         if let Some(status) = tofu_verifier.get_status() {
-            handle_tofu_status(&status, &known_hosts)?;
+            handle_tofu_status(&status, &known_hosts).await?;
         }
 
         connection
