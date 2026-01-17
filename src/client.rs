@@ -1379,3 +1379,290 @@ async fn relay_lpf_udp_stream(
     debug!("[{}] LPF UDP relay completed", conn_id);
     Ok(())
 }
+
+// =============================================================================
+// SSH ProxyCommand モード実装
+// stdin/stdout を使用してデータを転送
+// =============================================================================
+
+/// SSH ProxyCommand モードを実行
+///
+/// stdin/stdout を使用して QUIC トンネル経由でリモートサービスに接続。
+/// SSH の ProxyCommand として使用することを想定。
+///
+/// # Arguments
+/// * `destination` - 接続先サーバーのアドレス
+/// * `remote_destination` - リモート転送先（例: "22", "192.168.1.100:22"）
+/// * `auth_config` - 認証設定
+/// * `insecure` - true の場合、証明書検証をスキップ（テスト用）
+pub async fn run_ssh_proxy(
+    destination: &str,
+    remote_destination: &str,
+    auth_config: ClientAuthConfig,
+    insecure: bool,
+) -> Result<()> {
+    // remote_destination は addr:port/protocol 形式（addr と protocol は省略可）
+    // SSH 用なので protocol は TCP 固定
+    let (remote_host, remote_port_num, _remote_protocol) = parse_destination_spec(remote_destination)
+        .context("Invalid remote-destination format (expected: [addr:]port[/protocol], e.g., 22, 192.168.1.100:22)")?;
+
+    // 接続先アドレスをパース
+    let server_addr: SocketAddr = destination
+        .parse()
+        .or_else(|_| {
+            // ホスト名の場合は DNS 解決
+            use std::net::ToSocketAddrs;
+            destination
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut addrs| addrs.next())
+                .ok_or_else(|| anyhow::anyhow!("Failed to resolve address: {}", destination))
+        })
+        .context("Invalid destination address")?;
+
+    info!("SSH proxy connecting to {} ...", server_addr);
+
+    // insecure モードまたは TOFU モードで接続
+    // 注意: ssh-proxy は対話的でないため、TOFU の未知ホスト確認はできない
+    // insecure=false の場合も TOFU は無効化し、既知ホストのみ接続可能とする
+    let connection = if insecure {
+        warn!("Insecure mode: skipping server certificate verification");
+        let endpoint = create_client_endpoint(&server_addr)?;
+        endpoint
+            .connect(server_addr, "quicport")
+            .context("Failed to initiate connection")?
+            .await
+            .context("Failed to establish QUIC connection")?
+    } else {
+        // TOFU 検証を行う（ただし非対話なので未知ホストは拒否）
+        let known_hosts_path = KnownHosts::default_path()?;
+        let known_hosts = Arc::new(KnownHosts::new(known_hosts_path)?);
+
+        let (endpoint, tofu_verifier) =
+            create_client_endpoint_with_tofu(&server_addr, destination, known_hosts.clone())?;
+
+        let connection = endpoint
+            .connect(server_addr, "quicport")
+            .context("Failed to initiate connection")?
+            .await
+            .context("Failed to establish QUIC connection")?;
+
+        // TOFU 検証結果を確認（非対話モードなので未知/変更は拒否）
+        if let Some(status) = tofu_verifier.get_status() {
+            match &status {
+                TofuStatus::Known => {
+                    debug!("Server certificate verified (known host)");
+                }
+                TofuStatus::Unknown { host, fingerprint, .. } => {
+                    anyhow::bail!(
+                        "Unknown host '{}' with fingerprint '{}'. \
+                         Run quicport client first to add it to known_hosts, or use --insecure.",
+                        host, fingerprint
+                    );
+                }
+                TofuStatus::Changed { host, old_fingerprint, new_fingerprint, .. } => {
+                    anyhow::bail!(
+                        "Host '{}' certificate changed! Old: {}, New: {}. \
+                         This could be a man-in-the-middle attack. \
+                         Update known_hosts manually if this is expected.",
+                        host, old_fingerprint, new_fingerprint
+                    );
+                }
+            }
+        }
+
+        connection
+    };
+
+    info!("Connected to {}", server_addr);
+
+    // 制御ストリームを開く
+    let (mut control_send, mut control_recv) = connection
+        .open_bi()
+        .await
+        .context("Failed to open control stream")?;
+
+    debug!("Control stream opened");
+
+    // 認証方式に応じて処理を分岐
+    match &auth_config {
+        ClientAuthConfig::X25519 {
+            private_key,
+            expected_server_pubkey,
+        } => {
+            authenticate_with_server_x25519(
+                &mut control_send,
+                &mut control_recv,
+                private_key,
+                expected_server_pubkey,
+            )
+            .await
+            .context("X25519 authentication failed")?;
+            info!("Authenticated with server (X25519)");
+        }
+        ClientAuthConfig::Psk { psk } => {
+            authenticate_with_server_psk(&mut control_send, &mut control_recv, psk)
+                .await
+                .context("PSK authentication failed")?;
+            info!("Authenticated with server (PSK)");
+        }
+    }
+
+    // 認証完了後、ControlStream でラップしてメッセージフレーミングを有効化
+    let mut control_stream = ControlStream::new(control_send, control_recv);
+
+    // リモート転送先のアドレス文字列を構築
+    let remote_addr_str = format_socket_addr(&remote_host, remote_port_num);
+
+    // LocalForwardRequest を送信（LPF と同じプロトコル）
+    let forward_request = ControlMessage::LocalForwardRequest {
+        remote_destination: remote_addr_str.clone(),
+        protocol: Protocol::Tcp,
+        local_source: "ssh-proxy".to_string(), // 識別用
+    };
+    control_stream
+        .send_message(&forward_request)
+        .await
+        .context("Failed to send LocalForwardRequest")?;
+
+    debug!(
+        "LocalForwardRequest sent: remote_destination={}",
+        remote_addr_str
+    );
+
+    // LocalForwardResponse を待機
+    let response = control_stream
+        .recv_message()
+        .await
+        .context("Failed to read LocalForwardResponse")?;
+
+    match response {
+        ControlMessage::LocalForwardResponse { status, message } => {
+            if status != ResponseStatus::Success {
+                anyhow::bail!("Server rejected LocalForwardRequest: {:?} - {}", status, message);
+            }
+            info!("Server accepted LocalForwardRequest: {}", message);
+        }
+        _ => {
+            anyhow::bail!("Unexpected response from server");
+        }
+    }
+
+    // QUIC ストリームを開いてデータ転送
+    let conn_id = LPF_CONNECTION_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+    info!("Opening data stream for SSH proxy (conn_id={})", conn_id);
+
+    let (mut quic_send, quic_recv) = connection
+        .open_bi()
+        .await
+        .context("Failed to open data stream")?;
+
+    // conn_id を 4 bytes (big-endian) でストリームの先頭に書き込む
+    quic_send
+        .write_all(&conn_id.to_be_bytes())
+        .await
+        .context("Failed to write conn_id to stream")?;
+
+    // LocalNewConnection を送信
+    let new_conn_msg = ControlMessage::LocalNewConnection {
+        connection_id: conn_id,
+        protocol: Protocol::Tcp,
+    };
+    control_stream
+        .send_message(&new_conn_msg)
+        .await
+        .context("Failed to send LocalNewConnection")?;
+
+    info!("SSH proxy tunnel established: stdin/stdout -> {} -> {}", server_addr, remote_addr_str);
+
+    // stdin/stdout と QUIC ストリーム間でデータを中継
+    relay_stdio_to_quic(conn_id, quic_send, quic_recv).await?;
+
+    // グレースフルシャットダウン
+    info!("Sending SessionClose to server...");
+    let close_msg = ControlMessage::SessionClose;
+    if let Err(e) = control_stream.send_message(&close_msg).await {
+        debug!("Failed to send SessionClose: {}", e);
+    }
+    if let Err(e) = control_stream.finish() {
+        debug!("Failed to finish control stream: {}", e);
+    }
+
+    // 少し待ってから接続を閉じる
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    connection.close(0u32.into(), b"ssh-proxy done");
+
+    info!("SSH proxy connection closed");
+    Ok(())
+}
+
+/// stdin/stdout と QUIC ストリーム間でデータを中継
+///
+/// SSH ProxyCommand モード専用。stdin EOF で終了。
+async fn relay_stdio_to_quic(
+    conn_id: u32,
+    mut quic_send: SendStream,
+    mut quic_recv: RecvStream,
+) -> Result<()> {
+    debug!("[{}] Starting stdin/stdout <-> QUIC relay", conn_id);
+
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+
+    // stdin -> QUIC (独立したタスクとして実行)
+    let stdin_to_quic = tokio::spawn(async move {
+        let mut buf = vec![0u8; 8192];
+        debug!("[{}] stdin->QUIC task started", conn_id);
+        loop {
+            let n = stdin.read(&mut buf).await?;
+            debug!("[{}] stdin read {} bytes", conn_id, n);
+            if n == 0 {
+                debug!("[{}] stdin EOF", conn_id);
+                break;
+            }
+            quic_send.write_all(&buf[..n]).await?;
+            debug!("[{}] QUIC write {} bytes", conn_id, n);
+        }
+        debug!("[{}] stdin->QUIC finishing stream", conn_id);
+        quic_send.finish()?;
+        Ok::<_, anyhow::Error>(())
+    });
+
+    // QUIC -> stdout (独立したタスクとして実行)
+    let quic_to_stdout = tokio::spawn(async move {
+        let mut buf = vec![0u8; 8192];
+        debug!("[{}] QUIC->stdout task started", conn_id);
+        loop {
+            match quic_recv.read(&mut buf).await? {
+                Some(n) if n > 0 => {
+                    debug!("[{}] QUIC read {} bytes", conn_id, n);
+                    stdout.write_all(&buf[..n]).await?;
+                    stdout.flush().await?;
+                    debug!("[{}] stdout write {} bytes", conn_id, n);
+                }
+                _ => {
+                    debug!("[{}] QUIC read EOF", conn_id);
+                    break;
+                }
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+
+    // どちらかが終了したら完了
+    tokio::select! {
+        result = stdin_to_quic => {
+            if let Err(e) = result {
+                debug!("[{}] stdin->QUIC task error: {}", conn_id, e);
+            }
+        }
+        result = quic_to_stdout => {
+            if let Err(e) = result {
+                debug!("[{}] QUIC->stdout task error: {}", conn_id, e);
+            }
+        }
+    }
+
+    debug!("[{}] stdin/stdout relay completed", conn_id);
+    Ok(())
+}
