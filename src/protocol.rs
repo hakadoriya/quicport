@@ -87,15 +87,15 @@ impl std::str::FromStr for Protocol {
 #[repr(u8)]
 pub enum MessageType {
     // Remote Port Forwarding (RPF) 用メッセージ
-    PortRequest = 0x01,
-    PortResponse = 0x02,
+    RemoteForwardRequest = 0x01,
+    RemoteForwardResponse = 0x02,
     Heartbeat = 0x03,
     SessionClose = 0x04,
     // Local Port Forwarding (LPF) 用メッセージ
     LocalForwardRequest = 0x05,
     LocalForwardResponse = 0x06,
     // 接続管理メッセージ
-    NewConnection = 0x10,
+    RemoteNewConnection = 0x10,
     // 0x11 は未使用（将来の拡張用に予約）
     ConnectionClose = 0x12,
     LocalNewConnection = 0x13,
@@ -106,13 +106,13 @@ impl TryFrom<u8> for MessageType {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0x01 => Ok(MessageType::PortRequest),
-            0x02 => Ok(MessageType::PortResponse),
+            0x01 => Ok(MessageType::RemoteForwardRequest),
+            0x02 => Ok(MessageType::RemoteForwardResponse),
             0x03 => Ok(MessageType::Heartbeat),
             0x04 => Ok(MessageType::SessionClose),
             0x05 => Ok(MessageType::LocalForwardRequest),
             0x06 => Ok(MessageType::LocalForwardResponse),
-            0x10 => Ok(MessageType::NewConnection),
+            0x10 => Ok(MessageType::RemoteNewConnection),
             0x12 => Ok(MessageType::ConnectionClose),
             0x13 => Ok(MessageType::LocalNewConnection),
             _ => Err(ProtocolError::InvalidMessageType(value)),
@@ -120,7 +120,7 @@ impl TryFrom<u8> for MessageType {
     }
 }
 
-/// PortResponse のステータス
+/// RemoteForwardResponse のステータス
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ResponseStatus {
@@ -181,14 +181,14 @@ pub enum ControlMessage {
     /// - port: サーバー側でリッスンするポート番号
     /// - protocol: プロトコル (TCP/UDP)
     /// - local_destination: クライアント側の転送先（ログ用メタデータ）
-    PortRequest {
+    RemoteForwardRequest {
         port: u16,
         protocol: Protocol,
         local_destination: String,
     },
 
     /// ポート開放レスポンス (Server → Client)
-    PortResponse {
+    RemoteForwardResponse {
         status: ResponseStatus,
         message: String,
     },
@@ -230,7 +230,7 @@ pub enum ControlMessage {
     // =========================================================================
 
     /// 新しい接続の通知 (Server → Client) - RPF 用
-    NewConnection {
+    RemoteNewConnection {
         connection_id: u32,
         protocol: Protocol,
     },
@@ -256,22 +256,22 @@ impl ControlMessage {
         let mut buf = BytesMut::new();
 
         match self {
-            ControlMessage::PortRequest {
+            ControlMessage::RemoteForwardRequest {
                 port,
                 protocol,
                 local_destination,
             } => {
                 let dest_bytes = local_destination.as_bytes();
-                buf.put_u8(MessageType::PortRequest as u8);
+                buf.put_u8(MessageType::RemoteForwardRequest as u8);
                 // payload: port(2) + protocol(1) + local_destination(variable)
                 buf.put_u16(3 + dest_bytes.len() as u16);
                 buf.put_u16(*port);
                 buf.put_u8(*protocol as u8);
                 buf.put_slice(dest_bytes);
             }
-            ControlMessage::PortResponse { status, message } => {
+            ControlMessage::RemoteForwardResponse { status, message } => {
                 let msg_bytes = message.as_bytes();
-                buf.put_u8(MessageType::PortResponse as u8);
+                buf.put_u8(MessageType::RemoteForwardResponse as u8);
                 buf.put_u16(1 + msg_bytes.len() as u16);
                 buf.put_u8(*status as u8);
                 buf.put_slice(msg_bytes);
@@ -284,11 +284,11 @@ impl ControlMessage {
                 buf.put_u8(MessageType::SessionClose as u8);
                 buf.put_u16(0);
             }
-            ControlMessage::NewConnection {
+            ControlMessage::RemoteNewConnection {
                 connection_id,
                 protocol,
             } => {
-                buf.put_u8(MessageType::NewConnection as u8);
+                buf.put_u8(MessageType::RemoteNewConnection as u8);
                 buf.put_u16(5); // 4 + 1
                 buf.put_u32(*connection_id);
                 buf.put_u8(*protocol as u8);
@@ -352,7 +352,7 @@ impl ControlMessage {
         }
 
         match msg_type {
-            MessageType::PortRequest => {
+            MessageType::RemoteForwardRequest => {
                 if payload_len < 3 {
                     return Err(ProtocolError::BufferTooShort);
                 }
@@ -361,29 +361,29 @@ impl ControlMessage {
                 // 残りのバイトは local_destination
                 let local_destination =
                     String::from_utf8_lossy(&buf[..payload_len - 3]).to_string();
-                Ok(ControlMessage::PortRequest {
+                Ok(ControlMessage::RemoteForwardRequest {
                     port,
                     protocol,
                     local_destination,
                 })
             }
-            MessageType::PortResponse => {
+            MessageType::RemoteForwardResponse => {
                 if payload_len < 1 {
                     return Err(ProtocolError::BufferTooShort);
                 }
                 let status = ResponseStatus::try_from(buf.get_u8())?;
                 let message = String::from_utf8_lossy(&buf[..payload_len - 1]).to_string();
-                Ok(ControlMessage::PortResponse { status, message })
+                Ok(ControlMessage::RemoteForwardResponse { status, message })
             }
             MessageType::Heartbeat => Ok(ControlMessage::Heartbeat),
             MessageType::SessionClose => Ok(ControlMessage::SessionClose),
-            MessageType::NewConnection => {
+            MessageType::RemoteNewConnection => {
                 if payload_len < 5 {
                     return Err(ProtocolError::BufferTooShort);
                 }
                 let connection_id = buf.get_u32();
                 let protocol = Protocol::try_from(buf.get_u8())?;
-                Ok(ControlMessage::NewConnection {
+                Ok(ControlMessage::RemoteNewConnection {
                     connection_id,
                     protocol,
                 })
@@ -717,11 +717,11 @@ mod tests {
         // RPF メッセージ
         assert_eq!(
             MessageType::try_from(0x01).unwrap(),
-            MessageType::PortRequest
+            MessageType::RemoteForwardRequest
         );
         assert_eq!(
             MessageType::try_from(0x02).unwrap(),
-            MessageType::PortResponse
+            MessageType::RemoteForwardResponse
         );
         assert_eq!(MessageType::try_from(0x03).unwrap(), MessageType::Heartbeat);
         assert_eq!(
@@ -740,7 +740,7 @@ mod tests {
         // 接続管理メッセージ
         assert_eq!(
             MessageType::try_from(0x10).unwrap(),
-            MessageType::NewConnection
+            MessageType::RemoteNewConnection
         );
         // 0x11 は未使用（将来の拡張用に予約）
         assert!(MessageType::try_from(0x11).is_err());
@@ -763,7 +763,7 @@ mod tests {
 
     #[test]
     fn test_port_request_encode_decode() {
-        let msg = ControlMessage::PortRequest {
+        let msg = ControlMessage::RemoteForwardRequest {
             port: 9022,
             protocol: Protocol::Tcp,
             local_destination: "192.168.1.100:22".to_string(),
@@ -772,7 +772,7 @@ mod tests {
         let decoded = ControlMessage::decode(&encoded).unwrap();
 
         match decoded {
-            ControlMessage::PortRequest {
+            ControlMessage::RemoteForwardRequest {
                 port,
                 protocol,
                 local_destination,
@@ -787,7 +787,7 @@ mod tests {
 
     #[test]
     fn test_port_response_encode_decode() {
-        let msg = ControlMessage::PortResponse {
+        let msg = ControlMessage::RemoteForwardResponse {
             status: ResponseStatus::Success,
             message: "Listening on port 9022".to_string(),
         };
@@ -795,7 +795,7 @@ mod tests {
         let decoded = ControlMessage::decode(&encoded).unwrap();
 
         match decoded {
-            ControlMessage::PortResponse { status, message } => {
+            ControlMessage::RemoteForwardResponse { status, message } => {
                 assert_eq!(status, ResponseStatus::Success);
                 assert_eq!(message, "Listening on port 9022");
             }
@@ -805,7 +805,7 @@ mod tests {
 
     #[test]
     fn test_port_response_error_encode_decode() {
-        let msg = ControlMessage::PortResponse {
+        let msg = ControlMessage::RemoteForwardResponse {
             status: ResponseStatus::PortInUse,
             message: "Port already in use".to_string(),
         };
@@ -813,7 +813,7 @@ mod tests {
         let decoded = ControlMessage::decode(&encoded).unwrap();
 
         match decoded {
-            ControlMessage::PortResponse { status, message } => {
+            ControlMessage::RemoteForwardResponse { status, message } => {
                 assert_eq!(status, ResponseStatus::PortInUse);
                 assert_eq!(message, "Port already in use");
             }
@@ -841,7 +841,7 @@ mod tests {
 
     #[test]
     fn test_new_connection_encode_decode() {
-        let msg = ControlMessage::NewConnection {
+        let msg = ControlMessage::RemoteNewConnection {
             connection_id: 12345,
             protocol: Protocol::Tcp,
         };
@@ -849,7 +849,7 @@ mod tests {
         let decoded = ControlMessage::decode(&encoded).unwrap();
 
         match decoded {
-            ControlMessage::NewConnection {
+            ControlMessage::RemoteNewConnection {
                 connection_id,
                 protocol,
             } => {
@@ -895,7 +895,7 @@ mod tests {
 
         // ペイロードが不足
         assert!(matches!(
-            ControlMessage::decode(&[0x01, 0x00, 0x03, 0x00]), // PortRequest だが 3 バイト必要で 1 バイトしかない
+            ControlMessage::decode(&[0x01, 0x00, 0x03, 0x00]), // RemoteForwardRequest だが 3 バイト必要で 1 バイトしかない
             Err(ProtocolError::BufferTooShort)
         ));
     }
@@ -910,8 +910,8 @@ mod tests {
 
     #[test]
     fn test_decode_invalid_protocol() {
-        // PortRequest with invalid protocol
-        let mut buf = vec![0x01, 0x00, 0x03]; // PortRequest header
+        // RemoteForwardRequest with invalid protocol
+        let mut buf = vec![0x01, 0x00, 0x03]; // RemoteForwardRequest header
         buf.extend_from_slice(&9022u16.to_be_bytes()); // port
         buf.push(0xFF); // invalid protocol
 
@@ -1061,7 +1061,7 @@ mod tests {
 
     #[test]
     fn test_port_response_empty_message() {
-        let msg = ControlMessage::PortResponse {
+        let msg = ControlMessage::RemoteForwardResponse {
             status: ResponseStatus::Success,
             message: String::new(),
         };
@@ -1069,7 +1069,7 @@ mod tests {
         let decoded = ControlMessage::decode(&encoded).unwrap();
 
         match decoded {
-            ControlMessage::PortResponse { status, message } => {
+            ControlMessage::RemoteForwardResponse { status, message } => {
                 assert_eq!(status, ResponseStatus::Success);
                 assert_eq!(message, "");
             }
@@ -1080,26 +1080,26 @@ mod tests {
     #[test]
     fn test_port_request_boundary_values() {
         // 最小ポート番号
-        let msg = ControlMessage::PortRequest {
+        let msg = ControlMessage::RemoteForwardRequest {
             port: 1,
             protocol: Protocol::Tcp,
             local_destination: "22".to_string(),
         };
         let decoded = ControlMessage::decode(&msg.encode()).unwrap();
         match decoded {
-            ControlMessage::PortRequest { port, .. } => assert_eq!(port, 1),
+            ControlMessage::RemoteForwardRequest { port, .. } => assert_eq!(port, 1),
             _ => panic!("Wrong message type"),
         }
 
         // 最大ポート番号
-        let msg = ControlMessage::PortRequest {
+        let msg = ControlMessage::RemoteForwardRequest {
             port: 65535,
             protocol: Protocol::Udp,
             local_destination: "".to_string(),
         };
         let decoded = ControlMessage::decode(&msg.encode()).unwrap();
         match decoded {
-            ControlMessage::PortRequest { port, .. } => assert_eq!(port, 65535),
+            ControlMessage::RemoteForwardRequest { port, .. } => assert_eq!(port, 65535),
             _ => panic!("Wrong message type"),
         }
     }
