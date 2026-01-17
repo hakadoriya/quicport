@@ -907,6 +907,22 @@ quicport_bytes_sent_total 10485760
 # HELP quicport_bytes_received_total Total bytes received from clients
 # TYPE quicport_bytes_received_total counter
 quicport_bytes_received_total 5242880
+
+# HELP quicport_auth_psk_success_total Total number of successful PSK authentications
+# TYPE quicport_auth_psk_success_total counter
+quicport_auth_psk_success_total 50
+
+# HELP quicport_auth_psk_failed_total Total number of failed PSK authentications
+# TYPE quicport_auth_psk_failed_total counter
+quicport_auth_psk_failed_total 3
+
+# HELP quicport_auth_x25519_success_total Total number of successful X25519 authentications
+# TYPE quicport_auth_x25519_success_total counter
+quicport_auth_x25519_success_total 45
+
+# HELP quicport_auth_x25519_failed_total Total number of failed X25519 authentications
+# TYPE quicport_auth_x25519_failed_total counter
+quicport_auth_x25519_failed_total 2
 ```
 
 | メトリクス | タイプ | 説明 |
@@ -916,6 +932,10 @@ quicport_bytes_received_total 5242880
 | `quicport_connections_active` | gauge | 現在アクティブな接続数 |
 | `quicport_bytes_sent_total` | counter | サーバーからクライアントへの送信バイト数 |
 | `quicport_bytes_received_total` | counter | クライアントからサーバーへの受信バイト数 |
+| `quicport_auth_psk_success_total` | counter | PSK 認証成功回数 |
+| `quicport_auth_psk_failed_total` | counter | PSK 認証失敗回数 |
+| `quicport_auth_x25519_success_total` | counter | X25519 認証成功回数 |
+| `quicport_auth_x25519_failed_total` | counter | X25519 認証失敗回数 |
 
 ## 技術スタック
 

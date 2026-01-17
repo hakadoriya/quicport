@@ -173,6 +173,7 @@ async fn handle_client(
             .await
             {
                 Ok(client_pubkey) => {
+                    statistics.auth_x25519_success();
                     let pubkey_b64 = encode_base64_key(&client_pubkey);
                     info!(
                         "Client {} authenticated (pubkey: {}...)",
@@ -181,6 +182,7 @@ async fn handle_client(
                     );
                 }
                 Err(crate::quic::X25519AuthError::PublicKeyNotAuthorized) => {
+                    statistics.auth_x25519_failed();
                     warn!(
                         "Authentication failed for {}: public key not authorized",
                         remote_addr
@@ -188,6 +190,7 @@ async fn handle_client(
                     return Ok(());
                 }
                 Err(e) => {
+                    statistics.auth_x25519_failed();
                     warn!("Authentication failed for {}: {}", remote_addr, e);
                     return Ok(());
                 }
@@ -195,9 +198,11 @@ async fn handle_client(
         }
         AuthConfig::Psk { psk } => match authenticate_client_psk(&mut send, &mut recv, psk).await {
             Ok(()) => {
+                statistics.auth_psk_success();
                 info!("Client {} authenticated (PSK)", remote_addr);
             }
             Err(e) => {
+                statistics.auth_psk_failed();
                 warn!("PSK authentication failed for {}: {}", remote_addr, e);
                 return Ok(());
             }
