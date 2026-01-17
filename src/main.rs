@@ -1,22 +1,38 @@
 //! quicport CLI エントリーポイント
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use quicport::quic::{load_privkey_from_file, load_pubkeys_from_file, parse_base64_key};
+use quicport::quic::{
+    generate_psk, load_privkey_from_file, load_pubkeys_from_file, parse_base64_key, psk_file_path,
+};
 use quicport::statistics::ServerStatistics;
 use quicport::{api, client, server};
+
+/// ログ出力形式
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum LogFormat {
+    /// 人間が読みやすい形式
+    #[default]
+    Console,
+    /// JSON 形式（構造化ログ）
+    Json,
+}
 
 /// QUIC-based port forwarding / tunneling tool
 #[derive(Parser, Debug)]
 #[command(name = "quicport")]
 #[command(version, about, long_about = None)]
 struct Cli {
+    /// Log output format
+    #[arg(long, default_value = "console", env = "QUICPORT_LOG_FORMAT")]
+    log_format: LogFormat,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -191,9 +207,24 @@ fn build_server_auth_config(
         return Ok(server::AuthConfig::Psk { psk });
     }
 
-    anyhow::bail!(
-        "No authentication configured. Provide --client-pubkeys, --client-pubkeys-file, or --psk"
-    )
+    // 認証オプションが何も指定されていない場合、PSK を自動生成
+    let psk_path = psk_file_path()?;
+    if psk_path.exists() {
+        // 既存の PSK を読み込む
+        let psk = std::fs::read_to_string(&psk_path)
+            .with_context(|| format!("Failed to read PSK from {:?}", psk_path))?;
+        info!("Using existing PSK from {}", psk_path.display());
+        return Ok(server::AuthConfig::Psk {
+            psk: psk.trim().to_string(),
+        });
+    } else {
+        // 新規 PSK を生成して保存
+        let psk = generate_psk();
+        std::fs::write(&psk_path, &psk)
+            .with_context(|| format!("Failed to write PSK to {:?}", psk_path))?;
+        info!("Generated new PSK and saved to {}", psk_path.display());
+        return Ok(server::AuthConfig::Psk { psk });
+    }
 }
 
 /// クライアント用の認証設定を構築
@@ -259,14 +290,26 @@ fn build_client_auth_config(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let cli = Cli::parse();
+
+    // Initialize logging (stdout に出力)
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    match cli.log_format {
+        LogFormat::Console => {
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stdout)
+                .with_env_filter(env_filter)
+                .init();
+        }
+        LogFormat::Json => {
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stdout)
+                .with_env_filter(env_filter)
+                .json()
+                .init();
+        }
+    }
 
     match cli.command {
         Commands::Server {
