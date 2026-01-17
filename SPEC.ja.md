@@ -389,7 +389,6 @@ example.com:9000 AB:CD:EF:...
 - 5 秒間隔で keep-alive パケットを自動送信
 - **Idle timeout**: 10 秒間応答がなければ接続をクローズ
   - クライアントが強制終了された場合でも、最大 10 秒以内にサーバーが接続切断を検出
-- プロトコルレベルの Heartbeat メッセージ（0x03）は将来の拡張用に予約
 
 ### グレースフルシャットダウン
 
@@ -436,22 +435,26 @@ Client                          Server
 
 #### メッセージタイプ
 
+番号体系:
+- `0x0X`: Local Port Forwarding (LPF)
+- `0x2X`: Remote Port Forwarding (RPF)
+- `0x4X`: Session Control
+- `0x6X`: Connection Control
+
 | Type | 名前 | 方向 | 説明 |
 |------|------|------|------|
-| **RPF (Remote Port Forwarding)** ||||
-| 0x01 | RemoteForwardRequest | Client → Server | ポート開放リクエスト |
-| 0x02 | RemoteForwardResponse | Server → Client | ポート開放レスポンス |
-| **共通** ||||
-| 0x03 | Heartbeat | 双方向 | 接続維持（※現在は QUIC keep-alive を使用、将来拡張用に予約） |
-| 0x04 | SessionClose | 双方向 | QUIC セッション終了 |
 | **LPF (Local Port Forwarding)** ||||
-| 0x05 | LocalForwardRequest | Client → Server | ローカルフォワードリクエスト |
-| 0x06 | LocalForwardResponse | Server → Client | ローカルフォワードレスポンス |
-| **接続管理** ||||
-| 0x10 | RemoteNewConnection | Server → Client | 新しい TCP/UDP 接続の通知 (RPF) |
-| 0x11 | (予約) | - | 将来の拡張用に予約 |
-| 0x12 | ConnectionClose | 双方向 | 個別接続の終了通知 |
-| 0x13 | LocalNewConnection | Client → Server | 新しいローカル接続の通知 (LPF) |
+| 0x01 | LocalForwardRequest | Client → Server | ローカルフォワードリクエスト |
+| 0x02 | LocalForwardResponse | Server → Client | ローカルフォワードレスポンス |
+| 0x03 | LocalNewConnection | Client → Server | 新しいローカル接続の通知 |
+| **RPF (Remote Port Forwarding)** ||||
+| 0x21 | RemoteForwardRequest | Client → Server | ポート開放リクエスト |
+| 0x22 | RemoteForwardResponse | Server → Client | ポート開放レスポンス |
+| 0x23 | RemoteNewConnection | Server → Client | 新しい TCP/UDP 接続の通知 |
+| **セッション制御** ||||
+| 0x41 | SessionClose | 双方向 | QUIC セッション終了 |
+| **接続制御** ||||
+| 0x61 | ConnectionClose | 双方向 | 個別接続の終了通知 |
 
 #### RemoteForwardRequest ペイロード
 
