@@ -2,7 +2,8 @@ name: rust-build
 
 on:
   release:
-    types: [published]
+    types:
+      - published
   workflow_dispatch:
     inputs:
       tag_name:
@@ -192,8 +193,8 @@ jobs:
           key: ${{ steps.cache-target-restore.outputs.cache-primary-key }}
 
   upload-release:
-    name: Upload to Release
-    needs: rust-build
+    needs:
+      - rust-build
     if: github.event_name == 'release' || inputs.tag_name != ''
     runs-on: ubuntu-latest
     steps:
