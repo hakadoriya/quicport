@@ -27,6 +27,7 @@ use crate::quic::{
 };
 
 /// クライアント認証設定
+#[derive(Clone)]
 pub enum ClientAuthConfig {
     /// X25519 秘密鍵認証（相互認証）
     X25519 {
@@ -36,6 +37,42 @@ pub enum ClientAuthConfig {
     },
     /// PSK 認証
     Psk { psk: String },
+}
+
+/// 再接続設定
+#[derive(Clone, Debug)]
+pub struct ReconnectConfig {
+    /// 自動再接続を有効にするかどうか
+    pub enabled: bool,
+    /// 最大再試行回数（0 = 無制限）
+    pub max_attempts: u32,
+    /// 初期再試行間隔（秒）
+    pub initial_delay_secs: u64,
+    /// 最大再試行間隔（秒）
+    pub max_delay_secs: u64,
+}
+
+impl Default for ReconnectConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_attempts: 0,
+            initial_delay_secs: 1,
+            max_delay_secs: 60,
+        }
+    }
+}
+
+impl ReconnectConfig {
+    /// 再接続設定を作成
+    pub fn new(enabled: bool, max_attempts: u32, initial_delay_secs: u64) -> Self {
+        Self {
+            enabled,
+            max_attempts,
+            initial_delay_secs,
+            max_delay_secs: 60,
+        }
+    }
 }
 
 /// アクティブな接続を管理
@@ -186,7 +223,7 @@ async fn handle_tofu_status(
 /// * `local_destination` - ローカル転送先（例: "22/tcp", "22", "192.168.1.100:22"）
 /// * `auth_config` - 認証設定
 /// * `insecure` - true の場合、証明書検証をスキップ（テスト用）
-pub async fn run(
+async fn run_remote_forward(
     destination: &str,
     remote_source: &str,
     local_destination: &str,
@@ -350,6 +387,73 @@ pub async fn run(
     .await?;
 
     Ok(())
+}
+
+/// 再接続機能付きでクライアントを起動（RPF モード）
+///
+/// 接続が切断された場合、指定された設定に従って自動的に再接続を試みる。
+/// エクスポネンシャルバックオフで再試行間隔を増加させる。
+pub async fn run_remote_forward_with_reconnect(
+    destination: &str,
+    remote_source: &str,
+    local_destination: &str,
+    auth_config: ClientAuthConfig,
+    insecure: bool,
+    reconnect_config: ReconnectConfig,
+) -> Result<()> {
+    if !reconnect_config.enabled {
+        // 再接続が無効の場合は通常の run_remote_forward を呼び出す
+        return run_remote_forward(destination, remote_source, local_destination, auth_config, insecure).await;
+    }
+
+    let mut attempt = 0u32;
+    let mut delay_secs = reconnect_config.initial_delay_secs;
+
+    loop {
+        attempt += 1;
+        let attempt_str = if reconnect_config.max_attempts == 0 {
+            format!("#{}", attempt)
+        } else {
+            format!("#{}/{}", attempt, reconnect_config.max_attempts)
+        };
+
+        info!("Connection attempt {}", attempt_str);
+
+        match run_remote_forward(
+            destination,
+            remote_source,
+            local_destination,
+            auth_config.clone(),
+            insecure,
+        )
+        .await
+        {
+            Ok(()) => {
+                // 正常終了（シャットダウンシグナルなど）
+                info!("Connection closed normally");
+                return Ok(());
+            }
+            Err(e) => {
+                // エラーで終了
+                warn!("Connection failed: {}", e);
+
+                // 最大試行回数をチェック（0 = 無制限）
+                if reconnect_config.max_attempts > 0 && attempt >= reconnect_config.max_attempts {
+                    error!(
+                        "Maximum reconnection attempts ({}) reached",
+                        reconnect_config.max_attempts
+                    );
+                    return Err(e);
+                }
+
+                info!("Reconnecting in {} seconds...", delay_secs);
+                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+
+                // エクスポネンシャルバックオフ（最大まで増加）
+                delay_secs = std::cmp::min(delay_secs * 2, reconnect_config.max_delay_secs);
+            }
+        }
+    }
 }
 
 /// シャットダウンシグナル Future を作成
@@ -808,7 +912,7 @@ fn create_tcp_listener_with_reuseaddr(addr: SocketAddr) -> std::io::Result<std::
 /// * `remote_destination` - リモート転送先（例: "22/tcp", "22", "192.168.1.100:22"）
 /// * `auth_config` - 認証設定
 /// * `insecure` - true の場合、証明書検証をスキップ（テスト用）
-pub async fn run_local_forward(
+async fn run_local_forward(
     destination: &str,
     local_source: &str,
     remote_destination: &str,
@@ -975,6 +1079,18 @@ pub async fn run_local_forward(
     Ok(())
 }
 
+/// LPF 切断理由
+enum LpfCloseReason {
+    /// ユーザーによる正常終了（SIGINT/SIGTERM）
+    GracefulShutdown,
+    /// サーバーからの正常終了要求
+    ServerSessionClose,
+    /// QUIC 接続が予期せずクローズされた（再接続が必要）
+    ConnectionLost(String),
+    /// 制御ストリームエラー（再接続が必要）
+    ControlStreamError(String),
+}
+
 /// LPF: ローカルポートでリッスンして接続を処理
 async fn handle_local_connections(
     quic_conn: Connection,
@@ -1007,6 +1123,9 @@ async fn handle_local_connections(
             let shutdown_signal = create_shutdown_signal();
             tokio::pin!(shutdown_signal);
 
+            // TCP 用切断理由
+            let close_reason: LpfCloseReason;
+
             // TCP 接続を受け付けるループ
             loop {
                 tokio::select! {
@@ -1028,12 +1147,14 @@ async fn handle_local_connections(
                         quic_conn.close(0u32.into(), b"client shutdown");
 
                         info!("Connection closed gracefully");
+                        close_reason = LpfCloseReason::GracefulShutdown;
                         break;
                     }
 
                     // QUIC コネクションがクローズされた場合
                     reason = quic_conn.closed() => {
                         info!("QUIC connection closed: {:?}, stopping LPF listener", reason);
+                        close_reason = LpfCloseReason::ConnectionLost(format!("{:?}", reason));
                         break;
                     }
 
@@ -1091,6 +1212,7 @@ async fn handle_local_connections(
                         match result {
                             Ok(ControlMessage::SessionClose) => {
                                 info!("Server requested session close");
+                                close_reason = LpfCloseReason::ServerSessionClose;
                                 break;
                             }
                             Ok(ControlMessage::ConnectionClose {
@@ -1108,16 +1230,30 @@ async fn handle_local_connections(
                             }
                             Err(ProtocolError::StreamClosed) => {
                                 info!("Control stream closed by server");
+                                // 予期しないストリーム切断は再接続対象
+                                close_reason = LpfCloseReason::ConnectionLost("Control stream closed unexpectedly".to_string());
                                 break;
                             }
                             Err(e) => {
                                 error!("Control stream error: {}", e);
+                                close_reason = LpfCloseReason::ControlStreamError(format!("{}", e));
                                 break;
                             }
                         }
                     }
                 }
             }
+
+            // TCP セクションの切断理由を返す
+            return match close_reason {
+                LpfCloseReason::GracefulShutdown | LpfCloseReason::ServerSessionClose => Ok(()),
+                LpfCloseReason::ConnectionLost(reason) => {
+                    Err(anyhow::anyhow!("Connection lost: {}", reason))
+                }
+                LpfCloseReason::ControlStreamError(reason) => {
+                    Err(anyhow::anyhow!("Control stream error: {}", reason))
+                }
+            };
         }
         Protocol::Udp => {
             // UDP ソケットを作成してリッスン
@@ -1141,6 +1277,9 @@ async fn handle_local_connections(
             let shutdown_signal = create_shutdown_signal();
             tokio::pin!(shutdown_signal);
 
+            // UDP 用切断理由
+            let udp_close_reason: LpfCloseReason;
+
             loop {
                 tokio::select! {
                     // シャットダウンシグナル
@@ -1161,12 +1300,14 @@ async fn handle_local_connections(
                         quic_conn.close(0u32.into(), b"client shutdown");
 
                         info!("Connection closed gracefully");
+                        udp_close_reason = LpfCloseReason::GracefulShutdown;
                         break;
                     }
 
                     // QUIC コネクションがクローズされた場合
                     reason = quic_conn.closed() => {
                         info!("QUIC connection closed: {:?}, stopping UDP LPF listener", reason);
+                        udp_close_reason = LpfCloseReason::ConnectionLost(format!("{:?}", reason));
                         break;
                     }
 
@@ -1264,6 +1405,7 @@ async fn handle_local_connections(
                         match result {
                             Ok(ControlMessage::SessionClose) => {
                                 info!("Server requested session close");
+                                udp_close_reason = LpfCloseReason::ServerSessionClose;
                                 break;
                             }
                             Ok(ControlMessage::ConnectionClose {
@@ -1281,20 +1423,32 @@ async fn handle_local_connections(
                             }
                             Err(ProtocolError::StreamClosed) => {
                                 info!("Control stream closed by server");
+                                // 予期しないストリーム切断は再接続対象
+                                udp_close_reason = LpfCloseReason::ConnectionLost("Control stream closed unexpectedly".to_string());
                                 break;
                             }
                             Err(e) => {
                                 error!("Control stream error: {}", e);
+                                udp_close_reason = LpfCloseReason::ControlStreamError(format!("{}", e));
                                 break;
                             }
                         }
                     }
                 }
             }
+
+            // UDP セクションの切断理由を返す
+            return match udp_close_reason {
+                LpfCloseReason::GracefulShutdown | LpfCloseReason::ServerSessionClose => Ok(()),
+                LpfCloseReason::ConnectionLost(reason) => {
+                    Err(anyhow::anyhow!("Connection lost: {}", reason))
+                }
+                LpfCloseReason::ControlStreamError(reason) => {
+                    Err(anyhow::anyhow!("Control stream error: {}", reason))
+                }
+            };
         }
     }
-
-    Ok(())
 }
 
 /// LPF: UDP パケットと QUIC ストリーム間でデータを中継
@@ -1395,7 +1549,7 @@ async fn relay_lpf_udp_stream(
 /// * `remote_destination` - リモート転送先（例: "22", "192.168.1.100:22"）
 /// * `auth_config` - 認証設定
 /// * `insecure` - true の場合、証明書検証をスキップ（テスト用）
-pub async fn run_ssh_proxy(
+async fn run_ssh_proxy(
     destination: &str,
     remote_destination: &str,
     auth_config: ClientAuthConfig,
@@ -1665,4 +1819,123 @@ async fn relay_stdio_to_quic(
 
     debug!("[{}] stdin/stdout relay completed", conn_id);
     Ok(())
+}
+
+/// 再接続機能付きでクライアントを起動（LPF モード）
+///
+/// 接続が切断された場合、指定された設定に従って自動的に再接続を試みる。
+pub async fn run_local_forward_with_reconnect(
+    destination: &str,
+    local_source: &str,
+    remote_destination: &str,
+    auth_config: ClientAuthConfig,
+    insecure: bool,
+    reconnect_config: ReconnectConfig,
+) -> Result<()> {
+    if !reconnect_config.enabled {
+        return run_local_forward(destination, local_source, remote_destination, auth_config, insecure).await;
+    }
+
+    let mut attempt = 0u32;
+    let mut delay_secs = reconnect_config.initial_delay_secs;
+
+    loop {
+        attempt += 1;
+        let attempt_str = if reconnect_config.max_attempts == 0 {
+            format!("#{}", attempt)
+        } else {
+            format!("#{}/{}", attempt, reconnect_config.max_attempts)
+        };
+
+        info!("Connection attempt {}", attempt_str);
+
+        match run_local_forward(
+            destination,
+            local_source,
+            remote_destination,
+            auth_config.clone(),
+            insecure,
+        )
+        .await
+        {
+            Ok(()) => {
+                info!("Connection closed normally");
+                return Ok(());
+            }
+            Err(e) => {
+                warn!("Connection failed: {}", e);
+
+                if reconnect_config.max_attempts > 0 && attempt >= reconnect_config.max_attempts {
+                    error!(
+                        "Maximum reconnection attempts ({}) reached",
+                        reconnect_config.max_attempts
+                    );
+                    return Err(e);
+                }
+
+                info!("Reconnecting in {} seconds...", delay_secs);
+                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                delay_secs = std::cmp::min(delay_secs * 2, reconnect_config.max_delay_secs);
+            }
+        }
+    }
+}
+
+/// 再接続機能付きでクライアントを起動（SSH Proxy モード）
+///
+/// 接続が切断された場合、指定された設定に従って自動的に再接続を試みる。
+/// 注意: SSH プロセスは stdin/stdout が閉じると終了するため、再接続には制限がある。
+pub async fn run_ssh_proxy_with_reconnect(
+    destination: &str,
+    remote_destination: &str,
+    auth_config: ClientAuthConfig,
+    insecure: bool,
+    reconnect_config: ReconnectConfig,
+) -> Result<()> {
+    if !reconnect_config.enabled {
+        return run_ssh_proxy(destination, remote_destination, auth_config, insecure).await;
+    }
+
+    let mut attempt = 0u32;
+    let mut delay_secs = reconnect_config.initial_delay_secs;
+
+    loop {
+        attempt += 1;
+        let attempt_str = if reconnect_config.max_attempts == 0 {
+            format!("#{}", attempt)
+        } else {
+            format!("#{}/{}", attempt, reconnect_config.max_attempts)
+        };
+
+        info!("Connection attempt {}", attempt_str);
+
+        match run_ssh_proxy(
+            destination,
+            remote_destination,
+            auth_config.clone(),
+            insecure,
+        )
+        .await
+        {
+            Ok(()) => {
+                info!("Connection closed normally");
+                return Ok(());
+            }
+            Err(e) => {
+                warn!("Connection failed: {}", e);
+
+                if reconnect_config.max_attempts > 0 && attempt >= reconnect_config.max_attempts {
+                    error!(
+                        "Maximum reconnection attempts ({}) reached",
+                        reconnect_config.max_attempts
+                    );
+                    return Err(e);
+                }
+
+                info!("Reconnecting in {} seconds...", delay_secs);
+                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                delay_secs = std::cmp::min(delay_secs * 2, reconnect_config.max_delay_secs);
+            }
+        }
+    }
 }

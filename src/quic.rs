@@ -9,6 +9,7 @@ use quinn::{ClientConfig, Endpoint, RecvStream, SendStream, ServerConfig};
 use rand::rngs::OsRng;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use sha2::{Digest, Sha256};
+use socket2::{Domain, Protocol as SockProtocol, Socket, Type};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -521,9 +522,50 @@ fn get_or_create_server_cert() -> Result<(Vec<CertificateDer<'static>>, PrivateK
     Ok((vec![cert_der], key_der))
 }
 
+/// SO_REUSEADDR + SO_REUSEPORT 付きで UDP ソケットを作成（グレースフルリスタート用）
+///
+/// これにより複数の data-plane プロセスが同じポートで LISTEN 可能
+fn create_udp_socket_with_reuseport(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+
+    let socket = Socket::new(domain, Type::DGRAM, Some(SockProtocol::UDP))?;
+    socket.set_reuse_address(true)?;
+
+    // SO_REUSEPORT を設定（グレースフルリスタート用）
+    // これにより複数プロセスが同じポートで LISTEN 可能
+    #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = socket.as_raw_fd();
+        unsafe {
+            let optval: libc::c_int = 1;
+            let ret = libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_REUSEPORT,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            if ret != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+
+    socket.bind(&addr.into())?;
+    socket.set_nonblocking(true)?;
+
+    Ok(socket.into())
+}
+
 /// サーバー用の QUIC エンドポイントを作成
 ///
 /// 証明書は ~/.config/quicport/ に永続化される
+/// SO_REUSEPORT を設定して複数プロセスが同じポートで LISTEN 可能にする
 pub fn create_server_endpoint(bind_addr: SocketAddr, _psk: &str) -> Result<Endpoint> {
     let (certs, key) = get_or_create_server_cert()?;
 
@@ -550,8 +592,21 @@ pub fn create_server_endpoint(bind_addr: SocketAddr, _psk: &str) -> Result<Endpo
     ));
     server_config.transport_config(Arc::new(transport_config));
 
-    let endpoint =
-        Endpoint::server(server_config, bind_addr).context("Failed to create server endpoint")?;
+    // SO_REUSEPORT を設定した UDP ソケットを作成（グレースフルリスタート用）
+    let udp_socket = create_udp_socket_with_reuseport(bind_addr)
+        .context("Failed to create UDP socket with SO_REUSEPORT")?;
+
+    // カスタムソケットから Endpoint を作成
+    let runtime = quinn::default_runtime()
+        .ok_or_else(|| anyhow::anyhow!("No async runtime found"))?;
+
+    let endpoint = Endpoint::new(
+        quinn::EndpointConfig::default(),
+        Some(server_config),
+        udp_socket,
+        runtime,
+    )
+    .context("Failed to create server endpoint")?;
 
     Ok(endpoint)
 }
