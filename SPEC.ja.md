@@ -347,7 +347,7 @@ quicport はサーバー再起動時の接続維持を実現するため、デ�
                                     |  - API サーバー       |
                                     +-----------+-----------+
                                                 |
-                                                | IPC (Unix Socket)
+                                                | IPC (TCP 127.0.0.1)
                                                 |
 +-------------------+                 +---------v---------+                 +-------------------+
 |                   |    QUIC         |   Data Plane      |    QUIC         |                   |
@@ -601,14 +601,14 @@ quicport は以下のディレクトリにファイルを配置します（XDG B
 | `~/.config/quicport/psk` | 自動生成された PSK（Base64 形式、32 バイト） |
 | `~/.local/share/quicport/known_hosts` | クライアントの既知ホスト一覧 |
 | `~/.local/share/quicport/ticket.key` | セッションチケット暗号化キー（32 バイト、パーミッション 0600） |
-| `~/.local/state/quicport/dataplanes/dp-<pid>.sock` | データプレーン制御用 Unix Socket（パーミッション 0600） |
+| `~/.local/state/quicport/dataplanes/dp-<pid>.port` | データプレーン IPC ポート番号（TCP 127.0.0.1） |
 | `~/.local/state/quicport/dataplanes/dp-<pid>.state` | データプレーン状態ファイル（JSON 形式） |
 
 #### データプレーン管理ファイル
 
 データプレーンは `~/.local/state/quicport/dataplanes/` ディレクトリで管理されます:
 
-- **Unix Socket** (`dp-<pid>.sock`): コントロールプレーンとの IPC 通信用
+- **ポートファイル** (`dp-<pid>.port`): IPC 用 TCP ポート番号（127.0.0.1 で待ち受け）
 - **状態ファイル** (`dp-<pid>.state`): データプレーンの現在の状態を JSON 形式で記録
 
 状態ファイルの例:

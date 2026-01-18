@@ -22,7 +22,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::ipc::{
-    dataplane_socket_path, discover_dataplanes, read_dataplane_state, AuthPolicy, ControlCommand,
+    discover_dataplanes, read_dataplane_port, read_dataplane_state, AuthPolicy, ControlCommand,
     DataPlaneConfig, DataPlaneEvent, DataPlaneState, DataPlaneStatus, IpcConnection,
 };
 use crate::statistics::ServerStatistics;
@@ -129,11 +129,12 @@ impl ControlPlane {
 
     /// データプレーンに接続
     async fn connect_to_dataplane(&self, pid: u32) -> Result<DataPlaneStatus> {
-        let sock_path = dataplane_socket_path(pid)?;
+        let port = read_dataplane_port(pid)
+            .with_context(|| format!("Failed to read port for data plane PID {}", pid))?;
 
-        let mut conn = IpcConnection::connect(&sock_path)
+        let mut conn = IpcConnection::connect(port)
             .await
-            .with_context(|| format!("Failed to connect to data plane PID {}", pid))?;
+            .with_context(|| format!("Failed to connect to data plane PID {} on port {}", pid, port))?;
 
         // Ready イベントを受信
         let event = conn.recv_event().await?;
@@ -445,8 +446,14 @@ pub async fn graceful_restart() -> Result<()> {
 
     // 全ての ACTIVE なデータプレーンに DRAIN を送信
     for pid in pids {
-        let sock_path = dataplane_socket_path(pid)?;
-        match IpcConnection::connect(&sock_path).await {
+        let port = match read_dataplane_port(pid) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Failed to read port for data plane PID {}: {}", pid, e);
+                continue;
+            }
+        };
+        match IpcConnection::connect(port).await {
             Ok(mut conn) => {
                 // Ready イベントをスキップ
                 let _ = conn.recv_event().await;

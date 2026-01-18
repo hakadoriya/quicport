@@ -18,18 +18,17 @@ use quinn::{Connection, RecvStream, SendStream};
 use socket2::{Domain, Protocol as SockProtocol, Socket, Type};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UnixListener};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::ipc::{
-    cleanup_dataplane_files, dataplane_socket_path, ensure_dataplanes_dir, write_dataplane_state,
+    cleanup_dataplane_files, ensure_dataplanes_dir, write_dataplane_port, write_dataplane_state,
     AuthPolicy, ControlCommand, DataPlaneConfig, DataPlaneEvent, DataPlaneState, DataPlaneStatus,
     IpcConnection,
 };
@@ -256,19 +255,15 @@ pub async fn run(config: DataPlaneConfig, auth_policy: Option<AuthPolicy>) -> Re
     ensure_dataplanes_dir()?;
 
     let pid = std::process::id();
-    let sock_path = dataplane_socket_path(pid)?;
 
-    // 既存のソケットファイルがあれば削除
-    if sock_path.exists() {
-        std::fs::remove_file(&sock_path)?;
-    }
+    // IPC 用 TCP リスナーを作成（OS が空きポートを自動割り当て）
+    let ipc_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let ipc_port = ipc_listener.local_addr()?.port();
 
-    // IPC ソケットを作成
-    let ipc_listener = UnixListener::bind(&sock_path)?;
-    // パーミッションを 0600 に設定
-    std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600))?;
+    // ポート番号をファイルに書き込む
+    write_dataplane_port(pid, ipc_port)?;
 
-    info!("Data plane IPC socket: {}", sock_path.display());
+    info!("Data plane IPC listening on 127.0.0.1:{}", ipc_port);
 
     // 初期状態を書き込み
     data_plane.set_state(DataPlaneState::Starting).await;
@@ -390,7 +385,7 @@ pub async fn run(config: DataPlaneConfig, auth_policy: Option<AuthPolicy>) -> Re
 /// IPC 接続を処理
 async fn handle_ipc_connection(
     data_plane: Arc<DataPlane>,
-    stream: tokio::net::UnixStream,
+    stream: TcpStream,
 ) -> Result<()> {
     let mut conn = IpcConnection::new(stream);
 

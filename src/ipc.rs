@@ -13,8 +13,8 @@
 //!
 //! ## 通信方式
 //!
-//! - Unix Domain Socket
-//! - パス: `~/.local/state/quicport/dataplanes/dp-<pid>.sock`
+//! - TCP localhost (127.0.0.1)
+//! - ポート番号ファイル: `~/.local/state/quicport/dataplanes/dp-<pid>.port`
 
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -22,7 +22,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
+use tokio::net::TcpStream;
 
 /// IPC エラー
 #[derive(Error, Debug)]
@@ -259,18 +259,19 @@ pub struct ConnectionInfo {
 
 /// IPC 接続
 pub struct IpcConnection {
-    stream: UnixStream,
+    stream: TcpStream,
 }
 
 impl IpcConnection {
     /// 新しい IPC 接続を作成
-    pub fn new(stream: UnixStream) -> Self {
+    pub fn new(stream: TcpStream) -> Self {
         Self { stream }
     }
 
-    /// Unix Socket に接続
-    pub async fn connect(path: &std::path::Path) -> Result<Self, IpcError> {
-        let stream = UnixStream::connect(path).await?;
+    /// TCP localhost に接続
+    pub async fn connect(port: u16) -> Result<Self, IpcError> {
+        let addr = format!("127.0.0.1:{}", port);
+        let stream = TcpStream::connect(&addr).await?;
         Ok(Self { stream })
     }
 
@@ -376,9 +377,25 @@ pub fn dataplanes_dir() -> Result<PathBuf, io::Error> {
     Ok(state_dir.join("quicport").join("dataplanes"))
 }
 
-/// データプレーンのソケットパスを取得
-pub fn dataplane_socket_path(pid: u32) -> Result<PathBuf, io::Error> {
-    Ok(dataplanes_dir()?.join(format!("dp-{}.sock", pid)))
+/// データプレーンのポートファイルパスを取得
+pub fn dataplane_port_path(pid: u32) -> Result<PathBuf, io::Error> {
+    Ok(dataplanes_dir()?.join(format!("dp-{}.port", pid)))
+}
+
+/// データプレーンのポート番号をファイルに書き込む
+pub fn write_dataplane_port(pid: u32, port: u16) -> Result<(), io::Error> {
+    let path = dataplane_port_path(pid)?;
+    std::fs::write(&path, port.to_string())
+}
+
+/// データプレーンのポート番号をファイルから読み取る
+pub fn read_dataplane_port(pid: u32) -> Result<u16, io::Error> {
+    let path = dataplane_port_path(pid)?;
+    let content = std::fs::read_to_string(&path)?;
+    content
+        .trim()
+        .parse::<u16>()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
 }
 
 /// データプレーンの状態ファイルパスを取得
@@ -396,7 +413,7 @@ pub fn ensure_dataplanes_dir() -> Result<PathBuf, io::Error> {
 /// 実行中のデータプレーンを検出
 ///
 /// `~/.local/state/quicport/dataplanes/` をスキャンして、
-/// 存在するソケットファイルの PID リストを返す
+/// 存在するポートファイルの PID リストを返す
 pub fn discover_dataplanes() -> Result<Vec<u32>, io::Error> {
     let dir = dataplanes_dir()?;
     if !dir.exists() {
@@ -408,8 +425,8 @@ pub fn discover_dataplanes() -> Result<Vec<u32>, io::Error> {
         let entry = entry?;
         let path = entry.path();
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            // dp-<pid>.sock のパターンにマッチ
-            if name.starts_with("dp-") && name.ends_with(".sock") {
+            // dp-<pid>.port のパターンにマッチ
+            if name.starts_with("dp-") && name.ends_with(".port") {
                 if let Ok(pid) = name[3..name.len() - 5].parse::<u32>() {
                     pids.push(pid);
                 }
@@ -438,11 +455,11 @@ pub fn write_dataplane_state(pid: u32, status: &DataPlaneStatus) -> Result<(), i
 
 /// データプレーンのファイルをクリーンアップ
 pub fn cleanup_dataplane_files(pid: u32) -> Result<(), io::Error> {
-    let sock_path = dataplane_socket_path(pid)?;
+    let port_path = dataplane_port_path(pid)?;
     let state_path = dataplane_state_path(pid)?;
 
-    if sock_path.exists() {
-        std::fs::remove_file(&sock_path)?;
+    if port_path.exists() {
+        std::fs::remove_file(&port_path)?;
     }
     if state_path.exists() {
         std::fs::remove_file(&state_path)?;

@@ -583,11 +583,12 @@ async fn main() -> Result<()> {
                     control_plane::show_status().await?;
                 }
                 CtlCommands::Drain { pid } => {
-                    use quicport::ipc::{dataplane_socket_path, ControlCommand, IpcConnection};
+                    use quicport::ipc::{read_dataplane_port, ControlCommand, IpcConnection};
 
-                    let sock_path = dataplane_socket_path(pid)?;
-                    let mut conn = IpcConnection::connect(&sock_path).await
-                        .with_context(|| format!("Failed to connect to data plane PID {}", pid))?;
+                    let port = read_dataplane_port(pid)
+                        .with_context(|| format!("Failed to read port for data plane PID {}", pid))?;
+                    let mut conn = IpcConnection::connect(port).await
+                        .with_context(|| format!("Failed to connect to data plane PID {} on port {}", pid, port))?;
 
                     // Ready イベントをスキップ
                     let _ = conn.recv_event().await;
