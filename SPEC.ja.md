@@ -136,6 +136,10 @@ quicport client --server <server_address>:<port> --local-source <port>[/protocol
 | `--server-pubkey-file` | Yes** | サーバーの公開鍵ファイルパス。環境変数 `QUICPORT_SERVER_PUBKEY_FILE` でも指定可 |
 | `--psk` | No | 事前共有キー。環境変数 `QUICPORT_PSK` でも指定可 |
 | `--insecure` | No | サーバー証明書検証をスキップ（テスト用、本番環境では非推奨） |
+| **再接続オプション** |||
+| `--reconnect` | No | 接続断時に自動再接続を有効化（デフォルト: true） |
+| `--reconnect-max-attempts` | No | 最大再接続試行回数。0 = 無制限（デフォルト: 0） |
+| `--reconnect-delay` | No | 初期再接続待機時間（秒）。エクスポネンシャルバックオフで最大 60 秒まで増加（デフォルト: 1） |
 
 \* `--privkey` または `--privkey-file` のいずれかが必須（`--psk` を使用する場合を除く）
 \** X25519 認証（`--privkey` / `--privkey-file`）使用時は `--server-pubkey` または `--server-pubkey-file` が必須（MITM 攻撃防止のため）
@@ -215,6 +219,10 @@ quicport ssh-proxy --server <server_address>:<port> --remote-destination [addr:]
 | `--server-pubkey-file` | Yes** | サーバーの公開鍵ファイルパス。環境変数 `QUICPORT_SERVER_PUBKEY_FILE` でも指定可 |
 | `--psk` | No | 事前共有キー。環境変数 `QUICPORT_PSK` でも指定可 |
 | `--insecure` | No | サーバー証明書検証をスキップ（テスト用、本番環境では非推奨） |
+| **再接続オプション** |||
+| `--reconnect` | No | 接続断時に自動再接続を有効化（デフォルト: true） |
+| `--reconnect-max-attempts` | No | 最大再接続試行回数。0 = 無制限（デフォルト: 0） |
+| `--reconnect-delay` | No | 初期再接続待機時間（秒）（デフォルト: 1） |
 
 \* `--privkey` または `--privkey-file` のいずれかが必須（`--psk` を使用する場合を除く）
 \** X25519 認証使用時は `--server-pubkey` または `--server-pubkey-file` が必須
@@ -456,12 +464,34 @@ quicport は以下のディレクトリにファイルを配置します（XDG B
 | `~/.config/quicport/server.key` | サーバー秘密鍵（DER 形式、パーミッション 0600） |
 | `~/.config/quicport/psk` | 自動生成された PSK（Base64 形式、32 バイト） |
 | `~/.local/share/quicport/known_hosts` | クライアントの既知ホスト一覧 |
+| `~/.local/share/quicport/ticket.key` | セッションチケット暗号化キー（32 バイト、パーミッション 0600） |
 
 #### サーバー証明書の永続化
 
 - サーバー起動時、既存の証明書ファイルがあれば読み込み
 - なければ自己署名証明書を新規生成して保存
 - これにより、サーバー再起動後もクライアントの TOFU 検証が正常に動作
+
+#### セッションチケットキーの永続化
+
+TLS 1.3 のセッションチケットを暗号化するためのキーを永続化します。
+
+- サーバー起動時、`~/.local/share/quicport/ticket.key` からキーを読み込み
+- 存在しなければ 32 バイトのランダムキーを生成して保存
+- パーミッションは 0600（所有者のみ読み書き可能）
+
+**0-RTT 再接続のサポート:**
+
+セッションチケットキーを永続化することで、サーバー再起動後もクライアントが 0-RTT（Zero Round Trip Time）で再接続できます。
+
+- クライアントは前回のセッションチケットを使用して高速に再接続
+- ハンドシェイクのラウンドトリップを削減
+- 内側の TCP/SSH セッションがタイムアウトする前に再接続可能
+
+> **セキュリティ考慮事項:**
+> - セッションチケットキーが漏洩した場合、過去のセッションの復号が可能になる（Perfect Forward Secrecy の喪失）
+> - キーファイルのパーミッションは厳格に管理（0600）
+> - 定期的なキーローテーションを推奨（将来の拡張予定）
 
 #### known_hosts フォーマット
 

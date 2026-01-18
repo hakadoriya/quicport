@@ -27,6 +27,7 @@ use crate::quic::{
 };
 
 /// クライアント認証設定
+#[derive(Clone)]
 pub enum ClientAuthConfig {
     /// X25519 秘密鍵認証（相互認証）
     X25519 {
@@ -36,6 +37,42 @@ pub enum ClientAuthConfig {
     },
     /// PSK 認証
     Psk { psk: String },
+}
+
+/// 再接続設定
+#[derive(Clone, Debug)]
+pub struct ReconnectConfig {
+    /// 自動再接続を有効にするかどうか
+    pub enabled: bool,
+    /// 最大再試行回数（0 = 無制限）
+    pub max_attempts: u32,
+    /// 初期再試行間隔（秒）
+    pub initial_delay_secs: u64,
+    /// 最大再試行間隔（秒）
+    pub max_delay_secs: u64,
+}
+
+impl Default for ReconnectConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_attempts: 0,
+            initial_delay_secs: 1,
+            max_delay_secs: 60,
+        }
+    }
+}
+
+impl ReconnectConfig {
+    /// 再接続設定を作成
+    pub fn new(enabled: bool, max_attempts: u32, initial_delay_secs: u64) -> Self {
+        Self {
+            enabled,
+            max_attempts,
+            initial_delay_secs,
+            max_delay_secs: 60,
+        }
+    }
 }
 
 /// アクティブな接続を管理
@@ -350,6 +387,73 @@ pub async fn run(
     .await?;
 
     Ok(())
+}
+
+/// 再接続機能付きでクライアントを起動（RPF モード）
+///
+/// 接続が切断された場合、指定された設定に従って自動的に再接続を試みる。
+/// エクスポネンシャルバックオフで再試行間隔を増加させる。
+pub async fn run_with_reconnect(
+    destination: &str,
+    remote_source: &str,
+    local_destination: &str,
+    auth_config: ClientAuthConfig,
+    insecure: bool,
+    reconnect_config: ReconnectConfig,
+) -> Result<()> {
+    if !reconnect_config.enabled {
+        // 再接続が無効の場合は通常の run を呼び出す
+        return run(destination, remote_source, local_destination, auth_config, insecure).await;
+    }
+
+    let mut attempt = 0u32;
+    let mut delay_secs = reconnect_config.initial_delay_secs;
+
+    loop {
+        attempt += 1;
+        let attempt_str = if reconnect_config.max_attempts == 0 {
+            format!("#{}", attempt)
+        } else {
+            format!("#{}/{}", attempt, reconnect_config.max_attempts)
+        };
+
+        info!("Connection attempt {}", attempt_str);
+
+        match run(
+            destination,
+            remote_source,
+            local_destination,
+            auth_config.clone(),
+            insecure,
+        )
+        .await
+        {
+            Ok(()) => {
+                // 正常終了（シャットダウンシグナルなど）
+                info!("Connection closed normally");
+                return Ok(());
+            }
+            Err(e) => {
+                // エラーで終了
+                warn!("Connection failed: {}", e);
+
+                // 最大試行回数をチェック（0 = 無制限）
+                if reconnect_config.max_attempts > 0 && attempt >= reconnect_config.max_attempts {
+                    error!(
+                        "Maximum reconnection attempts ({}) reached",
+                        reconnect_config.max_attempts
+                    );
+                    return Err(e);
+                }
+
+                info!("Reconnecting in {} seconds...", delay_secs);
+                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+
+                // エクスポネンシャルバックオフ（最大まで増加）
+                delay_secs = std::cmp::min(delay_secs * 2, reconnect_config.max_delay_secs);
+            }
+        }
+    }
 }
 
 /// シャットダウンシグナル Future を作成
@@ -1665,4 +1769,123 @@ async fn relay_stdio_to_quic(
 
     debug!("[{}] stdin/stdout relay completed", conn_id);
     Ok(())
+}
+
+/// 再接続機能付きでクライアントを起動（LPF モード）
+///
+/// 接続が切断された場合、指定された設定に従って自動的に再接続を試みる。
+pub async fn run_local_forward_with_reconnect(
+    destination: &str,
+    local_source: &str,
+    remote_destination: &str,
+    auth_config: ClientAuthConfig,
+    insecure: bool,
+    reconnect_config: ReconnectConfig,
+) -> Result<()> {
+    if !reconnect_config.enabled {
+        return run_local_forward(destination, local_source, remote_destination, auth_config, insecure).await;
+    }
+
+    let mut attempt = 0u32;
+    let mut delay_secs = reconnect_config.initial_delay_secs;
+
+    loop {
+        attempt += 1;
+        let attempt_str = if reconnect_config.max_attempts == 0 {
+            format!("#{}", attempt)
+        } else {
+            format!("#{}/{}", attempt, reconnect_config.max_attempts)
+        };
+
+        info!("Connection attempt {}", attempt_str);
+
+        match run_local_forward(
+            destination,
+            local_source,
+            remote_destination,
+            auth_config.clone(),
+            insecure,
+        )
+        .await
+        {
+            Ok(()) => {
+                info!("Connection closed normally");
+                return Ok(());
+            }
+            Err(e) => {
+                warn!("Connection failed: {}", e);
+
+                if reconnect_config.max_attempts > 0 && attempt >= reconnect_config.max_attempts {
+                    error!(
+                        "Maximum reconnection attempts ({}) reached",
+                        reconnect_config.max_attempts
+                    );
+                    return Err(e);
+                }
+
+                info!("Reconnecting in {} seconds...", delay_secs);
+                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                delay_secs = std::cmp::min(delay_secs * 2, reconnect_config.max_delay_secs);
+            }
+        }
+    }
+}
+
+/// 再接続機能付きでクライアントを起動（SSH Proxy モード）
+///
+/// 接続が切断された場合、指定された設定に従って自動的に再接続を試みる。
+/// 注意: SSH プロセスは stdin/stdout が閉じると終了するため、再接続には制限がある。
+pub async fn run_ssh_proxy_with_reconnect(
+    destination: &str,
+    remote_destination: &str,
+    auth_config: ClientAuthConfig,
+    insecure: bool,
+    reconnect_config: ReconnectConfig,
+) -> Result<()> {
+    if !reconnect_config.enabled {
+        return run_ssh_proxy(destination, remote_destination, auth_config, insecure).await;
+    }
+
+    let mut attempt = 0u32;
+    let mut delay_secs = reconnect_config.initial_delay_secs;
+
+    loop {
+        attempt += 1;
+        let attempt_str = if reconnect_config.max_attempts == 0 {
+            format!("#{}", attempt)
+        } else {
+            format!("#{}/{}", attempt, reconnect_config.max_attempts)
+        };
+
+        info!("Connection attempt {}", attempt_str);
+
+        match run_ssh_proxy(
+            destination,
+            remote_destination,
+            auth_config.clone(),
+            insecure,
+        )
+        .await
+        {
+            Ok(()) => {
+                info!("Connection closed normally");
+                return Ok(());
+            }
+            Err(e) => {
+                warn!("Connection failed: {}", e);
+
+                if reconnect_config.max_attempts > 0 && attempt >= reconnect_config.max_attempts {
+                    error!(
+                        "Maximum reconnection attempts ({}) reached",
+                        reconnect_config.max_attempts
+                    );
+                    return Err(e);
+                }
+
+                info!("Reconnecting in {} seconds...", delay_secs);
+                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                delay_secs = std::cmp::min(delay_secs * 2, reconnect_config.max_delay_secs);
+            }
+        }
+    }
 }
