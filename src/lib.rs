@@ -9,6 +9,22 @@
 //! - [`api`] - HTTP API サーバー（ヘルスチェック、メトリクス）
 //! - [`protocol`] - 制御プロトコル定義
 //! - [`quic`] - QUIC/TLS 関連ユーティリティ
+//! - [`data_plane`] - データプレーン実装（QUIC/TCP 接続管理）
+//! - [`control_plane`] - コントロールプレーン実装（データプレーン管理）
+//! - [`ipc`] - プロセス間通信プロトコル
+//!
+//! # アーキテクチャ
+//!
+//! ```text
+//! [Client] ←QUIC→ [データプレーン] ←TCP→ [Backend]
+//!                       ↑
+//!                       │ Unix Socket (制御用 IPC)
+//!                       ↓
+//!               [コントロールプレーン]
+//! ```
+//!
+//! データプレーンとコントロールプレーンを分離することで、
+//! コントロールプレーン再起動時も既存の接続を維持できます。
 //!
 //! # 使用例
 //!
@@ -44,6 +60,9 @@
 
 pub mod api;
 pub mod client;
+pub mod control_plane;
+pub mod data_plane;
+pub mod ipc;
 pub mod protocol;
 pub mod quic;
 pub mod server;

@@ -1079,6 +1079,18 @@ pub async fn run_local_forward(
     Ok(())
 }
 
+/// LPF 切断理由
+enum LpfCloseReason {
+    /// ユーザーによる正常終了（SIGINT/SIGTERM）
+    GracefulShutdown,
+    /// サーバーからの正常終了要求
+    ServerSessionClose,
+    /// QUIC 接続が予期せずクローズされた（再接続が必要）
+    ConnectionLost(String),
+    /// 制御ストリームエラー（再接続が必要）
+    ControlStreamError(String),
+}
+
 /// LPF: ローカルポートでリッスンして接続を処理
 async fn handle_local_connections(
     quic_conn: Connection,
@@ -1111,6 +1123,9 @@ async fn handle_local_connections(
             let shutdown_signal = create_shutdown_signal();
             tokio::pin!(shutdown_signal);
 
+            // TCP 用切断理由
+            let close_reason: LpfCloseReason;
+
             // TCP 接続を受け付けるループ
             loop {
                 tokio::select! {
@@ -1132,12 +1147,14 @@ async fn handle_local_connections(
                         quic_conn.close(0u32.into(), b"client shutdown");
 
                         info!("Connection closed gracefully");
+                        close_reason = LpfCloseReason::GracefulShutdown;
                         break;
                     }
 
                     // QUIC コネクションがクローズされた場合
                     reason = quic_conn.closed() => {
                         info!("QUIC connection closed: {:?}, stopping LPF listener", reason);
+                        close_reason = LpfCloseReason::ConnectionLost(format!("{:?}", reason));
                         break;
                     }
 
@@ -1195,6 +1212,7 @@ async fn handle_local_connections(
                         match result {
                             Ok(ControlMessage::SessionClose) => {
                                 info!("Server requested session close");
+                                close_reason = LpfCloseReason::ServerSessionClose;
                                 break;
                             }
                             Ok(ControlMessage::ConnectionClose {
@@ -1212,16 +1230,30 @@ async fn handle_local_connections(
                             }
                             Err(ProtocolError::StreamClosed) => {
                                 info!("Control stream closed by server");
+                                // 予期しないストリーム切断は再接続対象
+                                close_reason = LpfCloseReason::ConnectionLost("Control stream closed unexpectedly".to_string());
                                 break;
                             }
                             Err(e) => {
                                 error!("Control stream error: {}", e);
+                                close_reason = LpfCloseReason::ControlStreamError(format!("{}", e));
                                 break;
                             }
                         }
                     }
                 }
             }
+
+            // TCP セクションの切断理由を返す
+            return match close_reason {
+                LpfCloseReason::GracefulShutdown | LpfCloseReason::ServerSessionClose => Ok(()),
+                LpfCloseReason::ConnectionLost(reason) => {
+                    Err(anyhow::anyhow!("Connection lost: {}", reason))
+                }
+                LpfCloseReason::ControlStreamError(reason) => {
+                    Err(anyhow::anyhow!("Control stream error: {}", reason))
+                }
+            };
         }
         Protocol::Udp => {
             // UDP ソケットを作成してリッスン
@@ -1245,6 +1277,9 @@ async fn handle_local_connections(
             let shutdown_signal = create_shutdown_signal();
             tokio::pin!(shutdown_signal);
 
+            // UDP 用切断理由
+            let udp_close_reason: LpfCloseReason;
+
             loop {
                 tokio::select! {
                     // シャットダウンシグナル
@@ -1265,12 +1300,14 @@ async fn handle_local_connections(
                         quic_conn.close(0u32.into(), b"client shutdown");
 
                         info!("Connection closed gracefully");
+                        udp_close_reason = LpfCloseReason::GracefulShutdown;
                         break;
                     }
 
                     // QUIC コネクションがクローズされた場合
                     reason = quic_conn.closed() => {
                         info!("QUIC connection closed: {:?}, stopping UDP LPF listener", reason);
+                        udp_close_reason = LpfCloseReason::ConnectionLost(format!("{:?}", reason));
                         break;
                     }
 
@@ -1368,6 +1405,7 @@ async fn handle_local_connections(
                         match result {
                             Ok(ControlMessage::SessionClose) => {
                                 info!("Server requested session close");
+                                udp_close_reason = LpfCloseReason::ServerSessionClose;
                                 break;
                             }
                             Ok(ControlMessage::ConnectionClose {
@@ -1385,20 +1423,32 @@ async fn handle_local_connections(
                             }
                             Err(ProtocolError::StreamClosed) => {
                                 info!("Control stream closed by server");
+                                // 予期しないストリーム切断は再接続対象
+                                udp_close_reason = LpfCloseReason::ConnectionLost("Control stream closed unexpectedly".to_string());
                                 break;
                             }
                             Err(e) => {
                                 error!("Control stream error: {}", e);
+                                udp_close_reason = LpfCloseReason::ControlStreamError(format!("{}", e));
                                 break;
                             }
                         }
                     }
                 }
             }
+
+            // UDP セクションの切断理由を返す
+            return match udp_close_reason {
+                LpfCloseReason::GracefulShutdown | LpfCloseReason::ServerSessionClose => Ok(()),
+                LpfCloseReason::ConnectionLost(reason) => {
+                    Err(anyhow::anyhow!("Connection lost: {}", reason))
+                }
+                LpfCloseReason::ControlStreamError(reason) => {
+                    Err(anyhow::anyhow!("Control stream error: {}", reason))
+                }
+            };
         }
     }
-
-    Ok(())
 }
 
 /// LPF: UDP パケットと QUIC ストリーム間でデータを中継

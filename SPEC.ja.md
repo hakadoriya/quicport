@@ -252,7 +252,143 @@ Host myserver
 - **非対話モード**: TOFU の未知ホスト確認は行えません。事前に `quicport client` で known_hosts に登録するか、`--insecure` を使用してください
 - **プロトコル**: 内部的には LPF (Local Port Forwarding) プロトコルを使用します
 
+### データプレーンモード (data-plane)
+
+QUIC 接続ハンドラとして動作するデータプレーンを起動します。
+通常はコントロールプレーン（`quicport server`）から起動されますが、直接起動も可能です。
+
+```bash
+quicport data-plane [OPTIONS]
+```
+
+**オプション:**
+
+| オプション | 必須 | 説明 |
+|-----------|------|------|
+| `--listen`, `-l` | No | QUIC リッスンアドレス（デフォルト: `0.0.0.0:39000`） |
+| `--drain-timeout` | No | DRAIN 状態のタイムアウト秒数（デフォルト: `300`） |
+
+**認証設定（環境変数）:**
+
+データプレーンは認証設定を環境変数から取得します：
+
+| 環境変数 | 説明 |
+|---------|------|
+| `QUICPORT_DP_AUTH_TYPE` | 認証タイプ（`psk` または `x25519`） |
+| `QUICPORT_DP_PSK` | PSK 認証時の事前共有キー |
+| `QUICPORT_DP_SERVER_PRIVKEY` | X25519 認証時のサーバー秘密鍵（Base64） |
+| `QUICPORT_DP_CLIENT_PUBKEYS` | X25519 認証時の許可されたクライアント公開鍵（カンマ区切り、Base64） |
+
+**例:**
+
+```bash
+# PSK 認証でデータプレーンを直接起動
+QUICPORT_DP_AUTH_TYPE=psk QUICPORT_DP_PSK="secret" quicport data-plane --listen 0.0.0.0:39000
+
+# X25519 認証でデータプレーンを起動
+QUICPORT_DP_AUTH_TYPE=x25519 \
+  QUICPORT_DP_SERVER_PRIVKEY="SERVER_PRIVKEY" \
+  QUICPORT_DP_CLIENT_PUBKEYS="CLIENT_PUBKEY1,CLIENT_PUBKEY2" \
+  quicport data-plane
+```
+
+### 制御コマンド (ctl)
+
+実行中のデータプレーンを管理するためのコマンドです。
+
+```bash
+quicport ctl <COMMAND>
+```
+
+**サブコマンド:**
+
+| コマンド | 説明 |
+|----------|------|
+| `graceful-restart` | 全ての ACTIVE なデータプレーンに DRAIN を送信 |
+| `status` | 全データプレーンの状態を表示 |
+| `drain --pid <PID>` | 特定のデータプレーンに DRAIN を送信 |
+
+**例:**
+
+```bash
+# 全データプレーンの状態を確認
+quicport ctl status
+
+# グレースフルリスタート（全データプレーンをドレイン）
+quicport ctl graceful-restart
+
+# 特定のデータプレーンをドレイン
+quicport ctl drain --pid 12345
+```
+
+**出力例 (status):**
+
+```
+Data Planes:
+PID        State        Connections  Bytes Sent      Bytes Received
+----------------------------------------------------------------
+12345      ACTIVE       3            10485760        5242880
+12346      DRAINING     1            524288          262144
+```
+
 ## アーキテクチャ
+
+### データプレーン/コントロールプレーン分離
+
+quicport はサーバー再起動時の接続維持を実現するため、データプレーンとコントロールプレーンを分離したアーキテクチャを採用しています。
+
+```
+                                    +-----------------------+
+                                    |   Control Plane       |
+                                    |   (quicport server)   |
+                                    |                       |
+                                    |  - 認証ポリシー管理    |
+                                    |  - プロセス管理        |
+                                    |  - API サーバー       |
+                                    +-----------+-----------+
+                                                |
+                                                | IPC (Unix Socket)
+                                                |
++-------------------+                 +---------v---------+                 +-------------------+
+|                   |    QUIC         |   Data Plane      |    QUIC         |                   |
+|  quicport Client  | <=============> |   (独立プロセス)   | <=============> |  quicport Client  |
+|                   |                 |                   |                 |                   |
++-------------------+                 |  - QUIC 終端      |                 +-------------------+
+                                      |  - 認証実行       |
+                                      |  - データ転送     |
+                                      +-------------------+
+```
+
+**責務分離:**
+
+| コンポーネント | 責務 |
+|--------------|------|
+| **コントロールプレーン** | 認証ポリシー管理、プロセス管理、API サーバー、グレースフルリスタート |
+| **データプレーン** | QUIC 終端、クライアント認証、TCP/UDP 接続維持、データ転送 |
+
+**グレースフルリスタートのフロー:**
+
+1. 新しいデータプレーンを起動（SO_REUSEPORT で同一ポートで LISTEN）
+2. 古いデータプレーンに DRAIN コマンドを送信
+3. 古いデータプレーンは新規接続を拒否し、既存接続のみ処理
+4. 全接続が終了するか、タイムアウト（デフォルト 300 秒）後に終了
+
+**データプレーンの状態遷移:**
+
+```
+STARTING --> ACTIVE --> DRAINING --> TERMINATED
+    |           |           |
+    |           +-----------+  (drain_timeout 経過)
+    |                       |
+    +-----------------------+  (shutdown コマンド)
+```
+
+| 状態 | 説明 |
+|-----|------|
+| `STARTING` | 起動中、初期化処理 |
+| `ACTIVE` | 通常稼働中、新規接続受付可能 |
+| `DRAINING` | ドレイン中、新規接続拒否、既存接続のみ処理 |
+| `TERMINATED` | 終了済み |
 
 ### トランスポート層
 
@@ -465,6 +601,30 @@ quicport は以下のディレクトリにファイルを配置します（XDG B
 | `~/.config/quicport/psk` | 自動生成された PSK（Base64 形式、32 バイト） |
 | `~/.local/share/quicport/known_hosts` | クライアントの既知ホスト一覧 |
 | `~/.local/share/quicport/ticket.key` | セッションチケット暗号化キー（32 バイト、パーミッション 0600） |
+| `~/.local/state/quicport/dataplanes/dp-<pid>.sock` | データプレーン制御用 Unix Socket（パーミッション 0600） |
+| `~/.local/state/quicport/dataplanes/dp-<pid>.state` | データプレーン状態ファイル（JSON 形式） |
+
+#### データプレーン管理ファイル
+
+データプレーンは `~/.local/state/quicport/dataplanes/` ディレクトリで管理されます:
+
+- **Unix Socket** (`dp-<pid>.sock`): コントロールプレーンとの IPC 通信用
+- **状態ファイル** (`dp-<pid>.state`): データプレーンの現在の状態を JSON 形式で記録
+
+状態ファイルの例:
+
+```json
+{
+  "state": "Active",
+  "pid": 12345,
+  "active_connections": 3,
+  "bytes_sent": 10485760,
+  "bytes_received": 5242880,
+  "started_at": 1705639200
+}
+```
+
+データプレーン終了時、これらのファイルは自動的にクリーンアップされます。
 
 #### サーバー証明書の永続化
 
@@ -1043,6 +1203,12 @@ quicport_auth_x25519_failed_total 2
 - 設定ファイル未対応（コマンドライン引数のみ）
 
 ## 将来の拡張予定
+
+### 実装済み
+
+- [x] データプレーン/コントロールプレーン分離（グレースフルリスタート対応）
+
+### 未実装
 
 - [ ] 複数ポートフォワーディング対応
 - [ ] 設定ファイル対応 (TOML/YAML)
