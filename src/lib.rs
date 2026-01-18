@@ -4,21 +4,20 @@
 //!
 //! # 主要コンポーネント
 //!
-//! - [`server`] - QUIC サーバー実装
+//! - [`control_plane`] - コントロールプレーン実装（データプレーン管理）
+//! - [`data_plane`] - データプレーン実装（QUIC/TCP/UDP 接続管理）
 //! - [`client`] - QUIC クライアント実装
 //! - [`api`] - HTTP API サーバー（ヘルスチェック、メトリクス）
 //! - [`protocol`] - 制御プロトコル定義
 //! - [`quic`] - QUIC/TLS 関連ユーティリティ
-//! - [`data_plane`] - データプレーン実装（QUIC/TCP 接続管理）
-//! - [`control_plane`] - コントロールプレーン実装（データプレーン管理）
 //! - [`ipc`] - プロセス間通信プロトコル
 //!
 //! # アーキテクチャ
 //!
 //! ```text
-//! [Client] ←QUIC→ [データプレーン] ←TCP→ [Backend]
+//! [Client] ←QUIC→ [データプレーン] ←TCP/UDP→ [Backend]
 //!                       ↑
-//!                       │ Unix Socket (制御用 IPC)
+//!                       │ IPC (TCP on localhost)
 //!                       ↓
 //!               [コントロールプレーン]
 //! ```
@@ -31,7 +30,8 @@
 //! ## サーバー起動
 //!
 //! ```no_run
-//! use quicport::server::{self, AuthConfig};
+//! use quicport::control_plane;
+//! use quicport::ipc::AuthPolicy;
 //! use quicport::statistics::ServerStatistics;
 //! use std::net::SocketAddr;
 //! use std::sync::Arc;
@@ -39,9 +39,9 @@
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let listen: SocketAddr = "0.0.0.0:39000".parse()?;
-//!     let auth = AuthConfig::Psk { psk: "secret".to_string() };
+//!     let auth_policy = AuthPolicy::Psk { psk: "secret".to_string() };
 //!     let statistics = Arc::new(ServerStatistics::new());
-//!     server::run(listen, auth, statistics).await
+//!     control_plane::run(listen, auth_policy, statistics).await
 //! }
 //! ```
 //!
@@ -65,9 +65,7 @@ pub mod data_plane;
 pub mod ipc;
 pub mod protocol;
 pub mod quic;
-pub mod server;
 pub mod statistics;
 
 // 便利な再エクスポート
 pub use client::ClientAuthConfig;
-pub use server::AuthConfig as ServerAuthConfig;

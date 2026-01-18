@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -861,12 +861,201 @@ async fn handle_remote_forward(
             }
         }
         Protocol::Udp => {
-            // UDP 実装は省略（server.rs と同様の実装）
-            let response = ControlMessage::RemoteForwardResponse {
-                status: ResponseStatus::InternalError,
-                message: "UDP not yet implemented in data plane".to_string(),
+            // UDP ソケットを作成
+            let socket = match UdpSocket::bind(bind_addr).await {
+                Ok(s) => {
+                    info!("UDP listener started on port {}", port);
+
+                    let response = ControlMessage::RemoteForwardResponse {
+                        status: ResponseStatus::Success,
+                        message: format!("Listening on UDP port {}", port),
+                    };
+                    control_stream.send_message(&response).await?;
+
+                    Arc::new(s)
+                }
+                Err(e) => {
+                    let status = if e.kind() == std::io::ErrorKind::AddrInUse {
+                        ResponseStatus::PortInUse
+                    } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        ResponseStatus::PermissionDenied
+                    } else {
+                        ResponseStatus::InternalError
+                    };
+
+                    let response = ControlMessage::RemoteForwardResponse {
+                        status,
+                        message: e.to_string(),
+                    };
+                    control_stream.send_message(&response).await?;
+                    return Err(e.into());
+                }
             };
-            control_stream.send_message(&response).await?;
+
+            // UDP "仮想接続" を管理
+            // キー: 送信元アドレス (IP:port)
+            // 値: (conn_id, QUIC SendStream への送信用チャネル)
+            //
+            // 【ロック順序】デッドロック防止のため、複数ロック取得時は以下の順序を厳守:
+            //   conn_manager → udp_connections
+            // また、ロック保持中の await は最小限に抑える（tx.clone() 後に解放してから send）
+            let udp_connections: Arc<Mutex<HashMap<SocketAddr, (u32, tokio::sync::mpsc::Sender<Vec<u8>>)>>> =
+                Arc::new(Mutex::new(HashMap::new()));
+
+            let mut recv_buf = vec![0u8; 65535]; // UDP 最大パケットサイズ
+
+            // UDP パケットを受け付けるループ
+            loop {
+                tokio::select! {
+                    // ドレイン
+                    _ = drain_rx.recv() => {
+                        info!("Data plane draining, stopping UDP accept loop for port {}", port);
+                        break;
+                    }
+
+                    // QUIC 接続クローズ
+                    reason = quic_conn.closed() => {
+                        info!("QUIC connection closed: {:?}, releasing UDP port {}", reason, port);
+                        break;
+                    }
+
+                    // UDP パケット受信
+                    result = socket.recv_from(&mut recv_buf) => {
+                        match result {
+                            Ok((len, src_addr)) => {
+                                let packet = recv_buf[..len].to_vec();
+                                debug!("UDP packet from {}: {} bytes", src_addr, len);
+
+                                // 既存の仮想接続を確認（ロックを短く保持）
+                                let maybe_existing = {
+                                    let conns = udp_connections.lock().await;
+                                    conns.get(&src_addr).map(|(id, tx)| (*id, tx.clone()))
+                                };
+
+                                if let Some((conn_id, tx)) = maybe_existing {
+                                    // 既存の接続にパケットを送信（ロック外で await）
+                                    if tx.send(packet).await.is_err() {
+                                        // チャネルが閉じている場合は接続を削除
+                                        debug!("UDP connection {} channel closed, removing", conn_id);
+                                        udp_connections.lock().await.remove(&src_addr);
+                                    }
+                                } else {
+                                    // 新しい仮想接続を作成
+                                    let conn_id = CONNECTION_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+                                    info!("New UDP connection {} from {}", conn_id, src_addr);
+
+                                    // QUIC ストリームを開く（ロック外で await）
+                                    let (mut quic_send, quic_recv) = match quic_conn.open_bi().await {
+                                        Ok(s) => s,
+                                        Err(e) => {
+                                            error!("Failed to open QUIC stream for UDP: {}", e);
+                                            continue;
+                                        }
+                                    };
+
+                                    // conn_id を書き込む
+                                    if let Err(e) = quic_send.write_all(&conn_id.to_be_bytes()).await {
+                                        error!("Failed to write conn_id to stream: {}", e);
+                                        continue;
+                                    }
+
+                                    // RemoteNewConnection を送信
+                                    let new_conn_msg = ControlMessage::RemoteNewConnection {
+                                        connection_id: conn_id,
+                                        protocol: Protocol::Udp,
+                                    };
+                                    if let Err(e) = control_stream.send_message(&new_conn_msg).await {
+                                        error!("Failed to send RemoteNewConnection: {}", e);
+                                        continue;
+                                    }
+
+                                    // パケット送信用チャネルを作成
+                                    let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+                                    let cancel_token = CancellationToken::new();
+
+                                    // 接続を登録（ロック順序を統一: conn_manager → udp_connections）
+                                    {
+                                        conn_manager.lock().await.add_connection(
+                                            conn_id,
+                                            Protocol::Udp,
+                                            src_addr,
+                                            cancel_token.clone(),
+                                        );
+                                        udp_connections.lock().await.insert(src_addr, (conn_id, tx.clone()));
+                                    }
+
+                                    // 最初のパケットを送信（ロック外で await）
+                                    let _ = tx.send(packet).await;
+
+                                    // UDP リレータスクを起動
+                                    let conn_manager_clone = conn_manager.clone();
+                                    let udp_connections_clone = udp_connections.clone();
+                                    let dp_clone = data_plane.clone();
+                                    let socket_clone = socket.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = relay_rpf_udp_stream(
+                                            conn_id,
+                                            src_addr,
+                                            socket_clone,
+                                            rx,
+                                            quic_send,
+                                            quic_recv,
+                                            dp_clone,
+                                            cancel_token,
+                                        )
+                                        .await
+                                        {
+                                            debug!("UDP relay ended for {}: {}", conn_id, e);
+                                        }
+                                        // ロック順序を統一: conn_manager → udp_connections
+                                        conn_manager_clone.lock().await.remove_connection(conn_id);
+                                        udp_connections_clone.lock().await.remove(&src_addr);
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to receive UDP packet: {}", e);
+                            }
+                        }
+                    }
+
+                    // 制御メッセージ
+                    result = control_stream.recv_message() => {
+                        match result {
+                            Ok(ControlMessage::SessionClose) => {
+                                info!("Client requested session close, releasing UDP port {}", port);
+                                break;
+                            }
+                            Ok(ControlMessage::ConnectionClose {
+                                connection_id,
+                                reason,
+                            }) => {
+                                info!(
+                                    "Client requested connection close for conn_id={}: {:?}",
+                                    connection_id, reason
+                                );
+                                conn_manager.lock().await.cancel_connection(connection_id);
+                            }
+                            Ok(msg) => {
+                                debug!("Received control message: {:?}", msg);
+                            }
+                            Err(ProtocolError::StreamClosed) => {
+                                info!("Control stream closed");
+                                break;
+                            }
+                            Err(e) => {
+                                let err_str = e.to_string();
+                                if err_str.contains("closed") || err_str.contains("reset") || err_str.contains("lost") {
+                                    info!("Client disconnected, releasing UDP port {}: {}", port, e);
+                                } else {
+                                    error!("Control stream error: {}", e);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -968,8 +1157,56 @@ async fn handle_local_forward(
                                         }
                                     }
                                     Protocol::Udp => {
-                                        // UDP 実装は省略
-                                        error!("UDP LPF not yet implemented in data plane");
+                                        // UDP: リモートサービスに接続
+                                        match UdpSocket::bind("0.0.0.0:0").await {
+                                            Ok(udp_socket) => {
+                                                if let Err(e) = udp_socket.connect(&remote_dest).await {
+                                                    error!("Failed to connect UDP socket to remote service {}: {}", remote_dest, e);
+                                                    let close_msg = ControlMessage::ConnectionClose {
+                                                        connection_id: conn_id,
+                                                        reason: CloseReason::ConnectionRefused,
+                                                    };
+                                                    let _ = control_stream.send_message(&close_msg).await;
+                                                    continue;
+                                                }
+
+                                                info!("Connected UDP socket to remote service: {} (conn_id={})", remote_dest, conn_id);
+
+                                                let remote_addr: SocketAddr = remote_dest.parse().unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
+                                                conn_manager.lock().await.add_connection(
+                                                    conn_id,
+                                                    Protocol::Udp,
+                                                    remote_addr,
+                                                    cancel_token.clone(),
+                                                );
+
+                                                let conn_manager_clone = conn_manager.clone();
+                                                let dp_clone = data_plane.clone();
+                                                tokio::spawn(async move {
+                                                    if let Err(e) = relay_lpf_udp_stream(
+                                                        conn_id,
+                                                        udp_socket,
+                                                        send,
+                                                        recv,
+                                                        dp_clone,
+                                                        cancel_token,
+                                                    )
+                                                    .await
+                                                    {
+                                                        debug!("LPF UDP relay ended for {}: {}", conn_id, e);
+                                                    }
+                                                    conn_manager_clone.lock().await.remove_connection(conn_id);
+                                                });
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to create UDP socket: {}", e);
+                                                let close_msg = ControlMessage::ConnectionClose {
+                                                    connection_id: conn_id,
+                                                    reason: CloseReason::OtherError,
+                                                };
+                                                let _ = control_stream.send_message(&close_msg).await;
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1106,5 +1343,246 @@ async fn relay_tcp_stream(
     }
 
     debug!("[{}] Relay completed", conn_id);
+    Ok(())
+}
+
+/// RPF: UDP パケットと QUIC ストリーム間でデータを中継
+///
+/// UDP はパケット境界を保持するため、Length-prefixed framing を使用:
+/// - 送信時: [4 bytes length (BE)] + [payload]
+/// - 受信時: [4 bytes length (BE)] + [payload]
+///
+/// cancel_token がキャンセルされると、リレーを中断する
+async fn relay_rpf_udp_stream(
+    conn_id: u32,
+    src_addr: SocketAddr,
+    udp_socket: Arc<UdpSocket>,
+    mut packet_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    mut quic_send: SendStream,
+    mut quic_recv: RecvStream,
+    data_plane: Arc<DataPlane>,
+    cancel_token: CancellationToken,
+) -> Result<()> {
+    debug!("[{}] Starting RPF UDP relay for {}", conn_id, src_addr);
+
+    // UDP -> QUIC (受信したパケットをチャネル経由で受け取り、QUIC に送信)
+    let dp_for_send = data_plane.clone();
+    let cancel_for_send = cancel_token.clone();
+    let udp_to_quic = tokio::spawn(async move {
+        let mut total_sent = 0u64;
+        debug!("[{}] UDP->QUIC task started", conn_id);
+        loop {
+            tokio::select! {
+                _ = cancel_for_send.cancelled() => {
+                    debug!("[{}] UDP->QUIC cancelled", conn_id);
+                    break;
+                }
+                packet = packet_rx.recv() => {
+                    match packet {
+                        Some(data) => {
+                            // Length-prefixed framing: [4 bytes length] + [payload]
+                            let len = data.len() as u32;
+                            if let Err(e) = quic_send.write_all(&len.to_be_bytes()).await {
+                                debug!("[{}] Failed to write length: {}", conn_id, e);
+                                break;
+                            }
+                            if let Err(e) = quic_send.write_all(&data).await {
+                                debug!("[{}] Failed to write UDP data: {}", conn_id, e);
+                                break;
+                            }
+                            total_sent += 4 + data.len() as u64;
+                            debug!("[{}] UDP->QUIC {} bytes", conn_id, data.len());
+                        }
+                        None => {
+                            // チャネルが閉じられた
+                            debug!("[{}] UDP packet channel closed", conn_id);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let _ = quic_send.finish();
+        dp_for_send.add_bytes(total_sent, 0);
+        Ok::<_, anyhow::Error>(())
+    });
+
+    // QUIC -> UDP (QUIC から受信してオリジナルの送信元に返す)
+    let dp_for_recv = data_plane.clone();
+    let cancel_for_recv = cancel_token.clone();
+    let quic_to_udp = tokio::spawn(async move {
+        let mut total_received = 0u64;
+        debug!("[{}] QUIC->UDP task started", conn_id);
+        loop {
+            tokio::select! {
+                _ = cancel_for_recv.cancelled() => {
+                    debug!("[{}] QUIC->UDP cancelled", conn_id);
+                    break;
+                }
+                // Length-prefixed framing で読み取り
+                result = async {
+                    // 4 bytes の長さを読み取り
+                    let mut len_buf = [0u8; 4];
+                    quic_recv.read_exact(&mut len_buf).await?;
+                    let len = u32::from_be_bytes(len_buf) as usize;
+
+                    // ペイロードを読み取り
+                    let mut payload = vec![0u8; len];
+                    quic_recv.read_exact(&mut payload).await?;
+
+                    Ok::<_, quinn::ReadExactError>((len, payload))
+                } => {
+                    match result {
+                        Ok((len, payload)) => {
+                            total_received += 4 + len as u64;
+                            // オリジナルの送信元に返す
+                            if let Err(e) = udp_socket.send_to(&payload, src_addr).await {
+                                debug!("[{}] Failed to send UDP response: {}", conn_id, e);
+                                break;
+                            }
+                            debug!("[{}] QUIC->UDP {} bytes to {}", conn_id, len, src_addr);
+                        }
+                        Err(e) => {
+                            debug!("[{}] QUIC read error: {}", conn_id, e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        dp_for_recv.add_bytes(0, total_received);
+        Ok::<_, anyhow::Error>(())
+    });
+
+    // 両方向の完了を待つ
+    let (send_result, recv_result) = tokio::join!(udp_to_quic, quic_to_udp);
+
+    if let Err(e) = send_result {
+        debug!("UDP->QUIC task error for {}: {}", conn_id, e);
+    }
+    if let Err(e) = recv_result {
+        debug!("QUIC->UDP task error for {}: {}", conn_id, e);
+    }
+
+    debug!("[{}] RPF UDP relay completed", conn_id);
+    Ok(())
+}
+
+/// LPF: UDP パケットと QUIC ストリーム間でデータを中継
+async fn relay_lpf_udp_stream(
+    conn_id: u32,
+    udp_socket: UdpSocket,
+    mut quic_send: SendStream,
+    mut quic_recv: RecvStream,
+    data_plane: Arc<DataPlane>,
+    cancel_token: CancellationToken,
+) -> Result<()> {
+    debug!("[{}] Starting LPF UDP relay", conn_id);
+
+    let udp_socket = Arc::new(udp_socket);
+
+    // QUIC -> UDP (クライアントからのパケットをリモートサービスに送信)
+    let socket_for_send = udp_socket.clone();
+    let dp_for_recv = data_plane.clone();
+    let cancel_for_recv = cancel_token.clone();
+    let quic_to_udp = tokio::spawn(async move {
+        let mut total_received = 0u64;
+        debug!("[{}] QUIC->UDP task started", conn_id);
+        loop {
+            tokio::select! {
+                _ = cancel_for_recv.cancelled() => {
+                    debug!("[{}] QUIC->UDP cancelled", conn_id);
+                    break;
+                }
+                // Length-prefixed framing で読み取り
+                result = async {
+                    let mut len_buf = [0u8; 4];
+                    quic_recv.read_exact(&mut len_buf).await?;
+                    let len = u32::from_be_bytes(len_buf) as usize;
+
+                    let mut payload = vec![0u8; len];
+                    quic_recv.read_exact(&mut payload).await?;
+
+                    Ok::<_, quinn::ReadExactError>((len, payload))
+                } => {
+                    match result {
+                        Ok((len, payload)) => {
+                            total_received += 4 + len as u64;
+                            // リモートサービスに送信
+                            if let Err(e) = socket_for_send.send(&payload).await {
+                                debug!("[{}] UDP send error: {}", conn_id, e);
+                                break;
+                            }
+                            debug!("[{}] QUIC->UDP {} bytes", conn_id, len);
+                        }
+                        Err(e) => {
+                            debug!("[{}] QUIC read error: {}", conn_id, e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        dp_for_recv.add_bytes(0, total_received);
+        Ok::<_, anyhow::Error>(())
+    });
+
+    // UDP -> QUIC (リモートサービスからの応答をクライアントに返す)
+    let dp_for_send = data_plane.clone();
+    let cancel_for_send = cancel_token.clone();
+    let udp_to_quic = tokio::spawn(async move {
+        let mut buf = vec![0u8; 65535];
+        let mut total_sent = 0u64;
+        debug!("[{}] UDP->QUIC task started", conn_id);
+        loop {
+            tokio::select! {
+                _ = cancel_for_send.cancelled() => {
+                    debug!("[{}] UDP->QUIC cancelled", conn_id);
+                    break;
+                }
+                result = udp_socket.recv(&mut buf) => {
+                    match result {
+                        Ok(len) if len > 0 => {
+                            // Length-prefixed framing で送信
+                            let len_u32 = len as u32;
+                            if let Err(e) = quic_send.write_all(&len_u32.to_be_bytes()).await {
+                                debug!("[{}] QUIC write length error: {}", conn_id, e);
+                                break;
+                            }
+                            if let Err(e) = quic_send.write_all(&buf[..len]).await {
+                                debug!("[{}] QUIC write payload error: {}", conn_id, e);
+                                break;
+                            }
+                            total_sent += 4 + len as u64;
+                            debug!("[{}] UDP->QUIC {} bytes", conn_id, len);
+                        }
+                        Ok(_) => {
+                            debug!("[{}] UDP recv returned 0", conn_id);
+                            break;
+                        }
+                        Err(e) => {
+                            debug!("[{}] UDP recv error: {}", conn_id, e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let _ = quic_send.finish();
+        dp_for_send.add_bytes(total_sent, 0);
+        Ok::<_, anyhow::Error>(())
+    });
+
+    // 両方向の完了を待つ
+    let (recv_result, send_result) = tokio::join!(quic_to_udp, udp_to_quic);
+
+    if let Err(e) = recv_result {
+        debug!("QUIC->UDP task error for {}: {}", conn_id, e);
+    }
+    if let Err(e) = send_result {
+        debug!("UDP->QUIC task error for {}: {}", conn_id, e);
+    }
+
+    debug!("[{}] LPF UDP relay completed", conn_id);
     Ok(())
 }

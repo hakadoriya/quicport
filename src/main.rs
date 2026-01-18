@@ -16,7 +16,7 @@ use quicport::quic::{
     parse_base64_key, psk_file_path,
 };
 use quicport::statistics::ServerStatistics;
-use quicport::{api, client, server};
+use quicport::{api, client};
 
 /// ログ出力形式
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -252,87 +252,6 @@ enum CtlCommands {
     },
 }
 
-/// サーバー用の認証設定を構築
-fn build_server_auth_config(
-    privkey: Option<String>,
-    privkey_file: Option<PathBuf>,
-    client_pubkeys: Option<Vec<String>>,
-    client_pubkeys_file: Option<PathBuf>,
-    psk: Option<String>,
-) -> Result<server::AuthConfig> {
-    let mut authorized_pubkeys = Vec::new();
-
-    // サーバー秘密鍵を取得（相互認証用）
-    let server_private_key = if let Some(key_str) = privkey {
-        Some(parse_base64_key(&key_str).context("Invalid server private key format")?)
-    } else if let Some(path) = privkey_file {
-        Some(
-            load_privkey_from_file(&path)
-                .with_context(|| format!("Failed to load server private key from {:?}", path))?,
-        )
-    } else {
-        None
-    };
-
-    // コマンドライン/環境変数からクライアント公開鍵を取得
-    if let Some(keys) = client_pubkeys {
-        for key_str in keys {
-            let key = parse_base64_key(&key_str).context("Invalid client public key format")?;
-            authorized_pubkeys.push(key);
-        }
-    }
-
-    // ファイルからクライアント公開鍵を読み込み
-    if let Some(path) = client_pubkeys_file {
-        let file_keys = load_pubkeys_from_file(&path)
-            .with_context(|| format!("Failed to load client pubkeys from {:?}", path))?;
-        authorized_pubkeys.extend(file_keys);
-    }
-
-    // X25519 認証が設定されている場合はそちらを使用
-    if !authorized_pubkeys.is_empty() {
-        let server_private_key = server_private_key.ok_or_else(|| {
-            anyhow::anyhow!(
-                "X25519 authentication requires server private key. \
-                 Provide --privkey or --privkey-file"
-            )
-        })?;
-        info!(
-            "Using X25519 mutual authentication with {} authorized public key(s)",
-            authorized_pubkeys.len()
-        );
-        return Ok(server::AuthConfig::X25519 {
-            authorized_pubkeys,
-            server_private_key,
-        });
-    }
-
-    // PSK 認証にフォールバック
-    if let Some(psk) = psk {
-        info!("Using PSK authentication");
-        return Ok(server::AuthConfig::Psk { psk });
-    }
-
-    // 認証オプションが何も指定されていない場合、PSK を自動生成
-    let psk_path = psk_file_path()?;
-    if psk_path.exists() {
-        // 既存の PSK を読み込む
-        let psk = std::fs::read_to_string(&psk_path)
-            .with_context(|| format!("Failed to read PSK from {:?}", psk_path))?;
-        info!("Using existing PSK from {}", psk_path.display());
-        return Ok(server::AuthConfig::Psk {
-            psk: psk.trim().to_string(),
-        });
-    } else {
-        // 新規 PSK を生成して保存
-        let psk = generate_psk();
-        std::fs::write(&psk_path, &psk)
-            .with_context(|| format!("Failed to write PSK to {:?}", psk_path))?;
-        info!("Generated new PSK and saved to {}", psk_path.display());
-        return Ok(server::AuthConfig::Psk { psk });
-    }
-}
-
 /// クライアント用の認証設定を構築
 fn build_client_auth_config(
     privkey: Option<String>,
@@ -435,7 +354,6 @@ fn build_dataplane_auth_policy() -> Result<AuthPolicy> {
 }
 
 /// サーバー用の認証ポリシーを構築（IPC 用）
-#[allow(dead_code)]
 fn build_server_auth_policy(
     privkey: Option<String>,
     privkey_file: Option<PathBuf>,
@@ -651,7 +569,8 @@ async fn main() -> Result<()> {
             client_pubkeys_file,
             psk,
         } => {
-            let auth_config = build_server_auth_config(
+            // 認証ポリシーを構築（コントロールプレーン → データプレーン間で使用）
+            let auth_policy = build_server_auth_policy(
                 privkey,
                 privkey_file,
                 client_pubkeys,
@@ -663,20 +582,20 @@ async fn main() -> Result<()> {
             let statistics = Arc::new(ServerStatistics::new());
 
             if no_api {
-                // API サーバーなしで QUIC サーバーのみ起動
-                info!("Starting QUIC server on {}", listen);
-                server::run(listen, auth_config, statistics).await?;
+                // API サーバーなしでコントロールプレーンのみ起動
+                info!("Starting control plane (QUIC on {})", listen);
+                control_plane::run(listen, auth_policy, statistics).await?;
             } else {
-                // QUIC サーバーと API サーバーを並列起動
-                info!("Starting QUIC server on {}", listen);
+                // コントロールプレーンと API サーバーを並列起動
+                info!("Starting control plane (QUIC on {})", listen);
                 info!("Starting API server on {}", api_listen);
 
-                let quic_server = server::run(listen, auth_config, statistics.clone());
+                let control_plane_task = control_plane::run(listen, auth_policy, statistics.clone());
                 let api_server = api::run(api_listen, statistics);
 
                 // どちらかが終了したら両方終了
                 tokio::select! {
-                    result = quic_server => {
+                    result = control_plane_task => {
                         if let Err(e) = result {
                             return Err(e);
                         }
