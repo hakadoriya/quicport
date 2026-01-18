@@ -2,7 +2,7 @@
 # shellcheck disable=SC2148
 
 # NOTE: If .env file doesn't exist, create a template file.
-[[ -f .env ]] || tee .env >/dev/null <<'EOF'
+[ -f .env ] || tee .env >/dev/null <<'EOF'
 # NOTE: Define static environment variables (git-ignored).
 EOF
 
