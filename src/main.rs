@@ -727,7 +727,7 @@ async fn main() -> Result<()> {
                         "Connecting to {} (RPF: remote={}, local={})",
                         server, rs, ld
                     );
-                    client::run_with_reconnect(
+                    client::run_remote_forward_with_reconnect(
                         &server,
                         &rs,
                         &ld,

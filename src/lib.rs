@@ -54,7 +54,7 @@
 //! async fn main() -> anyhow::Result<()> {
 //!     let auth = ClientAuthConfig::Psk { psk: "secret".to_string() };
 //!     // 第5引数は insecure モード（true: 証明書検証をスキップ）
-//!     client::run("127.0.0.1:39000", "8080/tcp", "80/tcp", auth, false).await
+//!     client::run_remote_forward("127.0.0.1:39000", "8080/tcp", "80/tcp", auth, false).await
 //! }
 //! ```
 

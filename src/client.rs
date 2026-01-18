@@ -223,7 +223,7 @@ async fn handle_tofu_status(
 /// * `local_destination` - ローカル転送先（例: "22/tcp", "22", "192.168.1.100:22"）
 /// * `auth_config` - 認証設定
 /// * `insecure` - true の場合、証明書検証をスキップ（テスト用）
-pub async fn run(
+pub async fn run_remote_forward(
     destination: &str,
     remote_source: &str,
     local_destination: &str,
@@ -393,7 +393,7 @@ pub async fn run(
 ///
 /// 接続が切断された場合、指定された設定に従って自動的に再接続を試みる。
 /// エクスポネンシャルバックオフで再試行間隔を増加させる。
-pub async fn run_with_reconnect(
+pub async fn run_remote_forward_with_reconnect(
     destination: &str,
     remote_source: &str,
     local_destination: &str,
@@ -402,8 +402,8 @@ pub async fn run_with_reconnect(
     reconnect_config: ReconnectConfig,
 ) -> Result<()> {
     if !reconnect_config.enabled {
-        // 再接続が無効の場合は通常の run を呼び出す
-        return run(destination, remote_source, local_destination, auth_config, insecure).await;
+        // 再接続が無効の場合は通常の run_remote_forward を呼び出す
+        return run_remote_forward(destination, remote_source, local_destination, auth_config, insecure).await;
     }
 
     let mut attempt = 0u32;
@@ -419,7 +419,7 @@ pub async fn run_with_reconnect(
 
         info!("Connection attempt {}", attempt_str);
 
-        match run(
+        match run_remote_forward(
             destination,
             remote_source,
             local_destination,

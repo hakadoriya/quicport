@@ -234,7 +234,7 @@ async fn handle_client(
             );
 
             // ポートをリッスン
-            match start_port_listener(
+            match handle_remote_port_forwarding(
                 port,
                 protocol,
                 connection.clone(),
@@ -312,8 +312,8 @@ fn create_tcp_listener_with_reuseaddr(addr: SocketAddr) -> std::io::Result<std::
     Ok(socket.into())
 }
 
-/// ポートリスナーを開始
-async fn start_port_listener(
+/// Remote Port Forwarding (RPF) を処理
+async fn handle_remote_port_forwarding(
     port: u16,
     protocol: Protocol,
     quic_conn: Connection,
@@ -628,7 +628,7 @@ async fn start_port_listener(
                                     let statistics_clone = statistics.clone();
                                     let socket_clone = socket.clone();
                                     tokio::spawn(async move {
-                                        if let Err(e) = relay_udp_stream(
+                                        if let Err(e) = relay_rpf_udp_stream(
                                             conn_id,
                                             src_addr,
                                             socket_clone,
@@ -804,14 +804,14 @@ async fn relay_tcp_stream(
     Ok(())
 }
 
-/// UDP パケットと QUIC ストリーム間でデータを中継
+/// RPF: UDP パケットと QUIC ストリーム間でデータを中継
 ///
 /// UDP はパケット境界を保持するため、Length-prefixed framing を使用:
 /// - 送信時: [4 bytes length (BE)] + [payload]
 /// - 受信時: [4 bytes length (BE)] + [payload]
 ///
 /// cancel_token がキャンセルされると、リレーを中断する
-async fn relay_udp_stream(
+async fn relay_rpf_udp_stream(
     conn_id: u32,
     src_addr: SocketAddr,
     udp_socket: Arc<UdpSocket>,

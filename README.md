@@ -193,7 +193,7 @@ server::run(listen, auth).await?;
 
 // Start client
 let auth = ClientAuthConfig::Psk { psk: "secret".to_string() };
-client::run("127.0.0.1:39000", "8080/tcp", "80/tcp", auth).await?;
+client::run_remote_forward("127.0.0.1:39000", "8080/tcp", "80/tcp", auth).await?;
 ```
 
 ## Building from Source
