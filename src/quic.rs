@@ -273,177 +273,6 @@ impl KnownHosts {
     }
 }
 
-// =============================================================================
-// セッションチケットキー永続化
-// =============================================================================
-
-/// セッションチケットキーファイルのパスを取得
-///
-/// known_hosts と同じディレクトリ（~/.local/share/quicport/）に保存
-pub fn ticket_key_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Failed to get home directory")?;
-    let share_dir = home.join(".local").join("share").join("quicport");
-
-    // ディレクトリが存在しない場合は作成
-    if !share_dir.exists() {
-        fs::create_dir_all(&share_dir)
-            .context("Failed to create ~/.local/share/quicport directory")?;
-    }
-
-    Ok(share_dir.join("ticket.key"))
-}
-
-/// セッションチケットキーを取得または生成
-///
-/// - ファイルが存在すれば読み込み（Base64 形式）
-/// - 存在しなければ新規生成して保存
-/// - パーミッションは 0600 に設定
-pub fn get_or_create_ticket_key() -> Result<[u8; 32]> {
-    use base64::Engine;
-
-    let path = ticket_key_path()?;
-
-    if path.exists() {
-        // 既存のキーを読み込み（Base64 形式）
-        let content = fs::read_to_string(&path).context("Failed to read ticket key file")?;
-        let content = content.trim(); // 前後の空白・改行を除去
-
-        // Base64 デコード
-        let key_bytes = base64::engine::general_purpose::STANDARD
-            .decode(content)
-            .context("Failed to decode ticket key from Base64")?;
-
-        if key_bytes.len() != 32 {
-            tracing::warn!(
-                "Ticket key file has invalid size after decoding ({}), regenerating",
-                key_bytes.len()
-            );
-            return generate_and_save_ticket_key(&path);
-        }
-
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&key_bytes);
-
-        tracing::info!("Loaded session ticket key from {}", path.display());
-        Ok(key)
-    } else {
-        generate_and_save_ticket_key(&path)
-    }
-}
-
-/// 新しいチケットキーを生成してファイルに保存（Base64 形式）
-fn generate_and_save_ticket_key(path: &Path) -> Result<[u8; 32]> {
-    use base64::Engine;
-    use rand::RngCore;
-
-    let mut key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key);
-
-    // Base64 エンコードしてファイルに書き込み
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&key);
-    fs::write(path, format!("{}\n", encoded)).context("Failed to write ticket key file")?;
-
-    // パーミッションを 0600 に設定（Unix のみ）
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(path, permissions).context("Failed to set ticket key permissions")?;
-    }
-
-    tracing::info!("Generated new session ticket key at {}", path.display());
-    Ok(key)
-}
-
-/// 永続化対応セッションチケット生成器
-///
-/// rustls の ProducesTickets trait を実装し、固定キーを使用してセッションチケットを生成
-/// これによりサーバー再起動後も 0-RTT 再接続が可能
-pub struct PersistentTicketer {
-    /// 暗号化キー（ChaCha20Poly1305 用）
-    key: ring::aead::LessSafeKey,
-    /// チケットの有効期間（秒）
-    lifetime: u32,
-}
-
-impl PersistentTicketer {
-    /// 新しい PersistentTicketer を作成
-    ///
-    /// key: 32 バイトの暗号化キー
-    /// lifetime: チケットの有効期間（秒）、デフォルト 12 時間
-    pub fn new(key: &[u8; 32], lifetime: u32) -> Result<Self> {
-        let unbound_key = ring::aead::UnboundKey::new(&ring::aead::CHACHA20_POLY1305, key)
-            .map_err(|_| anyhow::anyhow!("Failed to create AEAD key"))?;
-        let aead_key = ring::aead::LessSafeKey::new(unbound_key);
-
-        Ok(Self {
-            key: aead_key,
-            lifetime,
-        })
-    }
-
-    /// デフォルト設定（12 時間）で作成
-    pub fn with_default_lifetime(key: &[u8; 32]) -> Result<Self> {
-        Self::new(key, 12 * 60 * 60) // 12 時間
-    }
-}
-
-impl std::fmt::Debug for PersistentTicketer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PersistentTicketer")
-            .field("lifetime", &self.lifetime)
-            .finish_non_exhaustive()
-    }
-}
-
-impl rustls::server::ProducesTickets for PersistentTicketer {
-    fn lifetime(&self) -> u32 {
-        self.lifetime
-    }
-
-    fn enabled(&self) -> bool {
-        true
-    }
-
-    fn encrypt(&self, message: &[u8]) -> Option<Vec<u8>> {
-        // nonce (12 bytes) + ciphertext + tag (16 bytes)
-        let nonce_bytes: [u8; 12] = rand::random();
-        let nonce = ring::aead::Nonce::assume_unique_for_key(nonce_bytes);
-
-        let mut ciphertext = message.to_vec();
-        self.key
-            .seal_in_place_append_tag(nonce, ring::aead::Aad::empty(), &mut ciphertext)
-            .ok()?;
-
-        // nonce を先頭に付与
-        let mut result = Vec::with_capacity(12 + ciphertext.len());
-        result.extend_from_slice(&nonce_bytes);
-        result.extend_from_slice(&ciphertext);
-
-        Some(result)
-    }
-
-    fn decrypt(&self, ciphertext: &[u8]) -> Option<Vec<u8>> {
-        // 最小サイズチェック: nonce (12) + tag (16)
-        if ciphertext.len() < 28 {
-            return None;
-        }
-
-        // nonce を取り出す
-        let nonce_bytes: [u8; 12] = ciphertext[..12].try_into().ok()?;
-        let nonce = ring::aead::Nonce::assume_unique_for_key(nonce_bytes);
-
-        // 復号
-        let mut plaintext = ciphertext[12..].to_vec();
-        let plaintext = self
-            .key
-            .open_in_place(nonce, ring::aead::Aad::empty(), &mut plaintext)
-            .ok()?;
-
-        Some(plaintext.to_vec())
-    }
-}
-
 /// TOFU 証明書検証器
 ///
 /// ServerCertVerifier を実装し、known_hosts に基づいて証明書を検証
@@ -695,14 +524,8 @@ fn get_or_create_server_cert() -> Result<(Vec<CertificateDer<'static>>, PrivateK
 /// サーバー用の QUIC エンドポイントを作成
 ///
 /// 証明書は ~/.config/quicport/ に永続化される
-/// セッションチケットキーは ~/.local/share/quicport/ticket.key に永続化される
 pub fn create_server_endpoint(bind_addr: SocketAddr, _psk: &str) -> Result<Endpoint> {
     let (certs, key) = get_or_create_server_cert()?;
-
-    // セッションチケットキーを取得または生成
-    // これによりサーバー再起動後も 0-RTT 再接続が可能になる
-    let ticket_key = get_or_create_ticket_key()?;
-    let ticketer = PersistentTicketer::with_default_lifetime(&ticket_key)?;
 
     let mut server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -710,10 +533,6 @@ pub fn create_server_endpoint(bind_addr: SocketAddr, _psk: &str) -> Result<Endpo
         .context("Failed to create server TLS config")?;
 
     server_crypto.alpn_protocols = vec![ALPN_QUICPORT.to_vec()];
-
-    // セッションチケット用の Ticketer を設定
-    // 永続化されたキーを使用することで、サーバー再起動後もセッションを復元可能
-    server_crypto.ticketer = Arc::new(ticketer);
 
     let mut server_config = ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
