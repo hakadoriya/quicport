@@ -75,6 +75,18 @@ enum Commands {
         /// Skip server certificate verification (insecure, for testing only)
         #[arg(long, default_value = "false")]
         insecure: bool,
+
+        /// Auto-reconnect on connection loss (for ssh-proxy mode)
+        #[arg(long, default_value = "true")]
+        reconnect: bool,
+
+        /// Maximum reconnection attempts (0 = unlimited)
+        #[arg(long, default_value = "0")]
+        reconnect_max_attempts: u32,
+
+        /// Initial delay between reconnection attempts in seconds
+        #[arg(long, default_value = "1")]
+        reconnect_delay: u64,
     },
 
     /// Run as server (listen for QUIC connections)
@@ -181,6 +193,18 @@ enum Commands {
         /// Skip server certificate verification (insecure, for testing only)
         #[arg(long, default_value = "false")]
         insecure: bool,
+
+        /// Auto-reconnect on connection loss
+        #[arg(long, default_value = "true")]
+        reconnect: bool,
+
+        /// Maximum reconnection attempts (0 = unlimited)
+        #[arg(long, default_value = "0")]
+        reconnect_max_attempts: u32,
+
+        /// Initial delay between reconnection attempts in seconds
+        #[arg(long, default_value = "1")]
+        reconnect_delay: u64,
     },
 }
 
@@ -382,6 +406,9 @@ async fn main() -> Result<()> {
             server_pubkey_file,
             psk,
             insecure,
+            reconnect,
+            reconnect_max_attempts,
+            reconnect_delay,
         } => {
             let auth_config = build_client_auth_config(
                 privkey,
@@ -391,11 +418,24 @@ async fn main() -> Result<()> {
                 psk,
             )?;
 
+            let reconnect_config = client::ReconnectConfig::new(
+                reconnect,
+                reconnect_max_attempts,
+                reconnect_delay,
+            );
+
             info!(
                 "SSH proxy connecting to {} (remote={})",
                 server, remote_destination
             );
-            client::run_ssh_proxy(&server, &remote_destination, auth_config, insecure).await?;
+            client::run_ssh_proxy_with_reconnect(
+                &server,
+                &remote_destination,
+                auth_config,
+                insecure,
+                reconnect_config,
+            )
+            .await?;
         }
 
         Commands::Server {
@@ -458,6 +498,9 @@ async fn main() -> Result<()> {
             server_pubkey_file,
             psk,
             insecure,
+            reconnect,
+            reconnect_max_attempts,
+            reconnect_delay,
         } => {
             let auth_config = build_client_auth_config(
                 privkey,
@@ -467,6 +510,12 @@ async fn main() -> Result<()> {
                 psk,
             )?;
 
+            let reconnect_config = client::ReconnectConfig::new(
+                reconnect,
+                reconnect_max_attempts,
+                reconnect_delay,
+            );
+
             // フォワーディングモードを判定
             match (remote_source, local_destination, local_source, remote_destination) {
                 // Remote Port Forwarding (RPF): --remote-source + --local-destination
@@ -475,7 +524,15 @@ async fn main() -> Result<()> {
                         "Connecting to {} (RPF: remote={}, local={})",
                         server, rs, ld
                     );
-                    client::run(&server, &rs, &ld, auth_config, insecure).await?;
+                    client::run_with_reconnect(
+                        &server,
+                        &rs,
+                        &ld,
+                        auth_config,
+                        insecure,
+                        reconnect_config,
+                    )
+                    .await?;
                 }
                 // Local Port Forwarding (LPF): --local-source + --remote-destination
                 (None, None, Some(ls), Some(rd)) => {
@@ -483,7 +540,15 @@ async fn main() -> Result<()> {
                         "Connecting to {} (LPF: local={}, remote={})",
                         server, ls, rd
                     );
-                    client::run_local_forward(&server, &ls, &rd, auth_config, insecure).await?;
+                    client::run_local_forward_with_reconnect(
+                        &server,
+                        &ls,
+                        &rd,
+                        auth_config,
+                        insecure,
+                        reconnect_config,
+                    )
+                    .await?;
                 }
                 // 不正な組み合わせ
                 _ => {
