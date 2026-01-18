@@ -101,9 +101,10 @@ quicport server [OPTIONS]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-l, --listen` | `0.0.0.0:39000` | Address and port to listen on for QUIC |
-| `--api-listen` | `0.0.0.0:39001` | Address and port for API server |
-| `--no-api` | `false` | Disable API server |
+| `-l, --listen` | `0.0.0.0:39000` | Address and port to listen on for QUIC (UDP) |
+| `--private-api-listen` | `127.0.0.1:<port>` | Address for private API server (same port as QUIC, TCP) |
+| `--no-private-api` | `false` | Disable private API server (/metrics, /graceful-restart) |
+| `--no-public-api` | `false` | Disable public API server (/healthcheck, port+1) |
 | `--privkey` | - | Server's private key (Base64). Env: `QUICPORT_PRIVKEY` |
 | `--privkey-file` | - | Path to server's private key file. Env: `QUICPORT_PRIVKEY_FILE` |
 | `--client-pubkeys` | - | Authorized client public keys (comma-separated). Env: `QUICPORT_CLIENT_PUBKEYS` |
@@ -167,15 +168,36 @@ quicport client \
 
 ## API Server
 
-The server includes a built-in HTTP API server (default: port 39001) for health checks:
+The server provides two HTTP API servers:
+
+### Private API (same port as QUIC, TCP, localhost only)
+
+Accessible only from localhost. Provides `/healthcheck`, `/metrics`, and `/api/graceful-restart` endpoints.
 
 ```bash
-# Health check endpoint
-curl http://localhost:39001/healthcheck
+# Health check
+curl http://127.0.0.1:39000/healthcheck
+
+# Prometheus metrics
+curl http://127.0.0.1:39000/metrics
+
+# Trigger graceful restart
+curl -X POST http://127.0.0.1:39000/api/graceful-restart
+```
+
+Disable with `--no-private-api` flag. Change address with `--private-api-listen`.
+
+### Public API (QUIC port + 1, TCP)
+
+Accessible from the internet. Only `/healthcheck` endpoint is exposed.
+
+```bash
+# Health check endpoint (from anywhere)
+curl http://your-server:39001/healthcheck
 # Response: {"status":"SERVING"}
 ```
 
-Disable with `--no-api` flag.
+Disable with `--no-public-api` flag.
 
 ## Library Usage
 
@@ -193,8 +215,53 @@ server::run(listen, auth).await?;
 
 // Start client
 let auth = ClientAuthConfig::Psk { psk: "secret".to_string() };
-client::run("127.0.0.1:39000", "8080/tcp", "80/tcp", auth).await?;
+client::run_remote_forward("127.0.0.1:39000", "8080/tcp", "80/tcp", auth).await?;
 ```
+
+## Systemd Service
+
+Example systemd unit file for running quicport server as a service:
+
+```ini
+[Unit]
+Description=quicport - QUIC-based port forwarding / tunneling server
+Documentation=https://github.com/hakadoriya/quicport
+After=network-online.target
+Wants=network-online.target
+RefuseManualStop=yes
+
+[Service]
+Type=simple
+User=quicport
+Group=quicport
+ExecStart=/usr/local/bin/quicport --log-format json server
+ExecReload=/usr/local/bin/quicport ctl graceful-restart
+EnvironmentFile=-/etc/quicport/quicport.env
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/quicport/quicport.log
+StandardError=inherit
+SyslogIdentifier=quicport
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Graceful Restart Behavior
+
+| Operation | Result |
+|-----------|--------|
+| `systemctl reload quicport` | Graceful restart, **connections preserved** |
+| `systemctl stop/restart quicport` | **Refused** (protected by `RefuseManualStop=yes`) |
+| OS shutdown | All processes terminated, connections dropped (acceptable) |
+| Emergency stop | `systemctl kill -s SIGKILL quicport` |
+
+**Why not `systemctl restart`?**
+
+systemd manages processes by **cgroup**. When a service stops, all processes in its cgroup are terminated. This includes data-plane processes that maintain active connections. Unlike sshd (where `systemd-logind` moves SSH sessions to a separate cgroup), quicport data-planes remain in the service's cgroup.
+
+The solution: Use `systemctl reload` for graceful restarts. This triggers `ExecReload` which sends DRAIN commands to existing data-planes while starting new ones. Data-planes continue serving existing connections until they naturally close.
 
 ## Building from Source
 

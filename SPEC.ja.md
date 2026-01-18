@@ -62,8 +62,9 @@ quicport server --listen <bind_address>:<port> --privkey <server_private_key> --
 | オプション | 必須 | 説明 |
 |-----------|------|------|
 | `--listen`, `-l` | No | QUIC コネクションを待ち受けるアドレスとポート（デフォルト: `0.0.0.0:39000`） |
-| `--api-listen` | No | API サーバーを待ち受けるアドレスとポート（デフォルト: `0.0.0.0:39001`） |
-| `--no-api` | No | API サーバーを無効化 |
+| `--private-api-listen` | No | Private API サーバーのアドレスとポート（デフォルト: `127.0.0.1:<listen_port>`） |
+| `--no-private-api` | No | Private API サーバーを無効化 |
+| `--no-public-api` | No | Public API サーバーを無効化 |
 | `--privkey` | Yes** | サーバーの秘密鍵（Base64 形式、相互認証用）。環境変数 `QUICPORT_PRIVKEY` でも指定可 |
 | `--privkey-file` | Yes** | サーバーの秘密鍵ファイルパス。環境変数 `QUICPORT_PRIVKEY_FILE` でも指定可 |
 | `--client-pubkeys` | Yes* | 認可するクライアントの公開鍵（Base64 形式）。複数指定はカンマ区切り。環境変数 `QUICPORT_CLIENT_PUBKEYS` でも指定可 |
@@ -136,6 +137,10 @@ quicport client --server <server_address>:<port> --local-source <port>[/protocol
 | `--server-pubkey-file` | Yes** | サーバーの公開鍵ファイルパス。環境変数 `QUICPORT_SERVER_PUBKEY_FILE` でも指定可 |
 | `--psk` | No | 事前共有キー。環境変数 `QUICPORT_PSK` でも指定可 |
 | `--insecure` | No | サーバー証明書検証をスキップ（テスト用、本番環境では非推奨） |
+| **再接続オプション** |||
+| `--reconnect` | No | 接続断時に自動再接続を有効化（デフォルト: true） |
+| `--reconnect-max-attempts` | No | 最大再接続試行回数。0 = 無制限（デフォルト: 0） |
+| `--reconnect-delay` | No | 初期再接続待機時間（秒）。エクスポネンシャルバックオフで最大 60 秒まで増加（デフォルト: 1） |
 
 \* `--privkey` または `--privkey-file` のいずれかが必須（`--psk` を使用する場合を除く）
 \** X25519 認証（`--privkey` / `--privkey-file`）使用時は `--server-pubkey` または `--server-pubkey-file` が必須（MITM 攻撃防止のため）
@@ -215,6 +220,10 @@ quicport ssh-proxy --server <server_address>:<port> --remote-destination [addr:]
 | `--server-pubkey-file` | Yes** | サーバーの公開鍵ファイルパス。環境変数 `QUICPORT_SERVER_PUBKEY_FILE` でも指定可 |
 | `--psk` | No | 事前共有キー。環境変数 `QUICPORT_PSK` でも指定可 |
 | `--insecure` | No | サーバー証明書検証をスキップ（テスト用、本番環境では非推奨） |
+| **再接続オプション** |||
+| `--reconnect` | No | 接続断時に自動再接続を有効化（デフォルト: true） |
+| `--reconnect-max-attempts` | No | 最大再接続試行回数。0 = 無制限（デフォルト: 0） |
+| `--reconnect-delay` | No | 初期再接続待機時間（秒）（デフォルト: 1） |
 
 \* `--privkey` または `--privkey-file` のいずれかが必須（`--psk` を使用する場合を除く）
 \** X25519 認証使用時は `--server-pubkey` または `--server-pubkey-file` が必須
@@ -244,7 +253,261 @@ Host myserver
 - **非対話モード**: TOFU の未知ホスト確認は行えません。事前に `quicport client` で known_hosts に登録するか、`--insecure` を使用してください
 - **プロトコル**: 内部的には LPF (Local Port Forwarding) プロトコルを使用します
 
+### データプレーンモード (data-plane)
+
+QUIC 接続ハンドラとして動作するデータプレーンを起動します。
+通常はコントロールプレーン（`quicport server`）から起動されますが、直接起動も可能です。
+
+```bash
+quicport data-plane [OPTIONS]
+```
+
+**オプション:**
+
+| オプション | 必須 | 説明 |
+|-----------|------|------|
+| `--listen`, `-l` | No | QUIC リッスンアドレス（デフォルト: `0.0.0.0:39000`） |
+| `--drain-timeout` | No | DRAIN 状態のタイムアウト秒数（デフォルト: `0` = 無限） |
+
+**認証設定（環境変数）:**
+
+データプレーンは認証設定を環境変数から取得します：
+
+| 環境変数 | 説明 |
+|---------|------|
+| `QUICPORT_DP_AUTH_TYPE` | 認証タイプ（`psk` または `x25519`） |
+| `QUICPORT_DP_PSK` | PSK 認証時の事前共有キー |
+| `QUICPORT_DP_SERVER_PRIVKEY` | X25519 認証時のサーバー秘密鍵（Base64） |
+| `QUICPORT_DP_CLIENT_PUBKEYS` | X25519 認証時の許可されたクライアント公開鍵（カンマ区切り、Base64） |
+
+**例:**
+
+```bash
+# PSK 認証でデータプレーンを直接起動
+QUICPORT_DP_AUTH_TYPE=psk QUICPORT_DP_PSK="secret" quicport data-plane --listen 0.0.0.0:39000
+
+# X25519 認証でデータプレーンを起動
+QUICPORT_DP_AUTH_TYPE=x25519 \
+  QUICPORT_DP_SERVER_PRIVKEY="SERVER_PRIVKEY" \
+  QUICPORT_DP_CLIENT_PUBKEYS="CLIENT_PUBKEY1,CLIENT_PUBKEY2" \
+  quicport data-plane
+```
+
+### 制御コマンド (ctl)
+
+実行中のデータプレーンを管理するためのコマンドです。
+
+```bash
+quicport ctl <COMMAND>
+```
+
+**サブコマンド:**
+
+| コマンド | 説明 |
+|----------|------|
+| `graceful-restart [--api-addr <ADDR>]` | グレースフルリスタートを実行（Private API 経由） |
+| `status` | 全データプレーンの状態を表示 |
+| `drain --pid <PID>` | 特定のデータプレーンに DRAIN を送信 |
+
+**graceful-restart オプション:**
+
+| オプション | デフォルト | 説明 |
+|-----------|-----------|------|
+| `--api-addr` | `127.0.0.1:39000` | Private API サーバーのアドレス |
+
+**例:**
+
+```bash
+# 全データプレーンの状態を確認
+quicport ctl status
+
+# グレースフルリスタート（Private API 経由で新しいデータプレーンを起動し、旧データプレーンをドレイン）
+quicport ctl graceful-restart
+
+# 別のポートで起動している場合
+quicport ctl graceful-restart --api-addr 127.0.0.1:9000
+
+# 特定のデータプレーンをドレイン
+quicport ctl drain --pid 12345
+```
+
+**出力例 (status):**
+
+```
+Data Planes:
+PID        State        Connections  Bytes Sent      Bytes Received
+----------------------------------------------------------------
+12345      ACTIVE       3            10485760        5242880
+12346      DRAINING     1            524288          262144
+```
+
 ## アーキテクチャ
+
+### データプレーン/コントロールプレーン分離
+
+quicport はサーバー再起動時の接続維持を実現するため、データプレーンとコントロールプレーンを分離したアーキテクチャを採用しています。
+
+#### cgroup 分離アーキテクチャ
+
+コントロールプレーン (cp) とデータプレーン (dp) は **異なる cgroup** で動作します。
+これにより、cp が終了しても dp は独立して動作を継続できます。
+
+```
++------------------------------------------------------------------+
+| systemd (quicport.service)                                       |
+|   └─ ExecStart: /path/to/quicport.sh                             |
++------------------------------------------------------------------+
+                          |
+                          v
++------------------------------------------------------------------+
+| quicport.sh (シェルスクリプト)                                     |
+|   1. systemd-run で data-plane を別 cgroup に起動                 |
+|   2. exec で control-plane に置き換わる（PID 引き継ぎ）            |
++------------------------------------------------------------------+
+          |                                   |
+          v                                   v
++------------------------+    +------------------------------------+
+| cgroup A (systemd)     |    | cgroup B (systemd-run --scope)     |
+| +--------------------+ |    | +--------------------------------+ |
+| | Control Plane      | |    | | Data Plane                     | |
+| | (quicport cp)      |<-----| | (quicport dp)                  | |
+| |                    | |    | |                                | |
+| | - 認証ポリシー管理  | |    | | - QUIC 終端                     | |
+| | - API サーバー     | |    | | - 認証実行                      | |
+| | - dp の管理        | |    | | - データ転送                    | |
+| +--------------------+ |    | | - SO_REUSEPORT で LISTEN       | |
++------------------------+    | +--------------------------------+ |
+                              +------------------------------------+
+```
+
+**プラットフォーム非依存設計:**
+
+- quicport バイナリ自体はプラットフォーム固有の機能（systemd-run, cgroup 等）に依存しない
+- プラットフォーム依存の部分はシェルスクリプトに切り出す
+- **Linux (systemd)**: `quicport.sh` で systemd-run を使用した cgroup 分離
+- **macOS / Windows**: 手動で cp と dp を別々に起動（graceful restart 時のコネクション維持は手動管理）
+
+**責務分離:**
+
+| コンポーネント | 責務 |
+|--------------|------|
+| **シェルスクリプト** | systemd-run での dp 起動、exec での cp 起動 |
+| **コントロールプレーン** | 認証ポリシー管理、API サーバー、dp へのコマンド送信 |
+| **データプレーン** | QUIC 終端、クライアント認証、TCP/UDP 接続維持、データ転送 |
+
+#### 起動シーケンス
+
+```
+systemd                quicport.sh              data-plane              control-plane
+   |                        |                        |                        |
+   |-- ExecStart ---------->|                        |                        |
+   |                        |                        |                        |
+   |                        |-- systemd-run -------->|                        |
+   |                        |   (別 cgroup で起動)    |                        |
+   |                        |                        |                        |
+   |                        |                        |-- cp への接続をリトライ -->|
+   |                        |                        |   (cp 起動待ち)          |
+   |                        |                        |                        |
+   |                        |-- exec --------------->|                        |
+   |                        |   (PID 引き継ぎ)        |                        |
+   |                        |                        |                        |
+   |<-- systemd は cp を追跡 -------------------------|                        |
+   |                        |                        |                        |
+   |                        |                        |<-- 接続成功 -------------|
+   |                        |                        |                        |
+   |                        |                        |-- ACTIVE 状態に遷移 ---->|
+   |                        |                        |                        |
+   |                        |                        |-- SO_REUSEPORT で LISTEN |
+   |                        |                        |                        |
+```
+
+1. systemd が `quicport.sh` を起動
+2. シェルスクリプトが `systemd-run --scope` で dp を別 cgroup に起動
+3. dp は cp への接続を試行（cp 起動まで接続リトライ）
+4. シェルスクリプトが `exec` で cp に置き換わる（systemd から直接 cp が見える）
+5. dp が cp への接続に成功し、ACTIVE 状態に遷移
+6. dp が SO_REUSEPORT で QUIC ポートを LISTEN 開始
+
+#### 終了シーケンス（graceful shutdown）
+
+```
+systemd                control-plane            data-plane
+   |                        |                        |
+   |-- SIGTERM ------------>|                        |
+   |                        |                        |
+   |                        |-- graceful-shutdown -->|
+   |                        |   (API 経由)            |
+   |                        |                        |
+   |                        |                        |-- LISTEN 停止
+   |                        |                        |-- DRAINING 状態に遷移
+   |                        |                        |
+   |                        |-- プロセス終了          |
+   |                        |                        |
+   |<-- cp 終了を検知 -------|                        |
+   |                        |                        |
+   |                        |                        |-- 既存コネクション処理継続
+   |                        |                        |   (別 cgroup なので独立動作)
+   |                        |                        |
+   |                        |                        |-- 全コネクション終了
+   |                        |                        |-- または drain_timeout 経過
+   |                        |                        |
+   |                        |                        |-- プロセス終了
+   |                        |                        |
+```
+
+1. systemd から cp に SIGTERM
+2. cp から dp に graceful-shutdown を指示（API 経由）
+3. dp が LISTEN を停止し、DRAINING 状態に遷移
+4. cp がプロセス終了
+5. dp は別 cgroup で独立して動作を継続
+6. dp は既存コネクションをすべて処理完了（または drain_timeout 経過）後に終了
+
+#### 再起動シーケンス（systemctl restart）
+
+```
+systemd                旧 cp                     旧 dp                    新 cp + dp
+   |                     |                         |                          |
+   |-- SIGTERM --------->|                         |                          |
+   |                     |                         |                          |
+   |                     |-- graceful-shutdown --->|                          |
+   |                     |                         |                          |
+   |                     |                         |-- DRAINING               |
+   |                     |                         |                          |
+   |                     |-- プロセス終了           |                          |
+   |                     |                         |                          |
+   |-- ExecStart (quicport.sh) ------------------------------------------>|
+   |                     |                         |                          |
+   |                     |                         |      新 dp が SO_REUSEPORT で
+   |                     |                         |      同一ポートを LISTEN
+   |                     |                         |                          |
+   |                     |                         |-- 既存コネクション処理 -->|
+   |                     |                         |   (DRAINING 継続)         |
+   |                     |                         |                          |
+   |                     |                         |-- 全コネクション終了      |
+   |                     |                         |-- プロセス終了            |
+   |                     |                         |                          |
+```
+
+- 新規接続は新しい dp が処理
+- 旧 dp は DRAINING 状態で既存コネクションのみ処理
+- SO_REUSEPORT により新旧 dp が同一ポートで共存可能
+
+**データプレーンの状態遷移:**
+
+```
+STARTING --> ACTIVE --> DRAINING --> TERMINATED
+    |           |           |
+    |           +-----------+  (drain_timeout 経過)
+    |                       |
+    +-----------------------+  (shutdown コマンド)
+```
+
+| 状態 | 説明 |
+|-----|------|
+| `STARTING` | 起動中、cp への接続リトライ |
+| `ACTIVE` | 通常稼働中、新規接続受付可能 |
+| `DRAINING` | ドレイン中、新規接続拒否、既存接続のみ処理 |
+| `TERMINATED` | 終了済み |
 
 ### トランスポート層
 
@@ -456,6 +719,30 @@ quicport は以下のディレクトリにファイルを配置します（XDG B
 | `~/.config/quicport/server.key` | サーバー秘密鍵（DER 形式、パーミッション 0600） |
 | `~/.config/quicport/psk` | 自動生成された PSK（Base64 形式、32 バイト） |
 | `~/.local/share/quicport/known_hosts` | クライアントの既知ホスト一覧 |
+| `~/.local/state/quicport/dataplanes/dp-<pid>.port` | データプレーン IPC ポート番号（TCP 127.0.0.1） |
+| `~/.local/state/quicport/dataplanes/dp-<pid>.state` | データプレーン状態ファイル（JSON 形式） |
+
+#### データプレーン管理ファイル
+
+データプレーンは `~/.local/state/quicport/dataplanes/` ディレクトリで管理されます:
+
+- **ポートファイル** (`dp-<pid>.port`): IPC 用 TCP ポート番号（127.0.0.1 で待ち受け）
+- **状態ファイル** (`dp-<pid>.state`): データプレーンの現在の状態を JSON 形式で記録
+
+状態ファイルの例:
+
+```json
+{
+  "state": "Active",
+  "pid": 12345,
+  "active_connections": 3,
+  "bytes_sent": 10485760,
+  "bytes_received": 5242880,
+  "started_at": 1705639200
+}
+```
+
+データプレーン終了時、これらのファイルは自動的にクリーンアップされます。
 
 #### サーバー証明書の永続化
 
@@ -919,14 +1206,32 @@ IPv6 アドレスを正しく扱うための設計:
 
 ## API サーバー
 
-サーバーモードでは HTTP API サーバーが並列起動し、ヘルスチェックや Prometheus 形式のメトリクスを提供します。
+サーバーモードでは 2 つの HTTP API サーバーが起動します。
 
-### エンドポイント
+### Private API サーバー
+
+localhost からのみアクセス可能な管理用 API です。
+
+- **リッスンアドレス**: `127.0.0.1:<listen_port>`（QUIC と同じポート番号、TCP）
+- **無効化**: `--no-private-api`
+- **カスタムアドレス**: `--private-api-listen`
 
 | エンドポイント | メソッド | 説明 |
 |---------------|---------|------|
 | `/healthcheck` | GET | ヘルスチェック |
 | `/metrics` | GET | Prometheus 形式のメトリクス |
+| `/api/graceful-restart` | POST | グレースフルリスタートを実行 |
+
+### Public API サーバー
+
+インターネットからアクセス可能なヘルスチェック専用 API です。
+
+- **リッスンアドレス**: `0.0.0.0:<listen_port + 1>`（QUIC ポート + 1、TCP）
+- **無効化**: `--no-public-api`
+
+| エンドポイント | メソッド | 説明 |
+|---------------|---------|------|
+| `/healthcheck` | GET | ヘルスチェック |
 
 ### GET /healthcheck
 
@@ -940,9 +1245,35 @@ IPv6 アドレスを正しく扱うための設計:
 }
 ```
 
+### POST /api/graceful-restart
+
+グレースフルリスタートを実行します（Private API のみ）。
+
+1. 新しいデータプレーンを起動（SO_REUSEPORT で同一ポートで LISTEN）
+2. 旧データプレーンに DRAIN コマンドを送信
+3. 旧データプレーンは新規接続を拒否し、既存接続のみ処理
+
+**レスポンス例（成功）:**
+
+```json
+{
+  "status": "OK",
+  "message": "Graceful restart initiated"
+}
+```
+
+**レスポンス例（失敗）:**
+
+```json
+{
+  "status": "ERROR",
+  "message": "Graceful restart failed: ..."
+}
+```
+
 ### GET /metrics
 
-Prometheus 形式でサーバーの稼働状況を返します。
+Prometheus 形式でサーバーの稼働状況を返します（Private API のみ）。
 
 **レスポンス例:**
 
@@ -1013,6 +1344,12 @@ quicport_auth_x25519_failed_total 2
 - 設定ファイル未対応（コマンドライン引数のみ）
 
 ## 将来の拡張予定
+
+### 実装済み
+
+- [x] データプレーン/コントロールプレーン分離（グレースフルリスタート対応）
+
+### 未実装
 
 - [ ] 複数ポートフォワーディング対応
 - [ ] 設定ファイル対応 (TOML/YAML)

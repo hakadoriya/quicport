@@ -69,7 +69,7 @@ impl TestServer {
         eprintln!("[TestServer] Starting with PSK: listen={}", listen_addr);
 
         let process = Command::new(quicport_binary())
-            .args(["server", "--listen", &listen_addr, "--no-api", "--psk", psk])
+            .args(["server", "--listen", &listen_addr, "--no-public-api", "--no-private-api", "--psk", psk])
             .stdout(Stdio::inherit()) // 標準出力を継承してログを見る
             .stderr(Stdio::inherit()) // 標準エラーを継承してログを見る
             .spawn()
@@ -92,7 +92,7 @@ impl TestServer {
                 "server",
                 "--listen",
                 &listen_addr,
-                "--no-api",
+                "--no-public-api", "--no-private-api",
                 "--privkey",
                 server_privkey,
                 "--client-pubkeys",
