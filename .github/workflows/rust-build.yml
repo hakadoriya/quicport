@@ -1,10 +1,17 @@
 name: rust-build
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name to upload assets (e.g., v1.0.0). Leave empty to skip release upload.'
+        required: false
+        type: string
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   BIN_NAME: quicport
@@ -183,3 +190,24 @@ jobs:
         with:
           path: target/
           key: ${{ steps.cache-target-restore.outputs.cache-primary-key }}
+
+  upload-release:
+    name: Upload to Release
+    needs: rust-build
+    if: github.event_name == 'release' || inputs.tag_name != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: artifacts
+
+      - name: Upload assets to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.event.release.tag_name || inputs.tag_name }}
+        run: |
+          set -Eeuo pipefail -x
+          gh release upload ${{ env.TAG_NAME }} ./artifacts/*/*
