@@ -14,6 +14,8 @@ Group=quicport
 
 # NOTE: The binary path
 ExecStart=/usr/local/bin/quicport --log-format json server
+ExecReload=/usr/local/bin/quicport ctl graceful-restart
+KillMode=process
 
 # NOTE: The environment variable file (authentication key, etc.)
 EnvironmentFile=-/etc/quicport/quicport.env

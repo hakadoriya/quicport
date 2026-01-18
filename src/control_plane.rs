@@ -426,9 +426,33 @@ pub async fn run(
     control_plane.start().await?;
 
     // 終了シグナルを待機
-    tokio::signal::ctrl_c().await?;
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
 
-    info!("Received shutdown signal");
+        // SIGTERM ハンドラを作成
+        let mut sigterm =
+            signal(SignalKind::terminate()).context("Failed to create SIGTERM handler")?;
+
+        // 終了シグナルを待機（SIGINT または SIGTERM）
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received SIGINT");
+            }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM");
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        // Windows では SIGTERM がないため、SIGINT (Ctrl+C) のみをハンドリング
+        tokio::signal::ctrl_c().await?;
+        info!("Received SIGINT");
+    }
+
+    info!("Shutting down control plane");
     cp_for_shutdown.shutdown_all().await?;
 
     Ok(())

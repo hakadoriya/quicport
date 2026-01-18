@@ -196,6 +196,28 @@ let auth = ClientAuthConfig::Psk { psk: "secret".to_string() };
 client::run_remote_forward("127.0.0.1:39000", "8080/tcp", "80/tcp", auth).await?;
 ```
 
+## Systemd Service
+
+Example systemd unit file for running quicport server as a service:
+
+```ini
+[Unit]
+Description=quicport server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/quicport server
+ExecReload=/usr/local/bin/quicport ctl graceful-restart
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Important**: `KillMode=process` ensures only the main process (control-plane) receives SIGTERM on restart, allowing data-plane processes to gracefully drain existing connections.
+
 ## Building from Source
 
 ```bash
