@@ -1,18 +1,18 @@
 #!/bin/bash
 # =============================================================================
-# quicport.sh - cp/dp 分離アーキテクチャ用起動スクリプト
+# quicport-starter - cgroup 分離アーキテクチャ用起動スクリプト
 #
 # このスクリプトは systemd から呼び出され、以下を行います:
-# 1. data-plane を独立したプロセスグループでバックグラウンド起動
+# 1. data-plane を systemd-run で別 cgroup に起動
 # 2. control-plane に exec で置き換わる
 #
 # これにより:
-# - cp と dp が別プロセスとして動作
+# - cp と dp が異なる cgroup で動作
 # - systemctl restart 時に cp のみ再起動され、dp は継続動作
 # - graceful restart が実現可能
 #
-# 注意: systemd-run --scope は root 権限が必要なため使用していません。
-#       代わりに setsid でプロセスグループを分離しています。
+# 注意: systemd-run --scope は root 権限が必要です。
+#       systemd サービスは root で実行してください。
 # =============================================================================
 
 set -euo pipefail
@@ -52,29 +52,30 @@ fi
 # 現在時刻をログファイル名に含める
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
-echo "[quicport.sh] Starting data-plane as independent process..."
-echo "[quicport.sh] QUICPORT_BIN=${QUICPORT_BIN}"
-echo "[quicport.sh] QUICPORT_LISTEN=${QUICPORT_LISTEN}"
-echo "[quicport.sh] QUICPORT_CP_ADDR=${QUICPORT_CP_ADDR}"
+echo "[quicport-starter] Starting data-plane in separate cgroup..."
+echo "[quicport-starter] QUICPORT_BIN=${QUICPORT_BIN}"
+echo "[quicport-starter] QUICPORT_LISTEN=${QUICPORT_LISTEN}"
+echo "[quicport-starter] QUICPORT_CP_ADDR=${QUICPORT_CP_ADDR}"
 
-# data-plane を独立したプロセスグループでバックグラウンド起動
-# setsid: 新しいセッションを作成し、親プロセスの終了に影響されないようにする
-# nohup: SIGHUP を無視（念のため）
-# </dev/null: stdin を閉じる
-setsid nohup "${QUICPORT_BIN}" data-plane \
-    --log-format json \
+# data-plane を systemd-run で別 cgroup に起動
+# --scope: 一時的なスコープユニットとして起動（サービスとは別の cgroup）
+# --unit: ユニット名を指定
+# --description: 説明
+systemd-run \
+    --scope \
+    --unit="quicport-dp-${TIMESTAMP}" \
+    --description="quicport data-plane (${TIMESTAMP})" \
+    "${QUICPORT_BIN}" data-plane \
     --listen "${QUICPORT_LISTEN}" \
     --control-plane-addr "${QUICPORT_CP_ADDR}" \
-    </dev/null \
     >> "${QUICPORT_LOG_DIR}/dp-${TIMESTAMP}.log" 2>&1 &
 
 # data-plane が起動するまで少し待つ
 sleep 0.5
 
-echo "[quicport.sh] Starting control-plane..."
+echo "[quicport-starter] Starting control-plane..."
 
 # control-plane に exec で置き換わる
 exec "${QUICPORT_BIN}" control-plane \
-    --log-format json \
     --listen "${QUICPORT_CP_ADDR}" \
     "${AUTH_ARGS[@]}"

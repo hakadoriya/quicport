@@ -6,15 +6,12 @@ Wants=network-online.target
 
 [Service]
 Type=exec
-# Create a group and user for the service
-# $ sudo groupadd --system quicport
-# $ sudo useradd --system --gid quicport --shell /usr/sbin/nologin --create-home --home-dir /var/lib/quicport --comment "quicport service user" quicport
-User=quicport
-Group=quicport
+# NOTE: systemd-run --scope を使用するため root で実行
+# data-plane を別 cgroup に起動するには root 権限が必要
 
-# NOTE: cp/dp 分離アーキテクチャ
-# quicport.sh は以下を行います:
-# 1. data-plane を独立したプロセスグループでバックグラウンド起動（setsid）
+# NOTE: cgroup 分離アーキテクチャ
+# quicport-starter は以下を行います:
+# 1. data-plane を systemd-run --scope で別 cgroup に起動
 # 2. control-plane に exec で置き換わる
 # これにより systemctl restart 時に:
 # - cp のみ再起動され、旧 dp は DRAINING 状態で継続（既存接続を処理）
