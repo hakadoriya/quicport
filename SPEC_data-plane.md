@@ -302,7 +302,7 @@ enum DataPlaneState {
 |------|--------------|------|
 | `listen_addr` | `0.0.0.0:39000` | QUIC リッスンアドレス |
 | `control_socket` | `~/.local/state/quicport/control-<pid>.sock` | 制御用 Unix Socket |
-| `drain_timeout` | `300` (秒) | DRAIN 状態のタイムアウト（強制終了） |
+| `drain_timeout` | `0` (無限) | DRAIN 状態のタイムアウト（強制終了、0 = 無限） |
 | `idle_connection_timeout` | `3600` (秒) | アイドル接続のタイムアウト |
 
 ### コントロールプレーン設定

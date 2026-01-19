@@ -65,8 +65,8 @@ enum Commands {
         #[arg(long)]
         control_plane_addr: Option<SocketAddr>,
 
-        /// Drain timeout in seconds (force shutdown after this time in DRAINING state)
-        #[arg(long, default_value = "300")]
+        /// Drain timeout in seconds (force shutdown after this time in DRAINING state, 0 means infinite)
+        #[arg(long, default_value = "0")]
         drain_timeout: u64,
     },
 

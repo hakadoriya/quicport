@@ -288,16 +288,16 @@ pub async fn run(config: DataPlaneConfig, auth_policy: Option<AuthPolicy>) -> Re
                 break;
             }
 
-            // ドレインタイムアウト
+            // ドレインタイムアウト（drain_timeout == 0 の場合は無限待機）
             _ = async {
                 let state = data_plane.get_state().await;
-                if state == DataPlaneState::Draining {
+                if state == DataPlaneState::Draining && drain_timeout > 0 {
                     tokio::time::sleep(Duration::from_secs(drain_timeout)).await;
                 } else {
                     std::future::pending::<()>().await;
                 }
             } => {
-                warn!("Drain timeout reached, forcing shutdown");
+                warn!("Drain timeout reached ({} seconds), forcing shutdown", drain_timeout);
                 break;
             }
 
@@ -497,16 +497,16 @@ pub async fn run_with_control_plane(config: DataPlaneConfig, cp_addr: SocketAddr
                 break;
             }
 
-            // ドレインタイムアウト
+            // ドレインタイムアウト（drain_timeout == 0 の場合は無限待機）
             _ = async {
                 let state = data_plane.get_state().await;
-                if state == DataPlaneState::Draining {
+                if state == DataPlaneState::Draining && drain_timeout > 0 {
                     tokio::time::sleep(Duration::from_secs(drain_timeout)).await;
                 } else {
                     std::future::pending::<()>().await;
                 }
             } => {
-                warn!("Drain timeout reached, forcing shutdown");
+                warn!("Drain timeout reached ({} seconds), forcing shutdown", drain_timeout);
                 break;
             }
 

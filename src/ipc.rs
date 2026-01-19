@@ -172,7 +172,7 @@ pub struct DataPlaneConfig {
 }
 
 fn default_drain_timeout() -> u64 {
-    300 // 5 minutes
+    0 // 0 means infinite (no timeout)
 }
 
 fn default_idle_connection_timeout() -> u64 {
