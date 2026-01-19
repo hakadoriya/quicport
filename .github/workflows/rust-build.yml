@@ -10,6 +10,11 @@ on:
         description: 'Tag name to upload assets (e.g., v1.0.0). Leave empty to skip release upload.'
         required: false
         type: string
+      overwrite:
+        description: 'Overwrite existing assets if they already exist'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -211,4 +216,8 @@ jobs:
           TAG_NAME: ${{ github.event.release.tag_name || inputs.tag_name }}
         run: |
           set -Eeuo pipefail -x
-          gh release upload ${{ env.TAG_NAME }} ./artifacts/*/*
+          CLOBBER_FLAG=""
+          if [[ "${{ inputs.overwrite }}" == "true" ]]; then
+            CLOBBER_FLAG="--clobber"
+          fi
+          gh release upload ${{ env.TAG_NAME }} ${CLOBBER_FLAG} ./artifacts/*/*
