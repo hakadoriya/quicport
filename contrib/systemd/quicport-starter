@@ -1,0 +1,80 @@
+#!/bin/bash
+# =============================================================================
+# quicport.sh - cp/dp 分離アーキテクチャ用起動スクリプト
+#
+# このスクリプトは systemd から呼び出され、以下を行います:
+# 1. data-plane を独立したプロセスグループでバックグラウンド起動
+# 2. control-plane に exec で置き換わる
+#
+# これにより:
+# - cp と dp が別プロセスとして動作
+# - systemctl restart 時に cp のみ再起動され、dp は継続動作
+# - graceful restart が実現可能
+#
+# 注意: systemd-run --scope は root 権限が必要なため使用していません。
+#       代わりに setsid でプロセスグループを分離しています。
+# =============================================================================
+
+set -euo pipefail
+
+# 設定（環境変数でオーバーライド可能）
+QUICPORT_BIN="${QUICPORT_BIN:-/usr/local/bin/quicport}"
+QUICPORT_LISTEN="${QUICPORT_LISTEN:-0.0.0.0:39000}"
+QUICPORT_CP_ADDR="${QUICPORT_CP_ADDR:-127.0.0.1:39000}"
+QUICPORT_LOG_DIR="${QUICPORT_LOG_DIR:-/var/log/quicport}"
+
+# ログディレクトリを作成
+mkdir -p "${QUICPORT_LOG_DIR}"
+
+# 認証引数を構築
+AUTH_ARGS=()
+
+if [[ -n "${QUICPORT_PSK:-}" ]]; then
+    AUTH_ARGS+=("--psk" "${QUICPORT_PSK}")
+fi
+
+if [[ -n "${QUICPORT_PRIVKEY:-}" ]]; then
+    AUTH_ARGS+=("--privkey" "${QUICPORT_PRIVKEY}")
+fi
+
+if [[ -n "${QUICPORT_PRIVKEY_FILE:-}" ]]; then
+    AUTH_ARGS+=("--privkey-file" "${QUICPORT_PRIVKEY_FILE}")
+fi
+
+if [[ -n "${QUICPORT_CLIENT_PUBKEYS:-}" ]]; then
+    AUTH_ARGS+=("--client-pubkeys" "${QUICPORT_CLIENT_PUBKEYS}")
+fi
+
+if [[ -n "${QUICPORT_CLIENT_PUBKEYS_FILE:-}" ]]; then
+    AUTH_ARGS+=("--client-pubkeys-file" "${QUICPORT_CLIENT_PUBKEYS_FILE}")
+fi
+
+# 現在時刻をログファイル名に含める
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+
+echo "[quicport.sh] Starting data-plane as independent process..."
+echo "[quicport.sh] QUICPORT_BIN=${QUICPORT_BIN}"
+echo "[quicport.sh] QUICPORT_LISTEN=${QUICPORT_LISTEN}"
+echo "[quicport.sh] QUICPORT_CP_ADDR=${QUICPORT_CP_ADDR}"
+
+# data-plane を独立したプロセスグループでバックグラウンド起動
+# setsid: 新しいセッションを作成し、親プロセスの終了に影響されないようにする
+# nohup: SIGHUP を無視（念のため）
+# </dev/null: stdin を閉じる
+setsid nohup "${QUICPORT_BIN}" data-plane \
+    --log-format json \
+    --listen "${QUICPORT_LISTEN}" \
+    --control-plane-addr "${QUICPORT_CP_ADDR}" \
+    </dev/null \
+    >> "${QUICPORT_LOG_DIR}/dp-${TIMESTAMP}.log" 2>&1 &
+
+# data-plane が起動するまで少し待つ
+sleep 0.5
+
+echo "[quicport.sh] Starting control-plane..."
+
+# control-plane に exec で置き換わる
+exec "${QUICPORT_BIN}" control-plane \
+    --log-format json \
+    --listen "${QUICPORT_CP_ADDR}" \
+    "${AUTH_ARGS[@]}"

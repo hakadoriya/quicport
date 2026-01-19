@@ -2,6 +2,8 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,6 +39,10 @@ struct Cli {
     #[arg(long, default_value = "console", env = "QUICPORT_LOG_FORMAT")]
     log_format: LogFormat,
 
+    /// Log output file (default: stdout, or stderr for ssh-proxy mode)
+    #[arg(long, env = "QUICPORT_LOG_OUTPUT")]
+    log_output: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -45,13 +51,19 @@ struct Cli {
 enum Commands {
     /// Run as data plane (QUIC connection handler)
     ///
-    /// This command is typically invoked by the control plane (quicport server).
+    /// This command is typically invoked by the control plane (quicport server) or
+    /// by quicport.sh script for cgroup separation.
     /// The data plane handles QUIC connections and maintains backend TCP connections.
     /// It operates independently of the control plane after startup.
     DataPlane {
         /// Address and port to listen on for QUIC
         #[arg(short, long, default_value = "0.0.0.0:39000")]
         listen: SocketAddr,
+
+        /// Control plane address to connect to for receiving auth policy.
+        /// When specified, data plane connects to control plane instead of using env vars.
+        #[arg(long)]
+        control_plane_addr: Option<SocketAddr>,
 
         /// Drain timeout in seconds (force shutdown after this time in DRAINING state)
         #[arg(long, default_value = "300")]
@@ -110,6 +122,38 @@ enum Commands {
         /// Initial delay between reconnection attempts in seconds
         #[arg(long, default_value = "1")]
         reconnect_delay: u64,
+    },
+
+    /// Run as control plane (manages data planes via IPC)
+    ///
+    /// This command is used for cgroup separation with quicport.sh.
+    /// The control plane only manages data planes via IPC and does not handle
+    /// QUIC connections directly. Data planes connect to this IPC server to
+    /// receive authentication policies.
+    ControlPlane {
+        /// Address for IPC server (data planes connect here)
+        #[arg(short, long, default_value = "127.0.0.1:39000")]
+        listen: SocketAddr,
+
+        /// Server's private key in Base64 format (for mutual authentication)
+        #[arg(long, env = "QUICPORT_PRIVKEY")]
+        privkey: Option<String>,
+
+        /// Path to file containing the server's private key
+        #[arg(long, env = "QUICPORT_PRIVKEY_FILE")]
+        privkey_file: Option<PathBuf>,
+
+        /// Authorized client public key(s) in Base64 format (comma-separated for multiple)
+        #[arg(long, env = "QUICPORT_CLIENT_PUBKEYS", value_delimiter = ',')]
+        client_pubkeys: Option<Vec<String>>,
+
+        /// Path to file containing authorized client public keys (one per line)
+        #[arg(long, env = "QUICPORT_CLIENT_PUBKEYS_FILE")]
+        client_pubkeys_file: Option<PathBuf>,
+
+        /// Pre-shared key for authentication
+        #[arg(long, env = "QUICPORT_PSK")]
+        psk: Option<String>,
     },
 
     /// Run as server (listen for QUIC connections)
@@ -437,6 +481,31 @@ fn build_server_auth_policy(
     }
 }
 
+/// ログ出力先の MakeWriter 実装
+struct FileWriter(Arc<std::sync::Mutex<std::fs::File>>);
+
+impl Write for FileWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.lock().unwrap().flush()
+    }
+}
+
+impl Clone for FileWriter {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for FileWriter {
+    type Writer = FileWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -447,7 +516,33 @@ async fn main() -> Result<()> {
     // Initialize logging
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    if use_stderr {
+
+    // ログ出力先を決定
+    if let Some(ref log_path) = cli.log_output {
+        // ファイルに出力（append モード）
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .with_context(|| format!("Failed to open log file: {:?}", log_path))?;
+        let writer = FileWriter(Arc::new(std::sync::Mutex::new(file)));
+
+        match cli.log_format {
+            LogFormat::Console => {
+                tracing_subscriber::fmt()
+                    .with_writer(writer)
+                    .with_env_filter(env_filter)
+                    .init();
+            }
+            LogFormat::Json => {
+                tracing_subscriber::fmt()
+                    .with_writer(writer)
+                    .with_env_filter(env_filter)
+                    .json()
+                    .init();
+            }
+        }
+    } else if use_stderr {
         // ssh-proxy: ログを stderr に出力
         match cli.log_format {
             LogFormat::Console => {
@@ -486,19 +581,28 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::DataPlane {
             listen,
+            control_plane_addr,
             drain_timeout,
         } => {
-            // データプレーン用の認証設定を環境変数から取得
-            let auth_policy = build_dataplane_auth_policy()?;
-
             let config = DataPlaneConfig {
                 listen_addr: listen,
                 drain_timeout,
                 ..Default::default()
             };
 
-            info!("Starting data plane on {}", listen);
-            data_plane::run(config, Some(auth_policy)).await?;
+            if let Some(cp_addr) = control_plane_addr {
+                // control-plane に接続して認証ポリシーを取得するモード
+                info!(
+                    "Starting data plane on {} (connecting to control plane at {})",
+                    listen, cp_addr
+                );
+                data_plane::run_with_control_plane(config, cp_addr).await?;
+            } else {
+                // 環境変数から認証ポリシーを取得するモード（従来互換）
+                let auth_policy = build_dataplane_auth_policy()?;
+                info!("Starting data plane on {}", listen);
+                data_plane::run(config, Some(auth_policy)).await?;
+            }
         }
 
         Commands::Ctl(ctl_cmd) => {
@@ -566,6 +670,30 @@ async fn main() -> Result<()> {
                 reconnect_config,
             )
             .await?;
+        }
+
+        Commands::ControlPlane {
+            listen,
+            privkey,
+            privkey_file,
+            client_pubkeys,
+            client_pubkeys_file,
+            psk,
+        } => {
+            // 認証ポリシーを構築
+            let auth_policy = build_server_auth_policy(
+                privkey,
+                privkey_file,
+                client_pubkeys,
+                client_pubkeys_file,
+                psk,
+            )?;
+
+            // 統計情報を初期化
+            let statistics = Arc::new(ServerStatistics::new());
+
+            info!("Starting control plane (IPC server on {})", listen);
+            control_plane::run_standalone(listen, auth_policy, statistics).await?;
         }
 
         Commands::Server {

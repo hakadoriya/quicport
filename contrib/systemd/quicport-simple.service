@@ -1,27 +1,22 @@
 [Unit]
-Description=quicport - QUIC-based port forwarding / tunneling server
+Description=quicport - QUIC-based port forwarding / tunneling server (simple mode)
 Documentation=https://github.com/hakadoriya/quicport
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=exec
+Type=simple
 # Create a group and user for the service
 # $ sudo groupadd --system quicport
 # $ sudo useradd --system --gid quicport --shell /usr/sbin/nologin --create-home --home-dir /var/lib/quicport --comment "quicport service user" quicport
 User=quicport
 Group=quicport
 
-# NOTE: cp/dp 分離アーキテクチャ
-# quicport.sh は以下を行います:
-# 1. data-plane を独立したプロセスグループでバックグラウンド起動（setsid）
-# 2. control-plane に exec で置き換わる
-# これにより systemctl restart 時に:
-# - cp のみ再起動され、旧 dp は DRAINING 状態で継続（既存接続を処理）
-# - 新しい cp + dp が起動
-# - graceful restart が実現
-ExecStart=/usr/local/bin/quicport-starter
-ExecReload=/bin/kill -HUP $MAINPID
+# NOTE: シンプルモード（cgroup 分離なし）
+# 従来の単一プロセスモードで起動します。
+# graceful restart は API 経由で行います。
+ExecStart=/usr/local/bin/quicport --log-format json server
+ExecReload=/usr/local/bin/quicport ctl graceful-restart
 KillMode=process
 
 # NOTE: The environment variable file (authentication key, etc.)

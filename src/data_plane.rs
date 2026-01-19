@@ -276,7 +276,7 @@ pub async fn run(config: DataPlaneConfig, auth_policy: Option<AuthPolicy>) -> Re
     data_plane.set_state(DataPlaneState::Active).await;
 
     let mut shutdown_rx = data_plane.subscribe_shutdown();
-    let mut drain_rx = data_plane.subscribe_drain();
+    let _drain_rx = data_plane.subscribe_drain();
     let drain_timeout = data_plane.get_config().await.drain_timeout;
 
     // メインループ
@@ -380,6 +380,246 @@ pub async fn run(config: DataPlaneConfig, auth_policy: Option<AuthPolicy>) -> Re
     info!("Data plane terminated");
 
     Ok(())
+}
+
+/// コントロールプレーンに接続してデータプレーンを起動
+///
+/// cgroup 分離アーキテクチャ用のモード:
+/// 1. STARTING 状態で起動
+/// 2. cp への接続をリトライ（最大 30 秒程度）
+/// 3. 接続成功後、認証ポリシーを受信
+/// 4. ACTIVE 状態に遷移
+/// 5. SO_REUSEPORT で QUIC ポートを LISTEN 開始
+pub async fn run_with_control_plane(config: DataPlaneConfig, cp_addr: SocketAddr) -> Result<()> {
+    let data_plane = DataPlane::new(config.clone());
+
+    // ディレクトリを作成
+    ensure_dataplanes_dir()?;
+
+    let pid = std::process::id();
+
+    // 初期状態を書き込み
+    data_plane.set_state(DataPlaneState::Starting).await;
+    info!(
+        "Data plane starting (connecting to control plane at {})",
+        cp_addr
+    );
+
+    // コントロールプレーンに接続（リトライ付き）
+    let mut cp_conn = connect_to_control_plane(cp_addr, 30, Duration::from_secs(1)).await?;
+    info!("Connected to control plane at {}", cp_addr);
+
+    // Ready イベントを送信
+    let event = DataPlaneEvent::Ready {
+        pid,
+        listen_addr: config.listen_addr.to_string(),
+    };
+    cp_conn.send_event(&event).await?;
+
+    // 認証ポリシーを受信（SetAuthPolicy コマンド）
+    let auth_policy = match cp_conn.recv_command().await {
+        Ok(ControlCommand::SetAuthPolicy(policy)) => {
+            info!("Received auth policy from control plane");
+            policy
+        }
+        Ok(cmd) => {
+            return Err(anyhow::anyhow!(
+                "Expected SetAuthPolicy, got {:?}",
+                cmd
+            ));
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Failed to receive auth policy: {}",
+                e
+            ));
+        }
+    };
+
+    // 認証ポリシーを設定
+    data_plane.set_auth_policy(auth_policy).await;
+
+    // 確認レスポンスを送信
+    let status = data_plane.get_status().await?;
+    cp_conn.send_event(&DataPlaneEvent::Status(status)).await?;
+
+    // IPC 用 TCP リスナーを作成（OS が空きポートを自動割り当て）
+    let ipc_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let ipc_port = ipc_listener.local_addr()?.port();
+
+    // ポート番号をファイルに書き込む
+    write_dataplane_port(pid, ipc_port)?;
+
+    info!("Data plane IPC listening on 127.0.0.1:{}", ipc_port);
+
+    // QUIC エンドポイントを作成
+    let endpoint = create_server_endpoint(config.listen_addr, "quicport-dataplane")?;
+    info!("Data plane QUIC listening on {}", config.listen_addr);
+
+    // ACTIVE 状態に移行
+    data_plane.set_state(DataPlaneState::Active).await;
+    info!("Data plane is now ACTIVE");
+
+    let mut shutdown_rx = data_plane.subscribe_shutdown();
+    let _drain_rx = data_plane.subscribe_drain();
+    let drain_timeout = data_plane.get_config().await.drain_timeout;
+
+    // cp からのコマンドを処理するタスク
+    let dp_for_cp = data_plane.clone();
+    tokio::spawn(async move {
+        loop {
+            match cp_conn.recv_command().await {
+                Ok(cmd) => {
+                    let response = process_ipc_command(&dp_for_cp, cmd).await;
+                    if cp_conn.send_event(&response).await.is_err() {
+                        info!("Control plane connection closed");
+                        break;
+                    }
+                }
+                Err(crate::ipc::IpcError::ConnectionClosed) => {
+                    info!("Control plane connection closed");
+                    break;
+                }
+                Err(e) => {
+                    warn!("Error receiving command from control plane: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+
+    // メインループ
+    loop {
+        tokio::select! {
+            // シャットダウン
+            _ = shutdown_rx.recv() => {
+                info!("Data plane received shutdown signal");
+                break;
+            }
+
+            // ドレインタイムアウト
+            _ = async {
+                let state = data_plane.get_state().await;
+                if state == DataPlaneState::Draining {
+                    tokio::time::sleep(Duration::from_secs(drain_timeout)).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                warn!("Drain timeout reached, forcing shutdown");
+                break;
+            }
+
+            // ドレイン状態で接続数が 0 になった場合
+            _ = async {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let state = data_plane.get_state().await;
+                    let connections = data_plane.active_connections.load(Ordering::SeqCst);
+                    if state == DataPlaneState::Draining && connections == 0 {
+                        return;
+                    }
+                }
+            } => {
+                info!("All connections drained, shutting down");
+                break;
+            }
+
+            // IPC 接続
+            result = ipc_listener.accept() => {
+                match result {
+                    Ok((stream, _)) => {
+                        let dp = data_plane.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_ipc_connection(dp, stream).await {
+                                error!("IPC handler error: {}", e);
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!("Failed to accept IPC connection: {}", e);
+                    }
+                }
+            }
+
+            // QUIC 接続
+            result = endpoint.accept() => {
+                match result {
+                    Some(incoming) => {
+                        let state = data_plane.get_state().await;
+                        if state == DataPlaneState::Draining {
+                            // DRAINING 状態では新規接続を拒否
+                            debug!("Rejecting new connection in DRAINING state");
+                            continue;
+                        }
+
+                        let dp = data_plane.clone();
+                        tokio::spawn(async move {
+                            match incoming.await {
+                                Ok(connection) => {
+                                    let remote_addr = connection.remote_address();
+                                    info!("New QUIC connection from {}", remote_addr);
+                                    dp.connection_opened();
+
+                                    if let Err(e) = handle_quic_connection(dp.clone(), connection).await {
+                                        error!("QUIC handler error: {}", e);
+                                    }
+
+                                    dp.connection_closed();
+                                    info!("QUIC connection closed: {}", remote_addr);
+                                }
+                                Err(e) => {
+                                    error!("Failed to accept QUIC connection: {}", e);
+                                }
+                            }
+                        });
+                    }
+                    None => {
+                        info!("QUIC endpoint closed");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // 終了処理
+    data_plane.set_state(DataPlaneState::Terminated).await;
+    cleanup_dataplane_files(pid)?;
+    info!("Data plane terminated");
+
+    Ok(())
+}
+
+/// コントロールプレーンに接続（リトライ付き）
+async fn connect_to_control_plane(
+    addr: SocketAddr,
+    max_retries: u32,
+    retry_delay: Duration,
+) -> Result<IpcConnection> {
+    let mut retries = 0;
+    loop {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => {
+                return Ok(IpcConnection::new(stream));
+            }
+            Err(e) => {
+                retries += 1;
+                if retries > max_retries {
+                    return Err(anyhow::anyhow!(
+                        "Failed to connect to control plane after {} attempts: {}",
+                        max_retries,
+                        e
+                    ));
+                }
+                debug!(
+                    "Retrying connection to control plane ({}/{}): {}",
+                    retries, max_retries, e
+                );
+                tokio::time::sleep(retry_delay).await;
+            }
+        }
+    }
 }
 
 /// IPC 接続を処理
