@@ -124,41 +124,13 @@ enum Commands {
         reconnect_delay: u64,
     },
 
-    /// Run as control plane (manages data planes via IPC)
+    /// Run as server (control plane that manages data planes)
     ///
-    /// This command is used for cgroup separation with quicport.sh.
-    /// The control plane only manages data planes via IPC and does not handle
-    /// QUIC connections directly. Data planes connect to this IPC server to
-    /// receive authentication policies.
-    ControlPlane {
-        /// Address for IPC server (data planes connect here)
-        #[arg(short, long, default_value = "127.0.0.1:39000")]
-        listen: SocketAddr,
-
-        /// Server's private key in Base64 format (for mutual authentication)
-        #[arg(long, env = "QUICPORT_PRIVKEY")]
-        privkey: Option<String>,
-
-        /// Path to file containing the server's private key
-        #[arg(long, env = "QUICPORT_PRIVKEY_FILE")]
-        privkey_file: Option<PathBuf>,
-
-        /// Authorized client public key(s) in Base64 format (comma-separated for multiple)
-        #[arg(long, env = "QUICPORT_CLIENT_PUBKEYS", value_delimiter = ',')]
-        client_pubkeys: Option<Vec<String>>,
-
-        /// Path to file containing authorized client public keys (one per line)
-        #[arg(long, env = "QUICPORT_CLIENT_PUBKEYS_FILE")]
-        client_pubkeys_file: Option<PathBuf>,
-
-        /// Pre-shared key for authentication
-        #[arg(long, env = "QUICPORT_PSK")]
-        psk: Option<String>,
-    },
-
-    /// Run as server (listen for QUIC connections)
+    /// The control plane spawns and manages data plane processes via IPC.
+    /// Data planes handle actual QUIC connections.
+    #[command(name = "server", alias = "control-plane")]
     Server {
-        /// Address and port to listen on for QUIC (UDP) and public API (TCP, /healthcheck only)
+        /// Address and port to listen on for QUIC (data planes bind to this)
         #[arg(short, long, default_value = "0.0.0.0:39000")]
         listen: SocketAddr,
 
@@ -670,30 +642,6 @@ async fn main() -> Result<()> {
                 reconnect_config,
             )
             .await?;
-        }
-
-        Commands::ControlPlane {
-            listen,
-            privkey,
-            privkey_file,
-            client_pubkeys,
-            client_pubkeys_file,
-            psk,
-        } => {
-            // 認証ポリシーを構築
-            let auth_policy = build_server_auth_policy(
-                privkey,
-                privkey_file,
-                client_pubkeys,
-                client_pubkeys_file,
-                psk,
-            )?;
-
-            // 統計情報を初期化
-            let statistics = Arc::new(ServerStatistics::new());
-
-            info!("Starting control plane (IPC server on {})", listen);
-            control_plane::run_standalone(listen, auth_policy, statistics).await?;
         }
 
         Commands::Server {

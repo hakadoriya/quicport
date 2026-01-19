@@ -26,7 +26,6 @@ use crate::ipc::{
     DataPlaneConfig, DataPlaneEvent, DataPlaneState, DataPlaneStatus, IpcConnection,
 };
 use crate::statistics::ServerStatistics;
-use tokio::net::TcpListener;
 
 /// データプレーンの接続情報
 struct DataPlaneConnection {
@@ -352,6 +351,37 @@ impl ControlPlane {
         Ok(())
     }
 
+    /// 全データプレーンの接続情報を取得
+    pub async fn get_all_connections(&self) -> Vec<crate::ipc::ConnectionInfo> {
+        let mut all_connections = Vec::new();
+
+        let pids: Vec<u32> = {
+            let dataplanes = self.dataplanes.read().await;
+            dataplanes.keys().copied().collect()
+        };
+
+        for pid in pids {
+            let mut dataplanes = self.dataplanes.write().await;
+            if let Some(dp) = dataplanes.get_mut(&pid) {
+                if let Some(conn) = &mut dp.conn {
+                    if conn.send_command(&ControlCommand::GetConnections).await.is_ok() {
+                        match conn.recv_event().await {
+                            Ok(DataPlaneEvent::Connections { connections }) => {
+                                all_connections.extend(connections);
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                warn!("Failed to get connections from data plane {}: {}", pid, e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        all_connections
+    }
+
     /// データプレーンをシャットダウン
     #[allow(dead_code)]
     pub async fn shutdown_dataplane(&self, pid: u32) -> Result<()> {
@@ -422,15 +452,6 @@ pub struct ApiConfig {
     pub public_addr: Option<SocketAddr>,
     /// Private API アドレス（/metrics, /graceful-restart、localhost のみ）
     pub private_addr: Option<SocketAddr>,
-}
-
-/// コントロールプレーンを起動（API サーバーなし）
-pub async fn run(
-    listen_addr: SocketAddr,
-    auth_policy: AuthPolicy,
-    statistics: Arc<ServerStatistics>,
-) -> Result<()> {
-    run_with_api(listen_addr, auth_policy, statistics, None).await
 }
 
 /// コントロールプレーンを起動（API サーバー付き）
@@ -571,190 +592,3 @@ pub async fn show_status() -> Result<()> {
     Ok(())
 }
 
-// =============================================================================
-// Standalone コントロールプレーン（cgroup 分離用）
-// =============================================================================
-
-/// スタンドアロン IPC 接続管理
-struct StandaloneDataPlanes {
-    /// 認証ポリシー
-    auth_policy: AuthPolicy,
-    /// 接続中のデータプレーン（PID -> IPC 接続）
-    connections: RwLock<HashMap<u32, IpcConnection>>,
-}
-
-impl StandaloneDataPlanes {
-    fn new(auth_policy: AuthPolicy) -> Arc<Self> {
-        Arc::new(Self {
-            auth_policy,
-            connections: RwLock::new(HashMap::new()),
-        })
-    }
-
-    /// データプレーンからの接続を処理
-    async fn handle_connection(
-        self: Arc<Self>,
-        mut conn: IpcConnection,
-    ) -> Result<()> {
-        // Ready イベントを受信
-        let event = conn.recv_event().await?;
-        let dp_pid = match event {
-            DataPlaneEvent::Ready { pid, listen_addr } => {
-                info!(
-                    "Data plane connected: PID {} listening on {}",
-                    pid, listen_addr
-                );
-                pid
-            }
-            _ => {
-                warn!("Unexpected initial event from data plane: {:?}", event);
-                return Ok(());
-            }
-        };
-
-        // 認証ポリシーを送信
-        let cmd = ControlCommand::SetAuthPolicy(self.auth_policy.clone());
-        conn.send_command(&cmd).await?;
-        info!("Auth policy sent to data plane PID {}", dp_pid);
-
-        // 応答を受信
-        match conn.recv_event().await {
-            Ok(DataPlaneEvent::Status(status)) => {
-                info!(
-                    "Data plane PID {} confirmed (state: {})",
-                    dp_pid, status.state
-                );
-            }
-            Ok(event) => {
-                debug!("Received event from data plane: {:?}", event);
-            }
-            Err(e) => {
-                warn!("Failed to receive response from data plane: {}", e);
-            }
-        }
-
-        // 接続を保存
-        {
-            let mut connections = self.connections.write().await;
-            connections.insert(dp_pid, conn);
-        }
-
-        Ok(())
-    }
-
-    /// 全データプレーンに DRAIN を送信
-    async fn drain_all(&self) {
-        let mut connections = self.connections.write().await;
-        for (pid, conn) in connections.iter_mut() {
-            if let Err(e) = conn.send_command(&ControlCommand::Drain).await {
-                warn!("Failed to send DRAIN to data plane {}: {}", pid, e);
-            } else {
-                info!("Sent DRAIN to data plane PID {}", pid);
-            }
-        }
-    }
-}
-
-/// スタンドアロンコントロールプレーンを起動
-///
-/// cgroup 分離アーキテクチャ用のモード:
-/// - データプレーンを起動しない（シェルスクリプトの責務）
-/// - IPC サーバーとして dp からの接続を accept
-/// - SIGTERM で全 dp に graceful-shutdown を指示して終了
-pub async fn run_standalone(
-    listen_addr: SocketAddr,
-    auth_policy: AuthPolicy,
-    _statistics: Arc<ServerStatistics>,
-) -> Result<()> {
-    info!("Control plane (standalone mode) starting on {}", listen_addr);
-
-    // IPC サーバーを起動
-    let listener = TcpListener::bind(listen_addr)
-        .await
-        .with_context(|| format!("Failed to bind IPC server to {}", listen_addr))?;
-
-    info!("IPC server listening on {}", listen_addr);
-
-    let dataplanes = StandaloneDataPlanes::new(auth_policy);
-    let dataplanes_for_shutdown = dataplanes.clone();
-
-    // 終了シグナルを設定してメインループを実行
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate()).context("Failed to create SIGTERM handler")?;
-
-        loop {
-            tokio::select! {
-                // 終了シグナル
-                _ = tokio::signal::ctrl_c() => {
-                    info!("Received SIGINT, initiating shutdown");
-                    break;
-                }
-
-                _ = sigterm.recv() => {
-                    info!("Received SIGTERM, initiating shutdown");
-                    break;
-                }
-
-                // 新しい接続を accept
-                result = listener.accept() => {
-                    match result {
-                        Ok((stream, addr)) => {
-                            debug!("New IPC connection from {}", addr);
-                            let conn = IpcConnection::new(stream);
-                            let dp = dataplanes.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = dp.handle_connection(conn).await {
-                                    warn!("Error handling data plane connection: {}", e);
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            warn!("Failed to accept IPC connection: {}", e);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        loop {
-            tokio::select! {
-                // 終了シグナル
-                _ = tokio::signal::ctrl_c() => {
-                    info!("Received SIGINT, initiating shutdown");
-                    break;
-                }
-
-                // 新しい接続を accept
-                result = listener.accept() => {
-                    match result {
-                        Ok((stream, addr)) => {
-                            debug!("New IPC connection from {}", addr);
-                            let conn = IpcConnection::new(stream);
-                            let dp = dataplanes.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = dp.handle_connection(conn).await {
-                                    warn!("Error handling data plane connection: {}", e);
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            warn!("Failed to accept IPC connection: {}", e);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 全データプレーンに DRAIN を送信
-    info!("Sending DRAIN to all data planes");
-    dataplanes_for_shutdown.drain_all().await;
-
-    info!("Control plane (standalone mode) shutdown complete");
-    Ok(())
-}

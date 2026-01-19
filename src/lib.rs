@@ -41,7 +41,7 @@
 //!     let listen: SocketAddr = "0.0.0.0:39000".parse()?;
 //!     let auth_policy = AuthPolicy::Psk { psk: "secret".to_string() };
 //!     let statistics = Arc::new(ServerStatistics::new());
-//!     control_plane::run(listen, auth_policy, statistics).await
+//!     control_plane::run_with_api(listen, auth_policy, statistics, None).await
 //! }
 //! ```
 //!
@@ -53,8 +53,9 @@
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let auth = ClientAuthConfig::Psk { psk: "secret".to_string() };
-//!     // 第5引数は insecure モード（true: 証明書検証をスキップ）
-//!     client::run_remote_forward("127.0.0.1:39000", "8080/tcp", "80/tcp", auth, false).await
+//!     let reconnect = client::ReconnectConfig::default();
+//!     // 第6引数は reconnect 設定
+//!     client::run_remote_forward_with_reconnect("127.0.0.1:39000", "8080/tcp", "80/tcp", auth, false, reconnect).await
 //! }
 //! ```
 

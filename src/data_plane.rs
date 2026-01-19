@@ -66,6 +66,8 @@ pub struct DataPlane {
     bytes_sent: AtomicU64,
     /// 総受信バイト数
     bytes_received: AtomicU64,
+    /// 接続情報（GetConnections 用）
+    connection_list: RwLock<HashMap<u32, (Protocol, SocketAddr)>>,
 }
 
 impl DataPlane {
@@ -91,6 +93,7 @@ impl DataPlane {
             active_connections: AtomicU32::new(0),
             bytes_sent: AtomicU64::new(0),
             bytes_received: AtomicU64::new(0),
+            connection_list: RwLock::new(HashMap::new()),
         })
     }
 
@@ -185,6 +188,30 @@ impl DataPlane {
         self.bytes_received.fetch_add(received, Ordering::SeqCst);
         self.statistics.add_bytes_sent(sent);
         self.statistics.add_bytes_received(received);
+    }
+
+    /// 接続情報を登録
+    pub async fn register_connection(&self, id: u32, protocol: Protocol, remote_addr: SocketAddr) {
+        self.connection_list.write().await.insert(id, (protocol, remote_addr));
+    }
+
+    /// 接続情報を削除
+    pub async fn unregister_connection(&self, id: u32) {
+        self.connection_list.write().await.remove(&id);
+    }
+
+    /// 接続一覧を取得
+    pub async fn get_connections(&self) -> Vec<crate::ipc::ConnectionInfo> {
+        self.connection_list
+            .read()
+            .await
+            .iter()
+            .map(|(id, (protocol, addr))| crate::ipc::ConnectionInfo {
+                connection_id: *id,
+                remote_addr: addr.to_string(),
+                protocol: format!("{:?}", protocol),
+            })
+            .collect()
     }
 }
 
@@ -735,17 +762,9 @@ async fn process_ipc_command(data_plane: &DataPlane, cmd: ControlCommand) -> Dat
         }
 
         ControlCommand::GetConnections => {
-            // TODO: 接続一覧を返す
-            DataPlaneEvent::Status(data_plane.get_status().await.unwrap_or_else(|_| {
-                DataPlaneStatus {
-                    state: DataPlaneState::Active,
-                    pid: data_plane.pid,
-                    active_connections: 0,
-                    bytes_sent: 0,
-                    bytes_received: 0,
-                    started_at: data_plane.started_at,
-                }
-            }))
+            DataPlaneEvent::Connections {
+                connections: data_plane.get_connections().await,
+            }
         }
     }
 }
@@ -1037,6 +1056,7 @@ async fn handle_remote_forward(
                                     tcp_addr,
                                     cancel_token.clone(),
                                 );
+                                data_plane.register_connection(conn_id, Protocol::Tcp, tcp_addr).await;
 
                                 let conn_manager_clone = conn_manager.clone();
                                 let dp_clone = data_plane.clone();
@@ -1054,6 +1074,7 @@ async fn handle_remote_forward(
                                         debug!("TCP relay ended for {}: {}", conn_id, e);
                                     }
                                     conn_manager_clone.lock().await.remove_connection(conn_id);
+                                    dp_clone.unregister_connection(conn_id).await;
                                 });
                             }
                             Err(e) => {
@@ -1224,6 +1245,7 @@ async fn handle_remote_forward(
                                         );
                                         udp_connections.lock().await.insert(src_addr, (conn_id, tx.clone()));
                                     }
+                                    data_plane.register_connection(conn_id, Protocol::Udp, src_addr).await;
 
                                     // 最初のパケットを送信（ロック外で await）
                                     let _ = tx.send(packet).await;
@@ -1241,7 +1263,7 @@ async fn handle_remote_forward(
                                             rx,
                                             quic_send,
                                             quic_recv,
-                                            dp_clone,
+                                            dp_clone.clone(),
                                             cancel_token,
                                         )
                                         .await
@@ -1251,6 +1273,7 @@ async fn handle_remote_forward(
                                         // ロック順序を統一: conn_manager → udp_connections
                                         conn_manager_clone.lock().await.remove_connection(conn_id);
                                         udp_connections_clone.lock().await.remove(&src_addr);
+                                        dp_clone.unregister_connection(conn_id).await;
                                     });
                                 }
                             }
@@ -1368,6 +1391,7 @@ async fn handle_local_forward(
                                                     remote_addr,
                                                     cancel_token.clone(),
                                                 );
+                                                data_plane.register_connection(conn_id, Protocol::Tcp, remote_addr).await;
 
                                                 let conn_manager_clone = conn_manager.clone();
                                                 let dp_clone = data_plane.clone();
@@ -1377,7 +1401,7 @@ async fn handle_local_forward(
                                                         tcp_stream,
                                                         send,
                                                         recv,
-                                                        dp_clone,
+                                                        dp_clone.clone(),
                                                         cancel_token,
                                                     )
                                                     .await
@@ -1385,6 +1409,7 @@ async fn handle_local_forward(
                                                         debug!("LPF TCP relay ended for {}: {}", conn_id, e);
                                                     }
                                                     conn_manager_clone.lock().await.remove_connection(conn_id);
+                                                    dp_clone.unregister_connection(conn_id).await;
                                                 });
                                             }
                                             Err(e) => {
@@ -1420,6 +1445,7 @@ async fn handle_local_forward(
                                                     remote_addr,
                                                     cancel_token.clone(),
                                                 );
+                                                data_plane.register_connection(conn_id, Protocol::Udp, remote_addr).await;
 
                                                 let conn_manager_clone = conn_manager.clone();
                                                 let dp_clone = data_plane.clone();
@@ -1429,7 +1455,7 @@ async fn handle_local_forward(
                                                         udp_socket,
                                                         send,
                                                         recv,
-                                                        dp_clone,
+                                                        dp_clone.clone(),
                                                         cancel_token,
                                                     )
                                                     .await
@@ -1437,6 +1463,7 @@ async fn handle_local_forward(
                                                         debug!("LPF UDP relay ended for {}: {}", conn_id, e);
                                                     }
                                                     conn_manager_clone.lock().await.remove_connection(conn_id);
+                                                    dp_clone.unregister_connection(conn_id).await;
                                                 });
                                             }
                                             Err(e) => {

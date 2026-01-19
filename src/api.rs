@@ -41,6 +41,12 @@ struct GracefulRestartResponse {
     message: String,
 }
 
+/// 接続一覧レスポンス
+#[derive(Serialize)]
+struct ConnectionsResponse {
+    connections: Vec<crate::ipc::ConnectionInfo>,
+}
+
 /// GET /healthcheck
 async fn healthcheck() -> Json<HealthCheckResponse> {
     Json(HealthCheckResponse { status: "SERVING" })
@@ -58,6 +64,24 @@ async fn metrics(State(state): State<PrivateApiState>) -> impl IntoResponse {
         )],
         state.statistics.to_prometheus(),
     )
+}
+
+/// GET /api/conns
+///
+/// 接続一覧を取得
+async fn get_connections(State(state): State<PrivateApiState>) -> impl IntoResponse {
+    match &state.control_plane {
+        Some(cp) => {
+            let connections = cp.get_all_connections().await;
+            (StatusCode::OK, Json(ConnectionsResponse { connections }))
+        }
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ConnectionsResponse {
+                connections: Vec::new(),
+            }),
+        ),
+    }
 }
 
 /// POST /graceful-restart
@@ -124,6 +148,7 @@ pub async fn run_private(
     let app = Router::new()
         .route("/healthcheck", get(healthcheck))
         .route("/metrics", get(metrics))
+        .route("/api/conns", get(get_connections))
         .route("/api/graceful-restart", post(graceful_restart))
         .with_state(state);
 

@@ -223,7 +223,7 @@ async fn handle_tofu_status(
 /// * `local_destination` - ローカル転送先（例: "22/tcp", "22", "192.168.1.100:22"）
 /// * `auth_config` - 認証設定
 /// * `insecure` - true の場合、証明書検証をスキップ（テスト用）
-pub async fn run_remote_forward(
+async fn run_remote_forward(
     destination: &str,
     remote_source: &str,
     local_destination: &str,
@@ -912,7 +912,7 @@ fn create_tcp_listener_with_reuseaddr(addr: SocketAddr) -> std::io::Result<std::
 /// * `remote_destination` - リモート転送先（例: "22/tcp", "22", "192.168.1.100:22"）
 /// * `auth_config` - 認証設定
 /// * `insecure` - true の場合、証明書検証をスキップ（テスト用）
-pub async fn run_local_forward(
+async fn run_local_forward(
     destination: &str,
     local_source: &str,
     remote_destination: &str,
@@ -1549,7 +1549,7 @@ async fn relay_lpf_udp_stream(
 /// * `remote_destination` - リモート転送先（例: "22", "192.168.1.100:22"）
 /// * `auth_config` - 認証設定
 /// * `insecure` - true の場合、証明書検証をスキップ（テスト用）
-pub async fn run_ssh_proxy(
+async fn run_ssh_proxy(
     destination: &str,
     remote_destination: &str,
     auth_config: ClientAuthConfig,

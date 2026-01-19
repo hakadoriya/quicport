@@ -108,18 +108,14 @@ pub enum DataPlaneEvent {
         bytes_received: u64,
     },
 
-    /// 認証判断の問い合わせ（将来の拡張用）
-    AuthRequest {
-        /// 接続 ID
-        connection_id: u32,
-        /// 認証タイプ
-        auth_type: String,
-        /// 認証データ
-        auth_data: Vec<u8>,
-    },
-
     /// 全接続終了、終了準備完了
     Drained,
+
+    /// 接続一覧の応答
+    Connections {
+        /// 接続一覧
+        connections: Vec<ConnectionInfo>,
+    },
 
     /// エラー応答
     Error {
@@ -128,6 +124,17 @@ pub enum DataPlaneEvent {
         /// エラーメッセージ
         message: String,
     },
+}
+
+/// 接続情報
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionInfo {
+    /// 接続 ID
+    pub connection_id: u32,
+    /// リモートアドレス
+    pub remote_addr: String,
+    /// プロトコル (TCP/UDP)
+    pub protocol: String,
 }
 
 // =============================================================================
@@ -232,25 +239,6 @@ pub struct DataPlaneStatus {
     pub bytes_received: u64,
     /// 起動時刻（UNIX タイムスタンプ）
     pub started_at: u64,
-}
-
-/// 接続情報
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectionInfo {
-    /// 接続 ID
-    pub connection_id: u32,
-    /// リモートアドレス
-    pub remote_addr: String,
-    /// プロトコル (TCP/UDP)
-    pub protocol: String,
-    /// 送信バイト数
-    pub bytes_sent: u64,
-    /// 受信バイト数
-    pub bytes_received: u64,
-    /// 接続開始時刻（UNIX タイムスタンプ）
-    pub created_at: u64,
-    /// 最終アクティビティ時刻（UNIX タイムスタンプ）
-    pub last_activity: u64,
 }
 
 // =============================================================================
