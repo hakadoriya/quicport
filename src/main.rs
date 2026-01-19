@@ -16,7 +16,7 @@ use quicport::quic::{
     parse_base64_key, psk_file_path,
 };
 use quicport::statistics::ServerStatistics;
-use quicport::{api, client};
+use quicport::client;
 
 /// ログ出力形式
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -114,17 +114,22 @@ enum Commands {
 
     /// Run as server (listen for QUIC connections)
     Server {
-        /// Address and port to listen on for QUIC
+        /// Address and port to listen on for QUIC (UDP) and public API (TCP, /healthcheck only)
         #[arg(short, long, default_value = "0.0.0.0:39000")]
         listen: SocketAddr,
 
-        /// Address and port to listen on for API server (health checks, metrics)
-        #[arg(long, default_value = "0.0.0.0:39001")]
-        api_listen: SocketAddr,
-
-        /// Disable API server
+        /// Disable public API server (/healthcheck)
         #[arg(long, default_value = "false")]
-        no_api: bool,
+        no_public_api: bool,
+
+        /// Address and port for private API server (/metrics, /graceful-restart)
+        /// Only accessible from localhost. Default: 127.0.0.1:<listen_port>
+        #[arg(long)]
+        private_api_listen: Option<SocketAddr>,
+
+        /// Disable private API server
+        #[arg(long, default_value = "false")]
+        no_private_api: bool,
 
         /// Server's private key in Base64 format (for mutual authentication)
         #[arg(long, env = "QUICPORT_PRIVKEY")]
@@ -236,10 +241,14 @@ enum Commands {
 enum CtlCommands {
     /// Trigger graceful restart of data planes
     ///
-    /// This will:
-    /// 1. Send DRAIN to all currently ACTIVE data planes
-    /// 2. New data planes should be started separately
-    GracefulRestart,
+    /// This will call the control plane's API to:
+    /// 1. Start a new data plane
+    /// 2. Send DRAIN to all currently ACTIVE data planes
+    GracefulRestart {
+        /// Private API server address to connect to
+        #[arg(long, default_value = "127.0.0.1:39000")]
+        api_addr: SocketAddr,
+    },
 
     /// Show status of all data planes
     Status,
@@ -494,8 +503,8 @@ async fn main() -> Result<()> {
 
         Commands::Ctl(ctl_cmd) => {
             match ctl_cmd {
-                CtlCommands::GracefulRestart => {
-                    control_plane::graceful_restart().await?;
+                CtlCommands::GracefulRestart { api_addr } => {
+                    control_plane::graceful_restart(api_addr).await?;
                 }
                 CtlCommands::Status => {
                     control_plane::show_status().await?;
@@ -561,8 +570,9 @@ async fn main() -> Result<()> {
 
         Commands::Server {
             listen,
-            api_listen,
-            no_api,
+            no_public_api,
+            private_api_listen,
+            no_private_api,
             privkey,
             privkey_file,
             client_pubkeys,
@@ -581,32 +591,48 @@ async fn main() -> Result<()> {
             // 統計情報を初期化
             let statistics = Arc::new(ServerStatistics::new());
 
-            if no_api {
-                // API サーバーなしでコントロールプレーンのみ起動
-                info!("Starting control plane (QUIC on {})", listen);
-                control_plane::run(listen, auth_policy, statistics).await?;
-            } else {
-                // コントロールプレーンと API サーバーを並列起動
-                info!("Starting control plane (QUIC on {})", listen);
-                info!("Starting API server on {}", api_listen);
+            // API サーバー設定を構築
+            let api_config = {
+                // Private API: QUIC と同じポートの TCP、localhost のみ（/metrics, /graceful-restart）
+                let private_addr = if no_private_api {
+                    None
+                } else {
+                    Some(private_api_listen.unwrap_or_else(|| {
+                        // デフォルト: 127.0.0.1:<listen_port>
+                        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), listen.port())
+                    }))
+                };
 
-                let control_plane_task = control_plane::run(listen, auth_policy, statistics.clone());
-                let api_server = api::run(api_listen, statistics);
+                // Public API: QUIC ポート + 1（/healthcheck のみ）
+                let public_addr = if no_public_api {
+                    None
+                } else {
+                    // 0.0.0.0:<listen_port + 1>
+                    Some(SocketAddr::new(listen.ip(), listen.port() + 1))
+                };
 
-                // どちらかが終了したら両方終了
-                tokio::select! {
-                    result = control_plane_task => {
-                        if let Err(e) = result {
-                            return Err(e);
-                        }
-                    }
-                    result = api_server => {
-                        if let Err(e) = result {
-                            return Err(e);
-                        }
-                    }
+                if public_addr.is_some() || private_addr.is_some() {
+                    Some(control_plane::ApiConfig {
+                        public_addr,
+                        private_addr,
+                    })
+                } else {
+                    None
+                }
+            };
+
+            // コントロールプレーンを起動（API サーバーも統合）
+            info!("Starting control plane (QUIC on {})", listen);
+            if let Some(ref config) = api_config {
+                if let Some(addr) = config.public_addr {
+                    info!("Starting public API server on {} (TCP, /healthcheck)", addr);
+                }
+                if let Some(addr) = config.private_addr {
+                    info!("Starting private API server on {} (/metrics, /graceful-restart)", addr);
                 }
             }
+
+            control_plane::run_with_api(listen, auth_policy, statistics, api_config).await?;
         }
         Commands::Client {
             server,

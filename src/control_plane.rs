@@ -415,26 +415,63 @@ impl ControlPlane {
     }
 }
 
-/// コントロールプレーンを起動（ユーティリティ関数）
+/// API サーバー設定
+pub struct ApiConfig {
+    /// Public API アドレス（/healthcheck のみ、インターネットから見える）
+    pub public_addr: Option<SocketAddr>,
+    /// Private API アドレス（/metrics, /graceful-restart、localhost のみ）
+    pub private_addr: Option<SocketAddr>,
+}
+
+/// コントロールプレーンを起動（API サーバーなし）
 pub async fn run(
     listen_addr: SocketAddr,
     auth_policy: AuthPolicy,
     statistics: Arc<ServerStatistics>,
 ) -> Result<()> {
-    let control_plane = ControlPlane::new(listen_addr, auth_policy, statistics)?;
+    run_with_api(listen_addr, auth_policy, statistics, None).await
+}
+
+/// コントロールプレーンを起動（API サーバー付き）
+pub async fn run_with_api(
+    listen_addr: SocketAddr,
+    auth_policy: AuthPolicy,
+    statistics: Arc<ServerStatistics>,
+    api_config: Option<ApiConfig>,
+) -> Result<()> {
+    let control_plane = ControlPlane::new(listen_addr, auth_policy, statistics.clone())?;
     let cp_for_shutdown = control_plane.clone();
+    let cp_for_api = control_plane.clone();
     control_plane.start().await?;
+
+    // API サーバーを起動
+    let mut api_handles = Vec::new();
+
+    if let Some(config) = api_config {
+        // Public API サーバー（/healthcheck のみ）
+        if let Some(public_addr) = config.public_addr {
+            api_handles.push(tokio::spawn(async move {
+                crate::api::run_public(public_addr).await
+            }));
+        }
+
+        // Private API サーバー（/metrics, /graceful-restart）
+        if let Some(private_addr) = config.private_addr {
+            let stats_for_api = statistics.clone();
+            api_handles.push(tokio::spawn(async move {
+                crate::api::run_private(private_addr, stats_for_api, Some(cp_for_api)).await
+            }));
+        }
+    }
 
     // 終了シグナルを待機
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
 
-        // SIGTERM ハンドラを作成
         let mut sigterm =
             signal(SignalKind::terminate()).context("Failed to create SIGTERM handler")?;
 
-        // 終了シグナルを待機（SIGINT または SIGTERM）
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 info!("Received SIGINT");
@@ -447,56 +484,57 @@ pub async fn run(
 
     #[cfg(not(unix))]
     {
-        // Windows では SIGTERM がないため、SIGINT (Ctrl+C) のみをハンドリング
         tokio::signal::ctrl_c().await?;
         info!("Received SIGINT");
     }
 
     info!("Shutting down control plane");
+
+    // API サーバーを停止
+    for handle in api_handles {
+        handle.abort();
+    }
+
     cp_for_shutdown.shutdown_all().await?;
 
     Ok(())
 }
 
 /// グレースフルリスタートを実行（CLI コマンド用）
-pub async fn graceful_restart() -> Result<()> {
-    info!("Executing graceful restart command");
+///
+/// API サーバーの /api/graceful-restart エンドポイントを呼び出して、
+/// control-plane に graceful restart を実行させます。
+pub async fn graceful_restart(api_addr: SocketAddr) -> Result<()> {
+    info!("Executing graceful restart command via API");
 
-    // 既存のデータプレーンを検出
-    let pids = discover_dataplanes()?;
-    if pids.is_empty() {
-        return Err(anyhow::anyhow!("No running data planes found"));
+    let url = format!("http://{}/api/graceful-restart", api_addr);
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(&url)
+        .send()
+        .await
+        .with_context(|| format!("Failed to connect to API server at {}", api_addr))?;
+
+    let status = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .context("Failed to parse API response")?;
+
+    if status.is_success() {
+        info!(
+            "Graceful restart initiated: {}",
+            body.get("message").and_then(|v| v.as_str()).unwrap_or("")
+        );
+        Ok(())
+    } else {
+        let message = body
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown error");
+        Err(anyhow::anyhow!("Graceful restart failed: {}", message))
     }
-
-    // 全ての ACTIVE なデータプレーンに DRAIN を送信
-    for pid in pids {
-        let port = match read_dataplane_port(pid) {
-            Ok(p) => p,
-            Err(e) => {
-                warn!("Failed to read port for data plane PID {}: {}", pid, e);
-                continue;
-            }
-        };
-        match IpcConnection::connect(port).await {
-            Ok(mut conn) => {
-                // Ready イベントをスキップ
-                let _ = conn.recv_event().await;
-
-                // DRAIN を送信
-                if let Err(e) = conn.send_command(&ControlCommand::Drain).await {
-                    warn!("Failed to send DRAIN to data plane PID {}: {}", pid, e);
-                } else {
-                    info!("Sent DRAIN to data plane PID {}", pid);
-                }
-            }
-            Err(e) => {
-                warn!("Failed to connect to data plane PID {}: {}", pid, e);
-            }
-        }
-    }
-
-    info!("Graceful restart command completed");
-    Ok(())
 }
 
 /// データプレーンの状態を表示（CLI コマンド用）

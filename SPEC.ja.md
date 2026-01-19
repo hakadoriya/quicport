@@ -62,8 +62,9 @@ quicport server --listen <bind_address>:<port> --privkey <server_private_key> --
 | オプション | 必須 | 説明 |
 |-----------|------|------|
 | `--listen`, `-l` | No | QUIC コネクションを待ち受けるアドレスとポート（デフォルト: `0.0.0.0:39000`） |
-| `--api-listen` | No | API サーバーを待ち受けるアドレスとポート（デフォルト: `0.0.0.0:39001`） |
-| `--no-api` | No | API サーバーを無効化 |
+| `--private-api-listen` | No | Private API サーバーのアドレスとポート（デフォルト: `127.0.0.1:<listen_port>`） |
+| `--no-private-api` | No | Private API サーバーを無効化 |
+| `--no-public-api` | No | Public API サーバーを無効化 |
 | `--privkey` | Yes** | サーバーの秘密鍵（Base64 形式、相互認証用）。環境変数 `QUICPORT_PRIVKEY` でも指定可 |
 | `--privkey-file` | Yes** | サーバーの秘密鍵ファイルパス。環境変数 `QUICPORT_PRIVKEY_FILE` でも指定可 |
 | `--client-pubkeys` | Yes* | 認可するクライアントの公開鍵（Base64 形式）。複数指定はカンマ区切り。環境変数 `QUICPORT_CLIENT_PUBKEYS` でも指定可 |
@@ -304,9 +305,15 @@ quicport ctl <COMMAND>
 
 | コマンド | 説明 |
 |----------|------|
-| `graceful-restart` | 全ての ACTIVE なデータプレーンに DRAIN を送信 |
+| `graceful-restart [--api-addr <ADDR>]` | グレースフルリスタートを実行（Private API 経由） |
 | `status` | 全データプレーンの状態を表示 |
 | `drain --pid <PID>` | 特定のデータプレーンに DRAIN を送信 |
+
+**graceful-restart オプション:**
+
+| オプション | デフォルト | 説明 |
+|-----------|-----------|------|
+| `--api-addr` | `127.0.0.1:39000` | Private API サーバーのアドレス |
 
 **例:**
 
@@ -314,8 +321,11 @@ quicport ctl <COMMAND>
 # 全データプレーンの状態を確認
 quicport ctl status
 
-# グレースフルリスタート（全データプレーンをドレイン）
+# グレースフルリスタート（Private API 経由で新しいデータプレーンを起動し、旧データプレーンをドレイン）
 quicport ctl graceful-restart
+
+# 別のポートで起動している場合
+quicport ctl graceful-restart --api-addr 127.0.0.1:9000
 
 # 特定のデータプレーンをドレイン
 quicport ctl drain --pid 12345
@@ -1087,14 +1097,32 @@ IPv6 アドレスを正しく扱うための設計:
 
 ## API サーバー
 
-サーバーモードでは HTTP API サーバーが並列起動し、ヘルスチェックや Prometheus 形式のメトリクスを提供します。
+サーバーモードでは 2 つの HTTP API サーバーが起動します。
 
-### エンドポイント
+### Private API サーバー
+
+localhost からのみアクセス可能な管理用 API です。
+
+- **リッスンアドレス**: `127.0.0.1:<listen_port>`（QUIC と同じポート番号、TCP）
+- **無効化**: `--no-private-api`
+- **カスタムアドレス**: `--private-api-listen`
 
 | エンドポイント | メソッド | 説明 |
 |---------------|---------|------|
 | `/healthcheck` | GET | ヘルスチェック |
 | `/metrics` | GET | Prometheus 形式のメトリクス |
+| `/api/graceful-restart` | POST | グレースフルリスタートを実行 |
+
+### Public API サーバー
+
+インターネットからアクセス可能なヘルスチェック専用 API です。
+
+- **リッスンアドレス**: `0.0.0.0:<listen_port + 1>`（QUIC ポート + 1、TCP）
+- **無効化**: `--no-public-api`
+
+| エンドポイント | メソッド | 説明 |
+|---------------|---------|------|
+| `/healthcheck` | GET | ヘルスチェック |
 
 ### GET /healthcheck
 
@@ -1108,9 +1136,35 @@ IPv6 アドレスを正しく扱うための設計:
 }
 ```
 
+### POST /api/graceful-restart
+
+グレースフルリスタートを実行します（Private API のみ）。
+
+1. 新しいデータプレーンを起動（SO_REUSEPORT で同一ポートで LISTEN）
+2. 旧データプレーンに DRAIN コマンドを送信
+3. 旧データプレーンは新規接続を拒否し、既存接続のみ処理
+
+**レスポンス例（成功）:**
+
+```json
+{
+  "status": "OK",
+  "message": "Graceful restart initiated"
+}
+```
+
+**レスポンス例（失敗）:**
+
+```json
+{
+  "status": "ERROR",
+  "message": "Graceful restart failed: ..."
+}
+```
+
 ### GET /metrics
 
-Prometheus 形式でサーバーの稼働状況を返します。
+Prometheus 形式でサーバーの稼働状況を返します（Private API のみ）。
 
 **レスポンス例:**
 

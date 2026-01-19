@@ -51,6 +51,9 @@ axum = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# HTTP client (for CLI commands)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
 # File locking (Unix)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
