@@ -68,7 +68,7 @@ cat client.pub  # Client public key (Base64)
 ### 2. Start the server
 
 ```bash
-quicport server \
+quicport control-plane \
   --listen 0.0.0.0:39000 \
   --privkey "SERVER_PRIVATE_KEY_BASE64" \
   --client-pubkeys "CLIENT_PUBLIC_KEY_BASE64"
@@ -93,10 +93,10 @@ ssh -p 9022 user@your-server.example.com
 
 ## Usage
 
-### Server Mode
+### Control Plane Mode
 
 ```bash
-quicport server [OPTIONS]
+quicport control-plane [OPTIONS]
 ```
 
 | Option | Default | Description |
@@ -139,7 +139,7 @@ Both server and client authenticate each other using X25519 key pairs:
 
 ```bash
 # Server
-quicport server \
+quicport control-plane \
   --privkey "SERVER_PRIVATE_KEY" \
   --client-pubkeys "CLIENT_PUBLIC_KEY"
 
@@ -157,7 +157,7 @@ For quick setup or testing, use a pre-shared key:
 
 ```bash
 # Server
-quicport server --psk "your-secret-key"
+quicport control-plane --psk "your-secret-key"
 
 # Client
 quicport client \
@@ -220,7 +220,7 @@ client::run_remote_forward("127.0.0.1:39000", "8080/tcp", "80/tcp", auth).await?
 
 ## Systemd Service
 
-Example systemd unit file for running quicport server as a service:
+Example systemd unit file for running quicport control-plane as a service:
 
 ```ini
 [Unit]

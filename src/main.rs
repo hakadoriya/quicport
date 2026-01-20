@@ -51,7 +51,7 @@ struct Cli {
 enum Commands {
     /// Run as data plane (QUIC connection handler)
     ///
-    /// This command is typically invoked by the control plane (quicport server) or
+    /// This command is typically invoked by the control plane (quicport control-plane) or
     /// by quicport.sh script for cgroup separation.
     /// The data plane handles QUIC connections and maintains backend TCP connections.
     /// It operates independently of the control plane after startup.
@@ -124,12 +124,12 @@ enum Commands {
         reconnect_delay: u64,
     },
 
-    /// Run as server (control plane that manages data planes)
+    /// Run as control plane (manages data planes)
     ///
-    /// The control plane spawns and manages data plane processes via IPC.
+    /// The control plane spawns and manages data plane processes via HTTP IPC.
     /// Data planes handle actual QUIC connections.
-    #[command(name = "server", alias = "control-plane")]
-    Server {
+    #[command(name = "control-plane")]
+    ControlPlane {
         /// Address and port to listen on for QUIC (data planes bind to this)
         #[arg(short, long, default_value = "0.0.0.0:39000")]
         listen: SocketAddr,
@@ -644,7 +644,7 @@ async fn main() -> Result<()> {
             .await?;
         }
 
-        Commands::Server {
+        Commands::ControlPlane {
             listen,
             no_public_api,
             private_api_listen,

@@ -2,7 +2,7 @@
 
 ## 概要
 
-データプレーンは、QUIC 接続とバックエンド TCP 接続を維持するデーモンです。コントロールプレーン（quicport server）とは別プロセスとして動作し、コントロールプレーンの再起動・終了後も独立して動作を継続します。
+データプレーンは、QUIC 接続とバックエンド TCP 接続を維持するデーモンです。コントロールプレーン（quicport control-plane）とは別プロセスとして動作し、コントロールプレーンの再起動・終了後も独立して動作を継続します。
 
 ## 目的
 
@@ -37,7 +37,7 @@
 │                         │ Unix Socket (制御用 IPC、任意)                    │
 │                         ↓                                                    │
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │ コントロールプレーン (quicport server)                                │   │
+│  │ コントロールプレーン (quicport control-plane)                                │   │
 │  │  - データプレーンの起動・管理                                        │   │
 │  │  - 認証ポリシーの配布                                                │   │
 │  │  - 設定管理                                                          │   │
@@ -61,7 +61,7 @@
 | 独立動作 | コントロールプレーン終了後も継続動作 |
 | グレースフル終了 | DRAIN モードで既存接続を処理しつつ終了 |
 
-### コントロールプレーン (quicport server)
+### コントロールプレーン (quicport control-plane)
 
 | 責務 | 説明 |
 |------|------|
@@ -88,11 +88,11 @@
 
 ```ini
 [Unit]
-Description=quicport server
+Description=quicport control-plane
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/quicport server
+ExecStart=/usr/local/bin/quicport control-plane
 ExecReload=/usr/local/bin/quicport ctl graceful-restart
 # stop はコントロールプレーンのみ終了、データプレーンは残留
 Restart=on-failure
@@ -230,7 +230,7 @@ enum DataPlaneState {
 
 ### プロトコル
 
-#### quicport server → データプレーン (制御コマンド)
+#### quicport control-plane → データプレーン (制御コマンド)
 
 | コマンド | 説明 |
 |----------|------|
@@ -241,7 +241,7 @@ enum DataPlaneState {
 | `GET_STATUS` | 状態を取得（接続数、状態等） |
 | `GET_CONNECTIONS` | アクティブ接続の一覧を取得 |
 
-#### データプレーン → quicport server (イベント)
+#### データプレーン → quicport control-plane (イベント)
 
 | イベント | 説明 |
 |----------|------|
@@ -290,7 +290,7 @@ enum DataPlaneState {
                                     │
                                     │ CONNECTION_OPENED イベント
                                     ↓
-                            [quicport server]
+                            [quicport control-plane]
                              (ログ、メトリクス)
 ```
 
@@ -347,7 +347,7 @@ struct BackendConnection {
 
 | 状況 | 動作 |
 |------|------|
-| データプレーン クラッシュ | quicport server が検知し、新しいインスタンスを起動 |
+| データプレーン クラッシュ | quicport control-plane が検知し、新しいインスタンスを起動 |
 | バックエンド接続失敗 | クライアントにエラーを返す |
 | 認証失敗 | QUIC 接続を閉じる |
 | DRAIN タイムアウト | 残りの接続を強制切断して終了 |
@@ -356,7 +356,7 @@ struct BackendConnection {
 ## セキュリティ
 
 - Unix Socket のパーミッション: `0600`
-- データプレーン と quicport server は同じユーザーで実行
+- データプレーン と quicport control-plane は同じユーザーで実行
 - 認証情報はコントロールプレーン経由でのみ設定
 - QUIC の TLS 証明書・秘密鍵は データプレーン が保持
 
@@ -365,7 +365,7 @@ struct BackendConnection {
 | バイナリ | 説明 |
 |----------|------|
 | `quicport` | メインバイナリ。サブコマンドで動作を切り替え |
-| `quicport server` | コントロールプレーン + データプレーン起動 |
+| `quicport control-plane` | コントロールプレーン + データプレーン起動 |
 | `quicport data-plane` | データプレーン（通常は server から起動される） |
 | `quicport client` | クライアント（変更なし） |
 | `quicport ctl` | 制御コマンド（graceful-restart 等） |

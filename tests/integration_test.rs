@@ -69,11 +69,11 @@ impl TestServer {
         eprintln!("[TestServer] Starting with PSK: listen={}", listen_addr);
 
         let process = Command::new(quicport_binary())
-            .args(["server", "--listen", &listen_addr, "--no-public-api", "--no-private-api", "--psk", psk])
+            .args(["control-plane", "--listen", &listen_addr, "--no-public-api", "--no-private-api", "--psk", psk])
             .stdout(Stdio::inherit()) // 標準出力を継承してログを見る
             .stderr(Stdio::inherit()) // 標準エラーを継承してログを見る
             .spawn()
-            .expect("Failed to start quicport server");
+            .expect("Failed to start quicport control-plane");
 
         // サーバーが起動するまで待機
         thread::sleep(Duration::from_millis(500));
@@ -89,7 +89,7 @@ impl TestServer {
         let listen_addr = format!("127.0.0.1:{}", port);
         let process = Command::new(quicport_binary())
             .args([
-                "server",
+                "control-plane",
                 "--listen",
                 &listen_addr,
                 "--no-public-api", "--no-private-api",
@@ -101,7 +101,7 @@ impl TestServer {
             .stdout(Stdio::inherit()) // 標準出力を継承してログを見る
             .stderr(Stdio::inherit()) // 標準エラーを継承してログを見る
             .spawn()
-            .expect("Failed to start quicport server");
+            .expect("Failed to start quicport control-plane");
 
         // サーバーが起動するまで待機
         thread::sleep(Duration::from_millis(500));
