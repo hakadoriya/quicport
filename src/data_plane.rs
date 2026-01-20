@@ -517,6 +517,7 @@ pub async fn run(config: DataPlaneConfig, auth_policy: Option<AuthPolicy>) -> Re
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     let state = data_plane.get_state().await;
                     let connections = data_plane.active_connections.load(Ordering::SeqCst);
+                    debug!("Drain check: state={:?}, active_connections={}", state, connections);
                     if state == DataPlaneState::Draining && connections == 0 {
                         return;
                     }
@@ -693,19 +694,21 @@ pub async fn run_with_control_plane_url(config: DataPlaneConfig, cp_url: &str) -
                         // NOT_FOUND (404) の場合は再登録を試みる
                         // control-plane が再起動した場合、古い dp_id は認識されず 404 が返る
                         if err_str.contains("NOT_FOUND") || err_str.contains("status=404") {
-                            warn!("Registration lost, attempting re-registration...");
+                            // 再登録前に現在の状態を保存（DRAINING 状態を維持するため）
+                            let current_state = dp_for_poll.get_state().await;
+                            warn!("Registration lost (state={:?}), attempting re-registration...", current_state);
                             match client.register(dp_for_poll.pid, &config_for_poll.listen_addr.to_string()).await {
                                 Ok((auth_policy, dp_config)) => {
-                                    info!("Re-registered with control plane");
+                                    info!("Re-registered with control plane (maintaining state={:?})", current_state);
                                     dp_for_poll.set_auth_policy(auth_policy).await;
                                     dp_for_poll.set_config(dp_config).await;
-                                    // Ready イベントを送信
-                                    let event = DataPlaneEvent::Ready {
-                                        pid: dp_for_poll.pid,
-                                        listen_addr: config_for_poll.listen_addr.to_string(),
-                                    };
-                                    if let Err(e) = client.report_event(event).await {
-                                        warn!("Failed to report Ready event after re-registration: {}", e);
+                                    // 元の状態を維持（DRAINING 中の data-plane が ACTIVE に戻らないようにする）
+                                    // Ready イベントではなく現在の状態を報告
+                                    if let Ok(status) = dp_for_poll.get_status().await {
+                                        let event = DataPlaneEvent::Status(status);
+                                        if let Err(e) = client.report_event(event).await {
+                                            warn!("Failed to report status after re-registration: {}", e);
+                                        }
                                     }
                                     continue; // 再度 poll を試行
                                 }
@@ -782,6 +785,7 @@ pub async fn run_with_control_plane_url(config: DataPlaneConfig, cp_url: &str) -
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     let state = data_plane.get_state().await;
                     let connections = data_plane.active_connections.load(Ordering::SeqCst);
+                    debug!("Drain check: state={:?}, active_connections={}", state, connections);
                     if state == DataPlaneState::Draining && connections == 0 {
                         return;
                     }
@@ -1196,13 +1200,30 @@ async fn handle_remote_forward(
             };
 
             // TCP 接続を受け付けるループ
-            // NOTE: DRAINING 状態では listener を閉じるが、既存のリレータスクは継続する
+            // NOTE: DRAINING 状態では新規接続を拒否するが、既存のリレータスクは継続する
+            // QUIC 接続ハンドルをドロップすると接続が閉じられるため、リレータスクが完了するまで待機する
             let mut drain_rx = data_plane.subscribe_drain();
+            let mut draining = false;
             loop {
                 tokio::select! {
-                    // DRAINING 状態になったら listener を閉じる（既存接続は維持）
-                    _ = drain_rx.recv() => {
-                        info!("Data plane draining, stopping TCP accept loop for port {}", port);
+                    // DRAINING 状態への移行（既存接続は維持）
+                    _ = drain_rx.recv(), if !draining => {
+                        info!("Data plane draining, RPF TCP will only process existing connections for port {}", port);
+                        draining = true;
+                        // break しない: 既存接続のリレータスクを継続処理
+                    }
+
+                    // すべてのリレータスクが完了したかチェック（DRAINING 状態のみ）
+                    _ = async {
+                        loop {
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            let conns = conn_manager.lock().await;
+                            if conns.connections.is_empty() {
+                                return;
+                            }
+                        }
+                    }, if draining => {
+                        info!("All RPF TCP relay tasks completed, releasing port {}", port);
                         break;
                     }
 
@@ -1216,6 +1237,11 @@ async fn handle_remote_forward(
                     result = listener.accept() => {
                         match result {
                             Ok((tcp_stream, tcp_addr)) => {
+                                // DRAINING 状態では新しい接続を拒否
+                                if draining {
+                                    debug!("Rejecting new TCP connection in DRAINING state for port {}", port);
+                                    continue;
+                                }
                                 let conn_id = CONNECTION_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
                                 info!("New TCP connection {} from {}", conn_id, tcp_addr);
 
@@ -1549,13 +1575,29 @@ async fn handle_local_forward(
     let remote_destination = remote_destination.to_string();
 
     // NOTE: DRAINING 状態では新規ストリームの受付を停止するが、既存のリレータスクは継続する
-    // （quinn の Connection は参照カウントされているため、drop されても既存ストリームは維持される）
+    // QUIC 接続ハンドルをドロップすると接続が閉じられるため、リレータスクが完了するまで待機する
     let mut drain_rx = data_plane.subscribe_drain();
+    let mut draining = false;
     loop {
         tokio::select! {
-            // DRAINING 状態になったら accept ループを終了（既存接続は維持）
-            _ = drain_rx.recv() => {
-                info!("Data plane draining, stopping QUIC stream accept loop (LPF)");
+            // DRAINING 状態への移行（既存接続へのストリームは継続処理）
+            _ = drain_rx.recv(), if !draining => {
+                info!("Data plane draining, LPF will only process existing connections");
+                draining = true;
+                // break しない: 既存接続のストリームを継続処理
+            }
+
+            // すべてのリレータスクが完了したかチェック（DRAINING 状態のみ）
+            _ = async {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let conns = conn_manager.lock().await;
+                    if conns.connections.is_empty() {
+                        return;
+                    }
+                }
+            }, if draining => {
+                info!("All LPF relay tasks completed, stopping handler");
                 break;
             }
 
@@ -1569,6 +1611,11 @@ async fn handle_local_forward(
             result = quic_conn.accept_bi() => {
                 match result {
                     Ok((send, mut recv)) => {
+                        // DRAINING 状態では新しいストリームを拒否
+                        if draining {
+                            debug!("Rejecting new QUIC stream in DRAINING state (LPF)");
+                            continue;
+                        }
                         debug!("QUIC stream accepted (LPF)");
 
                         let mut conn_id_buf = [0u8; 4];

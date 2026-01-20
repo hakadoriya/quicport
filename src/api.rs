@@ -196,6 +196,41 @@ impl HttpIpcState {
         }
         self.command_notify.notify_waiters();
     }
+
+    /// 全データプレーンのペンディングコマンドが配信されるまで待機
+    ///
+    /// 指定されたタイムアウト内にすべてのコマンドが配信されなかった場合でも終了する
+    pub async fn wait_for_commands_delivered(&self, timeout: std::time::Duration) {
+        let start = std::time::Instant::now();
+        let check_interval = std::time::Duration::from_millis(100);
+
+        loop {
+            // タイムアウトチェック
+            if start.elapsed() >= timeout {
+                let dataplanes = self.dataplanes.read().await;
+                let pending_count: usize = dataplanes.values()
+                    .map(|dp| dp.pending_commands.len())
+                    .sum();
+                if pending_count > 0 {
+                    warn!("Timeout waiting for commands to be delivered, {} commands still pending", pending_count);
+                }
+                break;
+            }
+
+            // すべてのコマンドが配信されたかチェック
+            let all_delivered = {
+                let dataplanes = self.dataplanes.read().await;
+                dataplanes.values().all(|dp| dp.pending_commands.is_empty())
+            };
+
+            if all_delivered {
+                info!("All commands delivered to data planes");
+                break;
+            }
+
+            tokio::time::sleep(check_interval).await;
+        }
+    }
 }
 
 impl Default for HttpIpcState {

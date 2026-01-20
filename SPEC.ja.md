@@ -469,10 +469,13 @@ systemd                control-plane            data-plane
    |                        |                        |
    |-- SIGTERM ------------>|                        |
    |                        |                        |
-   |                        |-- graceful-shutdown -->|
-   |                        |   (API 経由)            |
+   |                        |-- Drain コマンド送信 -->|
+   |                        |   (HTTP IPC 経由)       |
    |                        |                        |
-   |                        |                        |-- LISTEN 停止
+   |                        |-- コマンド配信待機 -----|  (最大 5 秒)
+   |                        |   (dp が受信するまで)    |
+   |                        |                        |
+   |                        |                        |-- 新規接続の受付を停止
    |                        |                        |-- DRAINING 状態に遷移
    |                        |                        |
    |                        |-- プロセス終了          |
@@ -490,11 +493,19 @@ systemd                control-plane            data-plane
 ```
 
 1. systemd から cp に SIGTERM
-2. cp から dp に graceful-shutdown を指示（API 経由）
-3. dp が LISTEN を停止し、DRAINING 状態に遷移
-4. cp がプロセス終了
-5. dp は別 cgroup で独立して動作を継続
-6. dp は既存コネクションをすべて処理完了（または drain_timeout 経過）後に終了
+2. cp から dp に Drain コマンドを送信（HTTP IPC 経由）
+3. cp は dp がコマンドを受信するまで待機（最大 5 秒）
+4. dp が新規接続の受付を停止し、DRAINING 状態に遷移
+5. cp がプロセス終了
+6. dp は別 cgroup で独立して動作を継続
+7. dp は既存コネクションをすべて処理完了（または drain_timeout 経過）後に終了
+
+**DRAINING 状態での動作:**
+
+- 新規 TCP/UDP 接続の受付を拒否
+- 新規 QUIC ストリームの受付を拒否
+- 既存のリレータスク（データ転送）は継続
+- すべてのリレータスクが完了するまで待機してから終了
 
 #### 再起動シーケンス（systemctl restart）
 
@@ -587,6 +598,49 @@ STARTING --> ACTIVE --> DRAINING --> TERMINATED
 | サーバー側 wait_timeout | 30 秒 | コマンドがない場合、30 秒後に空レスポンスを返す |
 | クライアント HTTP タイムアウト | 35 秒 | サーバーの wait_timeout より少し長く |
 | TCP キープアライブ | 15 秒間隔 | 接続が切れないようにキープアライブ |
+
+#### Control Plane 自動再登録機能
+
+data-plane は control-plane が再起動した場合、自動的に新しい control-plane に再登録します。
+
+```
+data-plane                    旧 control-plane              新 control-plane
+     |                              |                              |
+     |-- PollCommands ------------->|                              |
+     |                              |                              |
+     |                              X (cp 終了)                    |
+     |                              |                              |
+     |-- PollCommands ----------->  X (接続エラー)                 |
+     |                              |                              |
+     |   (リトライ)                  |                              |
+     |                              |                              |
+     |                              |                      新 cp 起動
+     |                              |                              |
+     |-- PollCommands -------------X---------------------->|       |
+     |   (404 NOT_FOUND)            |                      |       |
+     |                              |                      |       |
+     |-- RegisterDataPlane ------------------------------>|       |
+     |<-- { dp_id, auth_policy } --------------------------       |
+     |                              |                              |
+     |-- ReportEvent (Status) ---------------------------------->|
+     |   (現在の状態を報告)           |                              |
+     |                              |                              |
+     |-- PollCommands (継続) ---------------------------------->|
+     |                              |                              |
+```
+
+**動作詳細:**
+
+1. data-plane は PollCommands で control-plane からコマンドを取得
+2. control-plane が終了すると、接続エラーまたは 404 NOT_FOUND が返る
+3. 404 NOT_FOUND を検出した場合、data-plane は自動的に再登録を試行
+4. 再登録成功後、現在の状態（ACTIVE または DRAINING）を Status イベントで報告
+5. **DRAINING 状態は維持される**（古い data-plane が ACTIVE に戻らないようにする）
+
+**状態維持の重要性:**
+
+- DRAINING 状態の data-plane が再登録後も DRAINING のままであることで、graceful shutdown が正しく機能
+- 新しい control-plane は再登録された data-plane の状態を正しく認識可能
 
 ### トランスポート層
 

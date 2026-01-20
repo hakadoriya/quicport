@@ -546,6 +546,10 @@ impl ControlPlane {
 
         if self.use_http_ipc {
             self.http_ipc.broadcast_command(ControlCommand::Drain).await;
+            // data-plane がコマンドを受け取るまで待機
+            // 長ポーリングは notify_waiters() で即座に起こされるが、
+            // HTTP レスポンスが完了するまで少し待機する
+            self.http_ipc.wait_for_commands_delivered(std::time::Duration::from_secs(5)).await;
             return Ok(());
         }
 
