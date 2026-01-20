@@ -1005,9 +1005,16 @@ async fn handle_remote_forward(
             };
 
             // TCP 接続を受け付けるループ
-            // NOTE: DRAINING 状態では新規接続の受付を停止するが、既存接続は維持する
+            // NOTE: DRAINING 状態では listener を閉じるが、既存のリレータスクは継続する
+            let mut drain_rx = data_plane.subscribe_drain();
             loop {
                 tokio::select! {
+                    // DRAINING 状態になったら listener を閉じる（既存接続は維持）
+                    _ = drain_rx.recv() => {
+                        info!("Data plane draining, stopping TCP accept loop for port {}", port);
+                        break;
+                    }
+
                     // QUIC 接続クローズ
                     reason = quic_conn.closed() => {
                         info!("QUIC connection closed: {:?}, releasing port {}", reason, port);
@@ -1016,12 +1023,6 @@ async fn handle_remote_forward(
 
                     // 新しい TCP 接続
                     result = listener.accept() => {
-                        // DRAINING 状態では新規接続を拒否（既存接続は継続）
-                        if data_plane.get_state().await == DataPlaneState::Draining {
-                            debug!("Rejecting new TCP connection in DRAINING state for port {}", port);
-                            continue;
-                        }
-
                         match result {
                             Ok((tcp_stream, tcp_addr)) => {
                                 let conn_id = CONNECTION_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -1167,8 +1168,18 @@ async fn handle_remote_forward(
 
             // UDP パケットを受け付けるループ
             // NOTE: DRAINING 状態では新規仮想接続の作成を停止するが、既存接続へのパケットは継続処理
+            // （UDP はコネクションレスで同じソケットで全パケットを受信するため、ソケットを閉じると既存接続へのパケットも受信できなくなる）
+            let mut drain_rx = data_plane.subscribe_drain();
+            let mut draining = false;
             loop {
                 tokio::select! {
+                    // DRAINING 状態への移行（既存接続へのパケットは継続処理）
+                    _ = drain_rx.recv(), if !draining => {
+                        info!("Data plane draining, UDP port {} will only process existing connections", port);
+                        draining = true;
+                        // break しない: 既存接続へのパケットを継続処理
+                    }
+
                     // QUIC 接続クローズ
                     reason = quic_conn.closed() => {
                         info!("QUIC connection closed: {:?}, releasing UDP port {}", reason, port);
@@ -1195,13 +1206,11 @@ async fn handle_remote_forward(
                                         debug!("UDP connection {} channel closed, removing", conn_id);
                                         udp_connections.lock().await.remove(&src_addr);
                                     }
-                                } else {
+                                } else if draining {
                                     // DRAINING 状態では新規仮想接続を拒否（既存接続へのパケットは上で処理済み）
-                                    if data_plane.get_state().await == DataPlaneState::Draining {
-                                        debug!("Rejecting new UDP connection in DRAINING state for port {}", port);
-                                        continue;
-                                    }
-
+                                    debug!("Rejecting new UDP connection in DRAINING state for port {}", port);
+                                    continue;
+                                } else {
                                     // 新しい仮想接続を作成
                                     let conn_id = CONNECTION_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
                                     info!("New UDP connection {} from {}", conn_id, src_addr);
@@ -1348,9 +1357,17 @@ async fn handle_local_forward(
 
     let remote_destination = remote_destination.to_string();
 
-    // NOTE: DRAINING 状態では新規ストリームの受付を停止するが、既存接続は維持する
+    // NOTE: DRAINING 状態では新規ストリームの受付を停止するが、既存のリレータスクは継続する
+    // （quinn の Connection は参照カウントされているため、drop されても既存ストリームは維持される）
+    let mut drain_rx = data_plane.subscribe_drain();
     loop {
         tokio::select! {
+            // DRAINING 状態になったら accept ループを終了（既存接続は維持）
+            _ = drain_rx.recv() => {
+                info!("Data plane draining, stopping QUIC stream accept loop (LPF)");
+                break;
+            }
+
             // QUIC 接続クローズ
             reason = quic_conn.closed() => {
                 info!("QUIC connection closed: {:?}, stopping LPF handler", reason);
@@ -1359,12 +1376,6 @@ async fn handle_local_forward(
 
             // QUIC ストリームを accept
             result = quic_conn.accept_bi() => {
-                // DRAINING 状態では新規ストリームを拒否（既存接続は継続）
-                if data_plane.get_state().await == DataPlaneState::Draining {
-                    debug!("Rejecting new QUIC stream in DRAINING state (LPF)");
-                    continue;
-                }
-
                 match result {
                     Ok((send, mut recv)) => {
                         debug!("QUIC stream accepted (LPF)");
