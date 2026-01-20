@@ -60,10 +60,10 @@ enum Commands {
         #[arg(short, long, default_value = "0.0.0.0:39000")]
         listen: SocketAddr,
 
-        /// Control plane address to connect to for receiving auth policy.
-        /// When specified, data plane connects to control plane instead of using env vars.
+        /// Control plane HTTP URL to connect to for receiving auth policy (HTTP IPC).
+        /// Example: http://127.0.0.1:39000
         #[arg(long)]
-        control_plane_addr: Option<SocketAddr>,
+        control_plane_url: Option<String>,
 
         /// Drain timeout in seconds (force shutdown after this time in DRAINING state, 0 means infinite)
         #[arg(long, default_value = "0")]
@@ -553,7 +553,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::DataPlane {
             listen,
-            control_plane_addr,
+            control_plane_url,
             drain_timeout,
         } => {
             let config = DataPlaneConfig {
@@ -562,13 +562,13 @@ async fn main() -> Result<()> {
                 ..Default::default()
             };
 
-            if let Some(cp_addr) = control_plane_addr {
-                // control-plane に接続して認証ポリシーを取得するモード
+            if let Some(cp_url) = control_plane_url {
+                // HTTP IPC モード: control-plane に HTTP で接続して認証ポリシーを取得
                 info!(
-                    "Starting data plane on {} (connecting to control plane at {})",
-                    listen, cp_addr
+                    "Starting data plane on {} (HTTP IPC to control plane at {})",
+                    listen, cp_url
                 );
-                data_plane::run_with_control_plane(config, cp_addr).await?;
+                data_plane::run_with_control_plane_url(config, &cp_url).await?;
             } else {
                 // 環境変数から認証ポリシーを取得するモード（従来互換）
                 let auth_policy = build_dataplane_auth_policy()?;

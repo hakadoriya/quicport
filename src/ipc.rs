@@ -2,7 +2,30 @@
 //!
 //! コントロールプレーンとデータプレーン間の通信を定義します。
 //!
-//! ## メッセージフレーミング
+//! ## HTTP IPC API (推奨)
+//!
+//! Control Plane ↔ Data Plane 間の通信は HTTP/JSON API で行います。
+//! すべてのエンドポイントは POST メソッドを使用する RPC スタイルです。
+//!
+//! ### エンドポイント
+//!
+//! | メソッド | 説明 | 呼び出し元 |
+//! |----------|------|-----------|
+//! | `POST /api/v1/RegisterDataPlane` | DP 登録、認証ポリシー取得 | DP |
+//! | `POST /api/v1/PollCommands` | コマンドポーリング（長ポーリング） | DP |
+//! | `POST /api/v1/AckCommand` | コマンド応答 | DP |
+//! | `POST /api/v1/ReportEvent` | イベント報告 | DP |
+//! | `POST /api/v1/ListDataPlanes` | 全 DP 一覧 | CLI/外部 |
+//! | `POST /api/v1/GetDataPlaneStatus` | 特定 DP の詳細 | CLI/外部 |
+//! | `POST /api/v1/DrainDataPlane` | ドレイン | CLI/外部 |
+//! | `POST /api/v1/ShutdownDataPlane` | シャットダウン | CLI/外部 |
+//! | `POST /api/v1/GetConnections` | 接続一覧 | CLI/外部 |
+//!
+//! ## レガシー IPC プロトコル（非推奨）
+//!
+//! 以下は後方互換性のために残されています。
+//!
+//! ### メッセージフレーミング
 //!
 //! ```text
 //! +----------------+----------------+------------------+
@@ -11,7 +34,7 @@
 //! +----------------+----------------+------------------+
 //! ```
 //!
-//! ## 通信方式
+//! ### 通信方式
 //!
 //! - TCP localhost (127.0.0.1)
 //! - ポート番号ファイル: `~/.local/state/quicport/dataplanes/dp-<pid>.port`
@@ -135,6 +158,211 @@ pub struct ConnectionInfo {
     pub remote_addr: String,
     /// プロトコル (TCP/UDP)
     pub protocol: String,
+}
+
+// =============================================================================
+// HTTP IPC リクエスト/レスポンス型
+// =============================================================================
+
+/// RegisterDataPlane リクエスト (DP → CP)
+///
+/// データプレーンが起動時にコントロールプレーンに登録
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterDataPlaneRequest {
+    /// データプレーンの PID
+    pub pid: u32,
+    /// QUIC リッスンアドレス
+    pub listen_addr: String,
+}
+
+/// RegisterDataPlane レスポンス (CP → DP)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterDataPlaneResponse {
+    /// 割り当てられた Data Plane ID
+    pub dp_id: String,
+    /// 認証ポリシー
+    pub auth_policy: AuthPolicy,
+    /// データプレーン設定
+    pub config: DataPlaneConfig,
+}
+
+/// PollCommands リクエスト (DP → CP)
+///
+/// 長ポーリングでコマンドを取得
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PollCommandsRequest {
+    /// Data Plane ID
+    pub dp_id: String,
+    /// 待機タイムアウト（秒）
+    #[serde(default = "default_poll_timeout")]
+    pub wait_timeout_secs: u64,
+}
+
+fn default_poll_timeout() -> u64 {
+    30
+}
+
+/// コマンド（ID 付き）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandWithId {
+    /// コマンド ID
+    pub id: String,
+    /// コマンド内容
+    #[serde(flatten)]
+    pub command: ControlCommand,
+}
+
+/// PollCommands レスポンス (CP → DP)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PollCommandsResponse {
+    /// 保留中のコマンド
+    pub commands: Vec<CommandWithId>,
+}
+
+/// AckCommand リクエスト (DP → CP)
+///
+/// コマンドの実行結果を報告
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AckCommandRequest {
+    /// Data Plane ID
+    pub dp_id: String,
+    /// コマンド ID
+    pub cmd_id: String,
+    /// 実行ステータス
+    pub status: String,
+    /// 実行結果（オプション）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<DataPlaneStatus>,
+}
+
+/// AckCommand レスポンス (CP → DP)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AckCommandResponse {
+    /// 確認済みフラグ
+    pub acknowledged: bool,
+}
+
+/// ReportEvent リクエスト (DP → CP)
+///
+/// イベントを報告
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportEventRequest {
+    /// Data Plane ID
+    pub dp_id: String,
+    /// イベント
+    pub event: DataPlaneEvent,
+}
+
+/// ReportEvent レスポンス (CP → DP)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportEventResponse {
+    /// 確認済みフラグ
+    pub acknowledged: bool,
+}
+
+/// ListDataPlanes リクエスト (CLI/外部 → CP)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListDataPlanesRequest {}
+
+/// データプレーンサマリー
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataPlaneSummary {
+    /// Data Plane ID
+    pub dp_id: String,
+    /// PID
+    pub pid: u32,
+    /// 状態
+    pub state: DataPlaneState,
+    /// アクティブ接続数
+    pub active_connections: u32,
+    /// 送信バイト数
+    pub bytes_sent: u64,
+    /// 受信バイト数
+    pub bytes_received: u64,
+}
+
+/// ListDataPlanes レスポンス (CP → CLI/外部)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListDataPlanesResponse {
+    /// データプレーン一覧
+    pub dataplanes: Vec<DataPlaneSummary>,
+}
+
+/// GetDataPlaneStatus リクエスト (CLI/外部 → CP)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetDataPlaneStatusRequest {
+    /// Data Plane ID
+    pub dp_id: String,
+}
+
+/// GetDataPlaneStatus レスポンス (CP → CLI/外部)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetDataPlaneStatusResponse {
+    /// Data Plane ID
+    pub dp_id: String,
+    /// PID
+    pub pid: u32,
+    /// 状態
+    pub state: DataPlaneState,
+    /// アクティブ接続数
+    pub active_connections: u32,
+    /// 送信バイト数
+    pub bytes_sent: u64,
+    /// 受信バイト数
+    pub bytes_received: u64,
+    /// 起動時刻（UNIX タイムスタンプ）
+    pub started_at: u64,
+}
+
+/// DrainDataPlane リクエスト (CLI/外部 → CP)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DrainDataPlaneRequest {
+    /// Data Plane ID
+    pub dp_id: String,
+}
+
+/// DrainDataPlane レスポンス (CP → CLI/外部)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DrainDataPlaneResponse {
+    /// ステータス
+    pub status: String,
+}
+
+/// ShutdownDataPlane リクエスト (CLI/外部 → CP)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShutdownDataPlaneRequest {
+    /// Data Plane ID
+    pub dp_id: String,
+}
+
+/// ShutdownDataPlane レスポンス (CP → CLI/外部)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShutdownDataPlaneResponse {
+    /// ステータス
+    pub status: String,
+}
+
+/// GetConnections リクエスト (CLI/外部 → CP)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetConnectionsRequest {
+    /// Data Plane ID
+    pub dp_id: String,
+}
+
+/// GetConnections レスポンス (CP → CLI/外部)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetConnectionsResponse {
+    /// 接続一覧
+    pub connections: Vec<ConnectionInfo>,
+}
+
+/// HTTP IPC エラーレスポンス
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorResponse {
+    /// エラーコード
+    pub error: String,
+    /// エラーメッセージ
+    pub message: String,
 }
 
 // =============================================================================

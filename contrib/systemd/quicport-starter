@@ -42,6 +42,8 @@ LogshExecJSON() { LogshInfoJSON "$ $(_logshCmd "$@")" && "$@"; }
 QUICPORT_BIN="${QUICPORT_BIN:-quicport}"
 QUICPORT_LISTEN_ADDR="${QUICPORT_LISTEN_ADDR:-0.0.0.0:39000}"
 QUICPORT_CP_ADDR="${QUICPORT_CP_ADDR:-127.0.0.1:39000}"
+# HTTP IPC URL (derived from CP_ADDR, can be overridden)
+QUICPORT_CP_URL="${QUICPORT_CP_URL:-http://${QUICPORT_CP_ADDR}}"
 QUICPORT_LOG_DIR="${QUICPORT_LOG_DIR:-/var/log/quicport}"
 
 PROGRAM_NAME="quicport-starter"
@@ -78,7 +80,7 @@ fi
 LogshInfoJSON "[${PROGRAM_NAME}] Starting data-plane in separate cgroup..."
 LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_BIN=${QUICPORT_BIN}"
 LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_LISTEN_ADDR=${QUICPORT_LISTEN_ADDR}"
-LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_CP_ADDR=${QUICPORT_CP_ADDR}"
+LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_CP_URL=${QUICPORT_CP_URL}"
 
 # data-plane is started in a separate cgroup by systemd-run
 # the following three options are required to separate the cgroup
@@ -95,7 +97,7 @@ LogshExecJSON systemd-run \
     --log-output "${QUICPORT_LOG_DIR}/data-plane-${TIMESTAMP}.log" \
     data-plane \
     --listen "${QUICPORT_LISTEN_ADDR}" \
-    --control-plane-addr "${QUICPORT_CP_ADDR}" \
+    --control-plane-url "${QUICPORT_CP_URL}" \
     &
 
 # wait for data-plane to start

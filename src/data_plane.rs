@@ -29,8 +29,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::ipc::{
     cleanup_dataplane_files, ensure_dataplanes_dir, write_dataplane_port, write_dataplane_state,
-    AuthPolicy, ControlCommand, DataPlaneConfig, DataPlaneEvent, DataPlaneState, DataPlaneStatus,
-    IpcConnection,
+    AckCommandRequest, AuthPolicy, CommandWithId, ControlCommand, DataPlaneConfig, DataPlaneEvent,
+    DataPlaneState, DataPlaneStatus, IpcConnection, PollCommandsRequest, PollCommandsResponse,
+    RegisterDataPlaneRequest, RegisterDataPlaneResponse, ReportEventRequest,
 };
 use crate::protocol::{CloseReason, ControlMessage, ControlStream, Protocol, ProtocolError, ResponseStatus};
 use crate::quic::{
@@ -214,6 +215,188 @@ impl DataPlane {
             .collect()
     }
 }
+
+// =============================================================================
+// HTTP IPC クライアント
+// =============================================================================
+
+/// HTTP IPC クライアント
+///
+/// Control Plane と HTTP/JSON で通信するクライアント
+pub struct HttpIpcClient {
+    /// Control Plane の URL
+    base_url: String,
+    /// HTTP クライアント
+    client: reqwest::Client,
+    /// Data Plane ID（登録後に設定）
+    dp_id: Option<String>,
+}
+
+impl HttpIpcClient {
+    /// 新しい HTTP IPC クライアントを作成
+    pub fn new(base_url: &str) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(35))           // HTTP タイムアウト
+            .connect_timeout(Duration::from_secs(5))    // 接続タイムアウト
+            .tcp_keepalive(Duration::from_secs(15))     // TCP キープアライブ
+            .pool_idle_timeout(Duration::from_secs(90)) // コネクションプール
+            .build()
+            .expect("Failed to create HTTP client");
+
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            client,
+            dp_id: None,
+        }
+    }
+
+    /// Control Plane に登録して認証ポリシーを取得
+    pub async fn register(
+        &mut self,
+        pid: u32,
+        listen_addr: &str,
+    ) -> anyhow::Result<(AuthPolicy, DataPlaneConfig)> {
+        let url = format!("{}/api/v1/RegisterDataPlane", self.base_url);
+        let request = RegisterDataPlaneRequest {
+            pid,
+            listen_addr: listen_addr.to_string(),
+        };
+
+        debug!("RegisterDataPlane: url={}, pid={}", url, pid);
+
+        let response = self.client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send RegisterDataPlane request")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "RegisterDataPlane failed: status={}, body={}",
+                status, text
+            ));
+        }
+
+        let resp: RegisterDataPlaneResponse = response
+            .json()
+            .await
+            .context("Failed to parse RegisterDataPlane response")?;
+
+        self.dp_id = Some(resp.dp_id.clone());
+        info!("Registered with Control Plane as {}", resp.dp_id);
+
+        Ok((resp.auth_policy, resp.config))
+    }
+
+    /// コマンドをポーリング（長ポーリング）
+    pub async fn poll_commands(&self, wait_timeout_secs: u64) -> anyhow::Result<Vec<CommandWithId>> {
+        let dp_id = self.dp_id.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not registered with Control Plane"))?;
+
+        let url = format!("{}/api/v1/PollCommands", self.base_url);
+        let request = PollCommandsRequest {
+            dp_id: dp_id.clone(),
+            wait_timeout_secs,
+        };
+
+        let response = self.client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send PollCommands request")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "PollCommands failed: status={}, body={}",
+                status, text
+            ));
+        }
+
+        let resp: PollCommandsResponse = response
+            .json()
+            .await
+            .context("Failed to parse PollCommands response")?;
+
+        Ok(resp.commands)
+    }
+
+    /// コマンドの実行結果を報告
+    pub async fn ack_command(
+        &self,
+        cmd_id: &str,
+        status_str: &str,
+        result: Option<DataPlaneStatus>,
+    ) -> anyhow::Result<()> {
+        let dp_id = self.dp_id.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not registered with Control Plane"))?;
+
+        let url = format!("{}/api/v1/AckCommand", self.base_url);
+        let request = AckCommandRequest {
+            dp_id: dp_id.clone(),
+            cmd_id: cmd_id.to_string(),
+            status: status_str.to_string(),
+            result,
+        };
+
+        let response = self.client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send AckCommand request")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "AckCommand failed: status={}, body={}",
+                status, text
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// イベントを報告
+    pub async fn report_event(&self, event: DataPlaneEvent) -> anyhow::Result<()> {
+        let dp_id = self.dp_id.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not registered with Control Plane"))?;
+
+        let url = format!("{}/api/v1/ReportEvent", self.base_url);
+        let request = ReportEventRequest {
+            dp_id: dp_id.clone(),
+            event,
+        };
+
+        let response = self.client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send ReportEvent request")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "ReportEvent failed: status={}, body={}",
+                status, text
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+// =============================================================================
+// 接続管理
+// =============================================================================
 
 /// アクティブな接続を管理
 struct ConnectionManager {
@@ -409,15 +592,16 @@ pub async fn run(config: DataPlaneConfig, auth_policy: Option<AuthPolicy>) -> Re
     Ok(())
 }
 
-/// コントロールプレーンに接続してデータプレーンを起動
+/// コントロールプレーンに HTTP IPC で接続してデータプレーンを起動
 ///
-/// cgroup 分離アーキテクチャ用のモード:
+/// HTTP IPC アーキテクチャ用のモード:
 /// 1. STARTING 状態で起動
-/// 2. cp への接続をリトライ（最大 30 秒程度）
-/// 3. 接続成功後、認証ポリシーを受信
+/// 2. HTTP で CP に登録（リトライ付き）
+/// 3. 登録成功後、認証ポリシーを取得
 /// 4. ACTIVE 状態に遷移
 /// 5. SO_REUSEPORT で QUIC ポートを LISTEN 開始
-pub async fn run_with_control_plane(config: DataPlaneConfig, cp_addr: SocketAddr) -> Result<()> {
+/// 6. 長ポーリングでコマンドを待機
+pub async fn run_with_control_plane_url(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     let data_plane = DataPlane::new(config.clone());
 
     // ディレクトリを作成
@@ -429,55 +613,56 @@ pub async fn run_with_control_plane(config: DataPlaneConfig, cp_addr: SocketAddr
     data_plane.set_state(DataPlaneState::Starting).await;
     info!(
         "Data plane starting (connecting to control plane at {})",
-        cp_addr
+        cp_url
     );
 
-    // コントロールプレーンに接続（リトライ付き）
-    let mut cp_conn = connect_to_control_plane(cp_addr, 30, Duration::from_secs(1)).await?;
-    info!("Connected to control plane at {}", cp_addr);
+    // HTTP IPC クライアントを作成
+    let mut http_client = HttpIpcClient::new(cp_url);
+
+    // コントロールプレーンに登録（リトライ付き）
+    let (auth_policy, dp_config) = {
+        let mut retries = 0;
+        let max_retries = 30;
+        loop {
+            match http_client.register(pid, &config.listen_addr.to_string()).await {
+                Ok(result) => break result,
+                Err(e) => {
+                    retries += 1;
+                    if retries > max_retries {
+                        return Err(anyhow::anyhow!(
+                            "Failed to register with control plane after {} attempts: {}",
+                            max_retries,
+                            e
+                        ));
+                    }
+                    debug!(
+                        "Retrying registration to control plane ({}/{}): {}",
+                        retries, max_retries, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    };
+
+    info!("Registered with control plane, received auth policy");
+
+    // 認証ポリシーと設定を適用
+    data_plane.set_auth_policy(auth_policy).await;
+    data_plane.set_config(dp_config).await;
 
     // Ready イベントを送信
     let event = DataPlaneEvent::Ready {
         pid,
         listen_addr: config.listen_addr.to_string(),
     };
-    cp_conn.send_event(&event).await?;
+    if let Err(e) = http_client.report_event(event).await {
+        warn!("Failed to report Ready event: {}", e);
+    }
 
-    // 認証ポリシーを受信（SetAuthPolicy コマンド）
-    let auth_policy = match cp_conn.recv_command().await {
-        Ok(ControlCommand::SetAuthPolicy(policy)) => {
-            info!("Received auth policy from control plane");
-            policy
-        }
-        Ok(cmd) => {
-            return Err(anyhow::anyhow!(
-                "Expected SetAuthPolicy, got {:?}",
-                cmd
-            ));
-        }
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "Failed to receive auth policy: {}",
-                e
-            ));
-        }
-    };
-
-    // 認証ポリシーを設定
-    data_plane.set_auth_policy(auth_policy).await;
-
-    // 確認レスポンスを送信
-    let status = data_plane.get_status().await?;
-    cp_conn.send_event(&DataPlaneEvent::Status(status)).await?;
-
-    // IPC 用 TCP リスナーを作成（OS が空きポートを自動割り当て）
-    let ipc_listener = TcpListener::bind("127.0.0.1:0").await?;
-    let ipc_port = ipc_listener.local_addr()?.port();
-
-    // ポート番号をファイルに書き込む
-    write_dataplane_port(pid, ipc_port)?;
-
-    info!("Data plane IPC listening on 127.0.0.1:{}", ipc_port);
+    // IPC 用 TCP リスナーは不要（HTTP IPC を使用するため）
+    // 状態ファイルは互換性のために作成
+    write_dataplane_port(pid, 0)?; // ポート 0 は HTTP IPC モードを示す
 
     // QUIC エンドポイントを作成
     let endpoint = create_server_endpoint(config.listen_addr, "quicport-dataplane")?;
@@ -491,25 +676,49 @@ pub async fn run_with_control_plane(config: DataPlaneConfig, cp_addr: SocketAddr
     let _drain_rx = data_plane.subscribe_drain();
     let drain_timeout = data_plane.get_config().await.drain_timeout;
 
-    // cp からのコマンドを処理するタスク
-    let dp_for_cp = data_plane.clone();
+    // HTTP IPC でコマンドをポーリングするタスク
+    let dp_for_poll = data_plane.clone();
+    let http_client = std::sync::Arc::new(tokio::sync::Mutex::new(http_client));
+    let http_client_for_poll = http_client.clone();
     tokio::spawn(async move {
         loop {
-            match cp_conn.recv_command().await {
-                Ok(cmd) => {
-                    let response = process_ipc_command(&dp_for_cp, cmd).await;
-                    if cp_conn.send_event(&response).await.is_err() {
-                        info!("Control plane connection closed");
-                        break;
+            let commands = {
+                let client = http_client_for_poll.lock().await;
+                match client.poll_commands(30).await {
+                    Ok(cmds) => cmds,
+                    Err(e) => {
+                        // 接続エラーの場合はバックオフ付きでリトライ
+                        if e.to_string().contains("connect") {
+                            warn!("Connection error polling commands: {}, retrying in 1s", e);
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        } else {
+                            debug!("PollCommands error: {}, retrying in 5s", e);
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
+                        continue;
                     }
                 }
-                Err(crate::ipc::IpcError::ConnectionClosed) => {
-                    info!("Control plane connection closed");
-                    break;
+            };
+
+            for cmd in commands {
+                debug!("Received command: id={}, {:?}", cmd.id, cmd.command);
+                let response = process_ipc_command(&dp_for_poll, cmd.command.clone()).await;
+
+                // コマンドの実行結果を報告
+                let result = match &response {
+                    DataPlaneEvent::Status(status) => Some(status.clone()),
+                    _ => None,
+                };
+
+                let client = http_client_for_poll.lock().await;
+                if let Err(e) = client.ack_command(&cmd.id, "completed", result).await {
+                    warn!("Failed to ack command {}: {}", cmd.id, e);
                 }
-                Err(e) => {
-                    warn!("Error receiving command from control plane: {}", e);
-                    break;
+
+                // Shutdown コマンドの場合はループを抜ける
+                if matches!(cmd.command, ControlCommand::Shutdown) {
+                    info!("Shutdown command received, exiting poll loop");
+                    return;
                 }
             }
         }
@@ -550,23 +759,6 @@ pub async fn run_with_control_plane(config: DataPlaneConfig, cp_addr: SocketAddr
             } => {
                 info!("All connections drained, shutting down");
                 break;
-            }
-
-            // IPC 接続
-            result = ipc_listener.accept() => {
-                match result {
-                    Ok((stream, _)) => {
-                        let dp = data_plane.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = handle_ipc_connection(dp, stream).await {
-                                error!("IPC handler error: {}", e);
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        error!("Failed to accept IPC connection: {}", e);
-                    }
-                }
             }
 
             // QUIC 接続
@@ -616,37 +808,6 @@ pub async fn run_with_control_plane(config: DataPlaneConfig, cp_addr: SocketAddr
     info!("Data plane terminated");
 
     Ok(())
-}
-
-/// コントロールプレーンに接続（リトライ付き）
-async fn connect_to_control_plane(
-    addr: SocketAddr,
-    max_retries: u32,
-    retry_delay: Duration,
-) -> Result<IpcConnection> {
-    let mut retries = 0;
-    loop {
-        match TcpStream::connect(addr).await {
-            Ok(stream) => {
-                return Ok(IpcConnection::new(stream));
-            }
-            Err(e) => {
-                retries += 1;
-                if retries > max_retries {
-                    return Err(anyhow::anyhow!(
-                        "Failed to connect to control plane after {} attempts: {}",
-                        max_retries,
-                        e
-                    ));
-                }
-                debug!(
-                    "Retrying connection to control plane ({}/{}): {}",
-                    retries, max_retries, e
-                );
-                tokio::time::sleep(retry_delay).await;
-            }
-        }
-    }
 }
 
 /// IPC 接続を処理

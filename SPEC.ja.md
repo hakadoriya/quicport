@@ -268,8 +268,16 @@ quicport data-plane [OPTIONS]
 |-----------|------|------|
 | `--listen`, `-l` | No | QUIC リッスンアドレス（デフォルト: `0.0.0.0:39000`） |
 | `--drain-timeout` | No | DRAIN 状態のタイムアウト秒数（デフォルト: `0` = 無限） |
+| `--control-plane-url` | No | コントロールプレーンの HTTP API URL（HTTP IPC モード用） |
 
-**認証設定（環境変数）:**
+**起動モード:**
+
+データプレーンは 2 つのモードで起動できます:
+
+1. **環境変数モード（直接起動）**: 認証設定を環境変数から取得
+2. **HTTP IPC モード**: `--control-plane-url` でコントロールプレーンに接続し、認証設定を取得
+
+**認証設定（環境変数モード）:**
 
 データプレーンは認証設定を環境変数から取得します：
 
@@ -283,14 +291,17 @@ quicport data-plane [OPTIONS]
 **例:**
 
 ```bash
-# PSK 認証でデータプレーンを直接起動
+# PSK 認証でデータプレーンを直接起動（環境変数モード）
 QUICPORT_DP_AUTH_TYPE=psk QUICPORT_DP_PSK="secret" quicport data-plane --listen 0.0.0.0:39000
 
-# X25519 認証でデータプレーンを起動
+# X25519 認証でデータプレーンを起動（環境変数モード）
 QUICPORT_DP_AUTH_TYPE=x25519 \
   QUICPORT_DP_SERVER_PRIVKEY="SERVER_PRIVKEY" \
   QUICPORT_DP_CLIENT_PUBKEYS="CLIENT_PUBKEY1,CLIENT_PUBKEY2" \
   quicport data-plane
+
+# HTTP IPC モードでデータプレーンを起動
+quicport data-plane --listen 0.0.0.0:39000 --control-plane-url http://127.0.0.1:39000
 ```
 
 ### 制御コマンド (ctl)
@@ -392,8 +403,30 @@ quicport はサーバー再起動時の接続維持を実現するため、デ�
 | コンポーネント | 責務 |
 |--------------|------|
 | **シェルスクリプト** | systemd-run での dp 起動、exec での cp 起動 |
-| **コントロールプレーン** | 認証ポリシー管理、API サーバー、dp へのコマンド送信 |
+| **コントロールプレーン** | 認証ポリシー管理、API サーバー、HTTP IPC での dp 管理 |
 | **データプレーン** | QUIC 終端、クライアント認証、TCP/UDP 接続維持、データ転送 |
+
+**systemd 環境での起動例 (quicport-starter):**
+
+```bash
+#!/bin/bash
+# quicport-starter スクリプト概要
+# 設定例:
+#   QUICPORT_LISTEN_ADDR=0.0.0.0:39000  # QUIC リッスンアドレス
+#   QUICPORT_CP_ADDR=127.0.0.1:39000     # CP Private API アドレス
+#   QUICPORT_CP_URL=http://127.0.0.1:39000
+
+# 1. データプレーンを別 cgroup で起動（HTTP IPC モード）
+systemd-run --scope \
+  quicport data-plane \
+    --listen "${QUICPORT_LISTEN_ADDR}" \
+    --control-plane-url "${QUICPORT_CP_URL}"
+
+# 2. コントロールプレーンを起動（PID を引き継ぎ）
+exec quicport server \
+  --listen "${QUICPORT_CP_ADDR}" \
+  ...
+```
 
 #### 起動シーケンス
 
@@ -508,6 +541,51 @@ STARTING --> ACTIVE --> DRAINING --> TERMINATED
 | `ACTIVE` | 通常稼働中、新規接続受付可能 |
 | `DRAINING` | ドレイン中、新規接続拒否、既存接続のみ処理 |
 | `TERMINATED` | 終了済み |
+
+#### HTTP IPC 通信
+
+コントロールプレーンとデータプレーン間の通信には HTTP/JSON API を使用します（RPC スタイル）。
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ HTTP IPC アーキテクチャ                                             │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Data Plane                       Control Plane                     │
+│       │                               │                             │
+│       │ ──POST /RegisterDataPlane───> │ (起動時)                    │
+│       │ <─── { dp_id, auth_policy } ─ │                             │
+│       │                               │                             │
+│       │ ──POST /PollCommands────────> │ (長ポーリング)              │
+│       │ <─── { commands: [...] } ──── │                             │
+│       │                               │                             │
+│       │ ──POST /AckCommand──────────> │ (コマンド応答)              │
+│       │ <─── { acknowledged } ──────  │                             │
+│       │                               │                             │
+│       │ ──POST /ReportEvent─────────> │ (接続イベント)              │
+│       │ <─── { acknowledged } ──────  │                             │
+│                                                                     │
+│  CLI / 外部                                                         │
+│       │                               │                             │
+│       │ ──POST /DrainDataPlane──────> │ (管理操作)                  │
+│       │ <─── { status: draining } ─── │                             │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**HTTP IPC のメリット:**
+
+- デバッグのしやすさ（curl で確認可能）
+- プロトコルの標準化（HTTP/JSON）
+- 外部連携の容易さ
+
+**タイムアウト設定:**
+
+| 項目 | 値 | 説明 |
+|------|-----|------|
+| サーバー側 wait_timeout | 30 秒 | コマンドがない場合、30 秒後に空レスポンスを返す |
+| クライアント HTTP タイムアウト | 35 秒 | サーバーの wait_timeout より少し長く |
+| TCP キープアライブ | 15 秒間隔 | 接続が切れないようにキープアライブ |
 
 ### トランスポート層
 
@@ -1221,6 +1299,15 @@ localhost からのみアクセス可能な管理用 API です。
 | `/healthcheck` | GET | ヘルスチェック |
 | `/metrics` | GET | Prometheus 形式のメトリクス |
 | `/api/graceful-restart` | POST | グレースフルリスタートを実行 |
+| `/api/v1/RegisterDataPlane` | POST | データプレーン登録（HTTP IPC） |
+| `/api/v1/PollCommands` | POST | コマンドポーリング（HTTP IPC） |
+| `/api/v1/AckCommand` | POST | コマンド応答（HTTP IPC） |
+| `/api/v1/ReportEvent` | POST | イベント報告（HTTP IPC） |
+| `/api/v1/ListDataPlanes` | POST | 全データプレーン一覧 |
+| `/api/v1/GetDataPlaneStatus` | POST | データプレーン状態取得 |
+| `/api/v1/DrainDataPlane` | POST | データプレーンをドレイン |
+| `/api/v1/ShutdownDataPlane` | POST | データプレーンをシャットダウン |
+| `/api/v1/GetConnections` | POST | 接続一覧取得 |
 
 ### Public API サーバー
 
@@ -1326,6 +1413,272 @@ quicport_auth_x25519_failed_total 2
 | `quicport_auth_psk_failed_total` | counter | PSK 認証失敗回数 |
 | `quicport_auth_x25519_success_total` | counter | X25519 認証成功回数 |
 | `quicport_auth_x25519_failed_total` | counter | X25519 認証失敗回数 |
+
+### HTTP IPC エンドポイント詳細
+
+コントロールプレーンとデータプレーン間の通信に使用する HTTP IPC エンドポイントです。
+すべてのエンドポイントは POST メソッドを使用する RPC ライクな設計です。
+
+#### POST /api/v1/RegisterDataPlane
+
+データプレーンの登録と認証ポリシーの取得。
+
+**リクエスト:**
+
+```json
+{
+  "pid": 12345,
+  "listen_addr": "0.0.0.0:39000"
+}
+```
+
+**レスポンス:**
+
+```json
+{
+  "dp_id": "dp_12345",
+  "auth_policy": {
+    "type": "psk",
+    "psk": "secret"
+  },
+  "config": {
+    "drain_timeout": 0,
+    "idle_connection_timeout": 300
+  }
+}
+```
+
+#### POST /api/v1/PollCommands
+
+コマンドの長ポーリング取得（30 秒タイムアウト）。
+
+**リクエスト:**
+
+```json
+{
+  "dp_id": "dp_12345",
+  "wait_timeout_secs": 30
+}
+```
+
+**レスポンス:**
+
+```json
+{
+  "commands": [
+    {
+      "id": "cmd_001",
+      "command": {
+        "type": "Drain"
+      }
+    },
+    {
+      "id": "cmd_002",
+      "command": {
+        "type": "SetConfig",
+        "drain_timeout": 60
+      }
+    }
+  ]
+}
+```
+
+#### POST /api/v1/AckCommand
+
+コマンド実行結果の応答。
+
+**リクエスト:**
+
+```json
+{
+  "dp_id": "dp_12345",
+  "cmd_id": "cmd_001",
+  "status": "completed",
+  "result": {
+    "state": "DRAINING",
+    "active_connections": 5
+  }
+}
+```
+
+**レスポンス:**
+
+```json
+{
+  "acknowledged": true
+}
+```
+
+#### POST /api/v1/ReportEvent
+
+接続イベントの報告。
+
+**リクエスト:**
+
+```json
+{
+  "dp_id": "dp_12345",
+  "event": {
+    "type": "ConnectionClosed",
+    "connection_id": 42,
+    "bytes_sent": 1024,
+    "bytes_received": 2048
+  }
+}
+```
+
+**レスポンス:**
+
+```json
+{
+  "acknowledged": true
+}
+```
+
+#### POST /api/v1/ListDataPlanes
+
+全データプレーンの一覧を取得。
+
+**リクエスト:**
+
+```json
+{}
+```
+
+**レスポンス:**
+
+```json
+{
+  "dataplanes": [
+    {
+      "dp_id": "dp_12345",
+      "pid": 12345,
+      "state": "ACTIVE",
+      "active_connections": 5,
+      "bytes_sent": 1024,
+      "bytes_received": 2048
+    }
+  ]
+}
+```
+
+#### POST /api/v1/GetDataPlaneStatus
+
+特定データプレーンの詳細状態を取得。
+
+**リクエスト:**
+
+```json
+{
+  "dp_id": "dp_12345"
+}
+```
+
+**レスポンス:**
+
+```json
+{
+  "dp_id": "dp_12345",
+  "pid": 12345,
+  "state": "ACTIVE",
+  "active_connections": 5,
+  "bytes_sent": 1024,
+  "bytes_received": 2048,
+  "started_at": 1234567890
+}
+```
+
+#### POST /api/v1/DrainDataPlane
+
+データプレーンをドレイン状態に移行。
+
+**リクエスト:**
+
+```json
+{
+  "dp_id": "dp_12345"
+}
+```
+
+**レスポンス:**
+
+```json
+{
+  "status": "draining"
+}
+```
+
+#### POST /api/v1/ShutdownDataPlane
+
+データプレーンをシャットダウン。
+
+**リクエスト:**
+
+```json
+{
+  "dp_id": "dp_12345"
+}
+```
+
+**レスポンス:**
+
+```json
+{
+  "status": "shutdown_initiated"
+}
+```
+
+#### POST /api/v1/GetConnections
+
+特定データプレーンの接続一覧を取得。
+
+**リクエスト:**
+
+```json
+{
+  "dp_id": "dp_12345"
+}
+```
+
+**レスポンス:**
+
+```json
+{
+  "connections": [
+    {
+      "id": 1,
+      "remote_addr": "192.168.1.100:50000",
+      "protocol": "TCP",
+      "bytes_sent": 1024,
+      "bytes_received": 2048
+    }
+  ]
+}
+```
+
+**手動テスト例:**
+
+```bash
+# データプレーン一覧確認
+curl -X POST http://127.0.0.1:39000/api/v1/ListDataPlanes \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# 特定データプレーンの状態確認
+curl -X POST http://127.0.0.1:39000/api/v1/GetDataPlaneStatus \
+  -H "Content-Type: application/json" \
+  -d '{"dp_id": "dp_12345"}'
+
+# データプレーンをドレイン
+curl -X POST http://127.0.0.1:39000/api/v1/DrainDataPlane \
+  -H "Content-Type: application/json" \
+  -d '{"dp_id": "dp_12345"}'
+
+# 接続一覧
+curl -X POST http://127.0.0.1:39000/api/v1/GetConnections \
+  -H "Content-Type: application/json" \
+  -d '{"dp_id": "dp_12345"}'
+```
 
 ## 技術スタック
 
