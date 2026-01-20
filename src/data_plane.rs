@@ -56,7 +56,7 @@ pub struct DataPlane {
     /// 起動時刻
     started_at: u64,
     /// PID
-    pid: u32,
+    pub pid: u32,
     /// シャットダウン通知用
     shutdown_tx: broadcast::Sender<()>,
     /// ドレイン通知用
@@ -680,15 +680,45 @@ pub async fn run_with_control_plane_url(config: DataPlaneConfig, cp_url: &str) -
     let dp_for_poll = data_plane.clone();
     let http_client = std::sync::Arc::new(tokio::sync::Mutex::new(http_client));
     let http_client_for_poll = http_client.clone();
+    let config_for_poll = config.clone();
     tokio::spawn(async move {
         loop {
             let commands = {
-                let client = http_client_for_poll.lock().await;
+                let mut client = http_client_for_poll.lock().await;
                 match client.poll_commands(30).await {
                     Ok(cmds) => cmds,
                     Err(e) => {
+                        let err_str = e.to_string();
+
+                        // NOT_FOUND (404) の場合は再登録を試みる
+                        // control-plane が再起動した場合、古い dp_id は認識されず 404 が返る
+                        if err_str.contains("NOT_FOUND") || err_str.contains("status=404") {
+                            warn!("Registration lost, attempting re-registration...");
+                            match client.register(dp_for_poll.pid, &config_for_poll.listen_addr.to_string()).await {
+                                Ok((auth_policy, dp_config)) => {
+                                    info!("Re-registered with control plane");
+                                    dp_for_poll.set_auth_policy(auth_policy).await;
+                                    dp_for_poll.set_config(dp_config).await;
+                                    // Ready イベントを送信
+                                    let event = DataPlaneEvent::Ready {
+                                        pid: dp_for_poll.pid,
+                                        listen_addr: config_for_poll.listen_addr.to_string(),
+                                    };
+                                    if let Err(e) = client.report_event(event).await {
+                                        warn!("Failed to report Ready event after re-registration: {}", e);
+                                    }
+                                    continue; // 再度 poll を試行
+                                }
+                                Err(re) => {
+                                    warn!("Re-registration failed: {}, retrying in 5s", re);
+                                    tokio::time::sleep(Duration::from_secs(5)).await;
+                                    continue;
+                                }
+                            }
+                        }
+
                         // 接続エラーの場合はバックオフ付きでリトライ
-                        if e.to_string().contains("connect") {
+                        if err_str.contains("connect") || err_str.contains("Connection refused") {
                             warn!("Connection error polling commands: {}, retrying in 1s", e);
                             tokio::time::sleep(Duration::from_secs(1)).await;
                         } else {
