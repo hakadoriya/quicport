@@ -622,6 +622,7 @@ pub async fn run_with_api(
     auth_policy: AuthPolicy,
     statistics: Arc<ServerStatistics>,
     api_config: Option<ApiConfig>,
+    skip_dataplane_start: bool,
 ) -> Result<()> {
     // HTTP IPC 状態を作成（API サーバーと ControlPlane で共有）
     let http_ipc = Arc::new(HttpIpcState::new());
@@ -704,8 +705,12 @@ pub async fn run_with_api(
     // API サーバーが起動するのを待つ
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // データプレーンを起動（HTTP IPC モードでは明示的に起動が必要）
-    cp_for_dataplane.start_dataplane().await?;
+    // データプレーンを起動（skip_dataplane_start が false の場合のみ）
+    if !skip_dataplane_start {
+        cp_for_dataplane.start_dataplane().await?;
+    } else {
+        info!("Skipping automatic data plane startup (--no-auto-dataplane)");
+    }
 
     // 終了シグナルを待機
     #[cfg(unix)]

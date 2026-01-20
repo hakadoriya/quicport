@@ -147,6 +147,11 @@ enum Commands {
         #[arg(long, default_value = "false")]
         no_private_api: bool,
 
+        /// Do not automatically start a data-plane process.
+        /// Use this when data-plane is started separately (e.g., via systemd-run)
+        #[arg(long, default_value = "false")]
+        no_auto_dataplane: bool,
+
         /// Server's private key in Base64 format (for mutual authentication)
         #[arg(long, env = "QUICPORT_PRIVKEY")]
         privkey: Option<String>,
@@ -649,6 +654,7 @@ async fn main() -> Result<()> {
             no_public_api,
             private_api_listen,
             no_private_api,
+            no_auto_dataplane,
             privkey,
             privkey_file,
             client_pubkeys,
@@ -708,7 +714,7 @@ async fn main() -> Result<()> {
                 }
             }
 
-            control_plane::run_with_api(listen, auth_policy, statistics, api_config).await?;
+            control_plane::run_with_api(listen, auth_policy, statistics, api_config, no_auto_dataplane).await?;
         }
         Commands::Client {
             server,

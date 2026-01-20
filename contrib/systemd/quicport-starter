@@ -108,8 +108,10 @@ done
 LogshInfoJSON "[${PROGRAM_NAME}] Starting control-plane..."
 
 # replace the control-plane with exec
+# --no-auto-dataplane: data-plane is already started above via systemd-run
 LogshExecJSON exec "${QUICPORT_BIN}" \
     --log-format json \
     control-plane \
     --listen "${QUICPORT_CP_ADDR}" \
+    --no-auto-dataplane \
     "${QUICPORT_AUTH_ARGS[@]}"

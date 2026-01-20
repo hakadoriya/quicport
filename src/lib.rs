@@ -41,7 +41,7 @@
 //!     let listen: SocketAddr = "0.0.0.0:39000".parse()?;
 //!     let auth_policy = AuthPolicy::Psk { psk: "secret".to_string() };
 //!     let statistics = Arc::new(ServerStatistics::new());
-//!     control_plane::run_with_api(listen, auth_policy, statistics, None).await
+//!     control_plane::run_with_api(listen, auth_policy, statistics, None, false).await
 //! }
 //! ```
 //!

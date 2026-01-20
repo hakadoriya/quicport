@@ -65,6 +65,7 @@ quicport control-plane --listen <bind_address>:<port> --privkey <server_private_
 | `--private-api-listen` | No | Private API サーバーのアドレスとポート（デフォルト: `127.0.0.1:<listen_port>`） |
 | `--no-private-api` | No | Private API サーバーを無効化 |
 | `--no-public-api` | No | Public API サーバーを無効化 |
+| `--no-auto-dataplane` | No | データプレーンを自動起動しない（systemd-run 等で別途起動する場合に使用） |
 | `--privkey` | Yes** | サーバーの秘密鍵（Base64 形式、相互認証用）。環境変数 `QUICPORT_PRIVKEY` でも指定可 |
 | `--privkey-file` | Yes** | サーバーの秘密鍵ファイルパス。環境変数 `QUICPORT_PRIVKEY_FILE` でも指定可 |
 | `--client-pubkeys` | Yes* | 認可するクライアントの公開鍵（Base64 形式）。複数指定はカンマ区切り。環境変数 `QUICPORT_CLIENT_PUBKEYS` でも指定可 |
