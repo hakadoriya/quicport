@@ -204,6 +204,36 @@ impl TestClient {
         Self { process }
     }
 
+    /// PSK 認証で UDP クライアントを起動（RPF: Remote Port Forwarding）
+    fn start_udp_with_psk(server_addr: &str, remote_port: u16, local_port: u16, psk: &str) -> Self {
+        eprintln!(
+            "[TestClient] Starting UDP with PSK: server={}, remote={}/udp, local={}/udp",
+            server_addr, remote_port, local_port
+        );
+
+        let process = Command::new(quicport_binary())
+            .args([
+                "client",
+                "-s",
+                server_addr,
+                "--remote-source",
+                &format!("{}/udp", remote_port),
+                "--local-destination",
+                &format!("{}/udp", local_port),
+                "--psk",
+                psk,
+                "--insecure",
+            ])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("Failed to start quicport client");
+
+        thread::sleep(Duration::from_secs(2));
+
+        Self { process }
+    }
+
     /// SIGTERM を送信してグレースフルシャットダウン
     #[cfg(unix)]
     fn send_sigterm(&self) {
@@ -834,31 +864,12 @@ fn test_udp_tunnel() {
     let _server = TestServer::start_with_psk(server_port, test_keys::TEST_PSK);
 
     // 3. quicport クライアントを起動（UDP モード）
-    eprintln!(
-        "[TestClient] Starting UDP client: server=127.0.0.1:{}, remote={}/udp, local={}/udp",
-        server_port, remote_port, local_port
+    let _client = TestClient::start_udp_with_psk(
+        &format!("127.0.0.1:{}", server_port),
+        remote_port,
+        local_port,
+        test_keys::TEST_PSK,
     );
-
-    let _client_process = Command::new(quicport_binary())
-        .args([
-            "client",
-            "-s",
-            &format!("127.0.0.1:{}", server_port),
-            "--remote-source",
-            &format!("{}/udp", remote_port),
-            "--local-destination",
-            &format!("{}/udp", local_port),
-            "--psk",
-            test_keys::TEST_PSK,
-            "--insecure",
-        ])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("Failed to start quicport client");
-
-    // クライアントがサーバーに接続し、トンネルを確立するまで待機
-    thread::sleep(Duration::from_secs(2));
 
     // 4. トンネル経由で UDP パケットを送受信
     let test_message = b"Hello UDP tunnel!";
@@ -1082,6 +1093,41 @@ impl TestLpfClient {
 
         Self { process }
     }
+
+    /// PSK 認証で UDP LPF クライアントを起動
+    fn start_udp_with_psk(
+        server_addr: &str,
+        local_port: u16,
+        remote_destination: &str,
+        psk: &str,
+    ) -> Self {
+        eprintln!(
+            "[TestLpfClient] Starting UDP with PSK: server={}, local_source={}/udp, remote_dest={}",
+            server_addr, local_port, remote_destination
+        );
+
+        let process = Command::new(quicport_binary())
+            .args([
+                "client",
+                "-s",
+                server_addr,
+                "--local-source",
+                &format!("{}/udp", local_port),
+                "--remote-destination",
+                remote_destination,
+                "--psk",
+                psk,
+                "--insecure",
+            ])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("Failed to start quicport LPF client");
+
+        thread::sleep(Duration::from_secs(2));
+
+        Self { process }
+    }
 }
 
 impl Drop for TestLpfClient {
@@ -1199,31 +1245,12 @@ fn test_local_port_forwarding_udp() {
     let _server = TestServer::start_with_psk(server_port, test_keys::TEST_PSK);
 
     // 3. quicport クライアントを起動（LPF モード、UDP）
-    eprintln!(
-        "[TestLpfClient] Starting UDP LPF: server=127.0.0.1:{}, local={}/udp, remote=127.0.0.1:{}/udp",
-        server_port, local_source_port, remote_service_port
+    let _client = TestLpfClient::start_udp_with_psk(
+        &format!("127.0.0.1:{}", server_port),
+        local_source_port,
+        &format!("127.0.0.1:{}/udp", remote_service_port),
+        test_keys::TEST_PSK,
     );
-
-    let _client_process = Command::new(quicport_binary())
-        .args([
-            "client",
-            "-s",
-            &format!("127.0.0.1:{}", server_port),
-            "--local-source",
-            &format!("{}/udp", local_source_port),
-            "--remote-destination",
-            &format!("127.0.0.1:{}/udp", remote_service_port),
-            "--psk",
-            test_keys::TEST_PSK,
-            "--insecure",
-        ])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("Failed to start quicport LPF client");
-
-    // クライアントがサーバーに接続し、トンネルを確立するまで待機
-    thread::sleep(Duration::from_secs(2));
 
     // 4. トンネル経由で UDP パケットを送受信
     let test_message = b"Hello LPF UDP tunnel!";
