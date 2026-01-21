@@ -45,13 +45,13 @@ use tracing::{debug, info, warn};
 
 use crate::control_plane::ControlPlane;
 use crate::ipc::{
-    AckCommandRequest, AckCommandResponse, AuthPolicy, CommandWithId, ControlCommand,
-    DataPlaneConfig, DataPlaneEvent, DataPlaneSummary, DataPlaneState,
+    AckCommandRequest, AckCommandResponse, AuthPolicy, CommandWithId, ConnectionInfo,
+    ControlCommand, DataPlaneConfig, DataPlaneEvent, DataPlaneState, DataPlaneSummary,
     DrainDataPlaneRequest, DrainDataPlaneResponse, ErrorResponse, GetConnectionsRequest,
     GetConnectionsResponse, GetDataPlaneStatusRequest, GetDataPlaneStatusResponse,
     ListDataPlanesRequest, ListDataPlanesResponse, PollCommandsRequest, PollCommandsResponse,
     RegisterDataPlaneRequest, RegisterDataPlaneResponse, ReportEventRequest, ReportEventResponse,
-    ShutdownDataPlaneRequest, ShutdownDataPlaneResponse, ConnectionInfo,
+    ShutdownDataPlaneRequest, ShutdownDataPlaneResponse,
 };
 use crate::statistics::ServerStatistics;
 
@@ -166,7 +166,11 @@ impl HttpIpcState {
     }
 
     /// データプレーンにコマンドを送信
-    pub async fn send_command(&self, dp_id: &str, command: ControlCommand) -> Result<String, String> {
+    pub async fn send_command(
+        &self,
+        dp_id: &str,
+        command: ControlCommand,
+    ) -> Result<String, String> {
         let mut dataplanes = self.dataplanes.write().await;
         if let Some(dp) = dataplanes.get_mut(dp_id) {
             let cmd_id = self.next_command_id();
@@ -208,11 +212,15 @@ impl HttpIpcState {
             // タイムアウトチェック
             if start.elapsed() >= timeout {
                 let dataplanes = self.dataplanes.read().await;
-                let pending_count: usize = dataplanes.values()
+                let pending_count: usize = dataplanes
+                    .values()
                     .map(|dp| dp.pending_commands.len())
                     .sum();
                 if pending_count > 0 {
-                    warn!("Timeout waiting for commands to be delivered, {} commands still pending", pending_count);
+                    warn!(
+                        "Timeout waiting for commands to be delivered, {} commands still pending",
+                        pending_count
+                    );
                 }
                 break;
             }
@@ -426,7 +434,11 @@ async fn poll_commands(
 
             if !dp.pending_commands.is_empty() {
                 let commands: Vec<CommandWithId> = dp.pending_commands.drain(..).collect();
-                debug!("Returning {} commands immediately for {}", commands.len(), req.dp_id);
+                debug!(
+                    "Returning {} commands immediately for {}",
+                    commands.len(),
+                    req.dp_id
+                );
                 return (
                     StatusCode::OK,
                     Json(serde_json::json!(PollCommandsResponse { commands })),
@@ -457,7 +469,11 @@ async fn poll_commands(
     let mut dataplanes = state.http_ipc.dataplanes.write().await;
     if let Some(dp) = dataplanes.get_mut(&req.dp_id) {
         let commands: Vec<CommandWithId> = dp.pending_commands.drain(..).collect();
-        debug!("Returning {} commands after poll for {}", commands.len(), req.dp_id);
+        debug!(
+            "Returning {} commands after poll for {}",
+            commands.len(),
+            req.dp_id
+        );
         (
             StatusCode::OK,
             Json(serde_json::json!(PollCommandsResponse { commands })),
@@ -527,7 +543,10 @@ async fn report_event(
                 dp.pid = *pid;
                 dp.listen_addr = listen_addr.clone();
                 dp.state = DataPlaneState::Active;
-                info!("Data plane {} is ready (pid={}, addr={})", req.dp_id, pid, listen_addr);
+                info!(
+                    "Data plane {} is ready (pid={}, addr={})",
+                    req.dp_id, pid, listen_addr
+                );
             }
             DataPlaneEvent::Status(status) => {
                 dp.state = status.state;
@@ -535,7 +554,11 @@ async fn report_event(
                 dp.bytes_sent = status.bytes_sent;
                 dp.bytes_received = status.bytes_received;
             }
-            DataPlaneEvent::ConnectionOpened { connection_id, remote_addr, protocol } => {
+            DataPlaneEvent::ConnectionOpened {
+                connection_id,
+                remote_addr,
+                protocol,
+            } => {
                 dp.active_connections += 1;
                 dp.connections.push(ConnectionInfo {
                     connection_id: *connection_id,
@@ -543,7 +566,11 @@ async fn report_event(
                     protocol: protocol.clone(),
                 });
             }
-            DataPlaneEvent::ConnectionClosed { connection_id, bytes_sent, bytes_received } => {
+            DataPlaneEvent::ConnectionClosed {
+                connection_id,
+                bytes_sent,
+                bytes_received,
+            } => {
                 if dp.active_connections > 0 {
                     dp.active_connections -= 1;
                 }
@@ -565,7 +592,9 @@ async fn report_event(
 
         (
             StatusCode::OK,
-            Json(serde_json::json!(ReportEventResponse { acknowledged: true })),
+            Json(serde_json::json!(ReportEventResponse {
+                acknowledged: true
+            })),
         )
     } else {
         (
@@ -590,7 +619,9 @@ async fn list_data_planes(
 
     (
         StatusCode::OK,
-        Json(serde_json::json!(ListDataPlanesResponse { dataplanes: list })),
+        Json(serde_json::json!(ListDataPlanesResponse {
+            dataplanes: list
+        })),
     )
 }
 
@@ -627,7 +658,11 @@ async fn drain_data_plane(
 ) -> impl IntoResponse {
     info!("DrainDataPlane: dp_id={}", req.dp_id);
 
-    match state.http_ipc.send_command(&req.dp_id, ControlCommand::Drain).await {
+    match state
+        .http_ipc
+        .send_command(&req.dp_id, ControlCommand::Drain)
+        .await
+    {
         Ok(_) => (
             StatusCode::OK,
             Json(serde_json::json!(DrainDataPlaneResponse {
@@ -653,7 +688,11 @@ async fn shutdown_data_plane(
 ) -> impl IntoResponse {
     info!("ShutdownDataPlane: dp_id={}", req.dp_id);
 
-    match state.http_ipc.send_command(&req.dp_id, ControlCommand::Shutdown).await {
+    match state
+        .http_ipc
+        .send_command(&req.dp_id, ControlCommand::Shutdown)
+        .await
+    {
         Ok(_) => (
             StatusCode::OK,
             Json(serde_json::json!(ShutdownDataPlaneResponse {

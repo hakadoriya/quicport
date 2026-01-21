@@ -109,7 +109,11 @@ impl ServerStatistics {
         let mut output = String::new();
 
         // uptime
-        writeln!(output, "# HELP quicport_uptime_seconds Server uptime in seconds").unwrap();
+        writeln!(
+            output,
+            "# HELP quicport_uptime_seconds Server uptime in seconds"
+        )
+        .unwrap();
         writeln!(output, "# TYPE quicport_uptime_seconds gauge").unwrap();
         writeln!(output, "quicport_uptime_seconds {}", uptime).unwrap();
 
@@ -156,7 +160,12 @@ impl ServerStatistics {
         )
         .unwrap();
         writeln!(output, "# TYPE quicport_auth_psk_success_total counter").unwrap();
-        writeln!(output, "quicport_auth_psk_success_total {}", auth_psk_success).unwrap();
+        writeln!(
+            output,
+            "quicport_auth_psk_success_total {}",
+            auth_psk_success
+        )
+        .unwrap();
 
         // auth PSK failed
         writeln!(
@@ -174,7 +183,12 @@ impl ServerStatistics {
         )
         .unwrap();
         writeln!(output, "# TYPE quicport_auth_x25519_success_total counter").unwrap();
-        writeln!(output, "quicport_auth_x25519_success_total {}", auth_x25519_success).unwrap();
+        writeln!(
+            output,
+            "quicport_auth_x25519_success_total {}",
+            auth_x25519_success
+        )
+        .unwrap();
 
         // auth X25519 failed
         writeln!(
@@ -183,7 +197,12 @@ impl ServerStatistics {
         )
         .unwrap();
         writeln!(output, "# TYPE quicport_auth_x25519_failed_total counter").unwrap();
-        writeln!(output, "quicport_auth_x25519_failed_total {}", auth_x25519_failed).unwrap();
+        writeln!(
+            output,
+            "quicport_auth_x25519_failed_total {}",
+            auth_x25519_failed
+        )
+        .unwrap();
 
         output
     }
