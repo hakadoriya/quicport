@@ -21,10 +21,10 @@
 //! | `POST /api/v1/ShutdownDataPlane` | シャットダウン | CLI/外部 |
 //! | `POST /api/v1/GetConnections` | 接続一覧 | CLI/外部 |
 //!
-//! ## レガシー API
+//! ## API アクセス
 //!
-//! - Private API: localhost からのみアクセス可能
-//! - Public API: インターネットから見える（QUIC と同じポートの TCP）
+//! - Private API: localhost からのみアクセス可能（/metrics, /graceful-restart, /api/v1/*）
+//! - Public API: インターネットから見える（/healthcheck のみ）
 
 use anyhow::Result;
 use axum::{
@@ -273,14 +273,8 @@ struct GracefulRestartResponse {
     message: String,
 }
 
-/// 接続一覧レスポンス
-#[derive(Serialize)]
-struct ConnectionsResponse {
-    connections: Vec<crate::ipc::ConnectionInfo>,
-}
-
 // =============================================================================
-// レガシー API ハンドラー
+// API ハンドラー
 // =============================================================================
 
 /// GET /healthcheck
@@ -300,24 +294,6 @@ async fn metrics(State(state): State<PrivateApiState>) -> impl IntoResponse {
         )],
         state.statistics.to_prometheus(),
     )
-}
-
-/// GET /api/conns
-///
-/// 接続一覧を取得
-async fn get_connections_legacy(State(state): State<PrivateApiState>) -> impl IntoResponse {
-    match &state.control_plane {
-        Some(cp) => {
-            let connections = cp.get_all_connections().await;
-            (StatusCode::OK, Json(ConnectionsResponse { connections }))
-        }
-        None => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ConnectionsResponse {
-                connections: Vec::new(),
-            }),
-        ),
-    }
 }
 
 /// POST /graceful-restart
@@ -782,10 +758,9 @@ pub async fn run_private_with_http_ipc(
     };
 
     let app = Router::new()
-        // レガシー API
+        // API
         .route("/healthcheck", get(healthcheck))
         .route("/metrics", get(metrics))
-        .route("/api/conns", get(get_connections_legacy))
         .route("/api/graceful-restart", post(graceful_restart))
         // HTTP IPC API (v1)
         .route("/api/v1/RegisterDataPlane", post(register_data_plane))

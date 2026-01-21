@@ -83,18 +83,18 @@ LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_LISTEN_ADDR=${QUICPORT_LISTEN_ADDR}"
 LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_CP_URL=${QUICPORT_CP_URL}"
 
 # data-plane is started in a separate cgroup by systemd-run
-# the following three options are required to separate the cgroup
-#   --scope: start as a temporary scope unit (separate cgroup from service)
+# the following options are required to separate the cgroup
 #   --slice: specify the slice to place the unit
 #   --unit: specify the unit name
 LogshExecJSON systemd-run \
-  --scope \
   --slice=user.slice \
   --unit="quicport-data-plane-${TIMESTAMP}" \
+  --property=StandardOutput=append:/var/log/quicport/data-plane.log \
+  --property=StandardError=inherit \
+  --setenv=RUST_LOG=quicport=debug,quinn=debug \
   --description="quicport data-plane (${TIMESTAMP})" \
   "${QUICPORT_BIN}" \
   --log-format json \
-  --log-output "${QUICPORT_LOG_DIR}/data-plane-${TIMESTAMP}.log" \
   data-plane \
   --listen "${QUICPORT_LISTEN_ADDR}" \
   --control-plane-url "${QUICPORT_CP_URL}" \

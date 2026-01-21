@@ -11,33 +11,17 @@
 //! - モニタリング: 接続状態、メトリクスの収集
 
 use anyhow::{Context, Result};
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
-use tokio::sync::RwLock;
 use tracing::{debug, info, warn, Instrument};
 
 use crate::api::{run_private_with_http_ipc, HttpIpcState};
-use crate::ipc::{
-    discover_dataplanes, read_dataplane_port, read_dataplane_state, AuthPolicy, ControlCommand,
-    DataPlaneConfig, DataPlaneEvent, DataPlaneState, DataPlaneStatus, IpcConnection,
-};
+use crate::ipc::{AuthPolicy, ControlCommand, DataPlaneConfig, DataPlaneState, DataPlaneStatus};
 use crate::statistics::ServerStatistics;
-
-/// データプレーンの接続情報（レガシー IPC 用）
-struct DataPlaneConnection {
-    /// PID
-    #[allow(dead_code)]
-    pid: u32,
-    /// IPC 接続
-    conn: Option<IpcConnection>,
-    /// 最新の状態
-    status: Option<DataPlaneStatus>,
-}
 
 /// コントロールプレーン
 pub struct ControlPlane {
@@ -48,50 +32,18 @@ pub struct ControlPlane {
     /// データプレーン設定
     #[allow(dead_code)]
     dp_config: DataPlaneConfig,
-    /// 管理中のデータプレーン（レガシー IPC 用）
-    dataplanes: RwLock<HashMap<u32, DataPlaneConnection>>,
     /// 統計情報
     #[allow(dead_code)]
     statistics: Arc<ServerStatistics>,
     /// 実行ファイルパス
     executable_path: PathBuf,
-    /// HTTP IPC 状態（新規追加）
+    /// HTTP IPC 状態
     http_ipc: Arc<HttpIpcState>,
-    /// HTTP IPC モードフラグ（新規追加）
-    use_http_ipc: bool,
 }
 
 impl ControlPlane {
     /// 新しいコントロールプレーンを作成
     pub fn new(
-        listen_addr: SocketAddr,
-        auth_policy: AuthPolicy,
-        statistics: Arc<ServerStatistics>,
-    ) -> Result<Arc<Self>> {
-        let executable_path =
-            std::env::current_exe().context("Failed to get current executable path")?;
-
-        let dp_config = DataPlaneConfig {
-            listen_addr,
-            ..Default::default()
-        };
-
-        let http_ipc = Arc::new(HttpIpcState::new());
-
-        Ok(Arc::new(Self {
-            listen_addr,
-            auth_policy,
-            dp_config,
-            dataplanes: RwLock::new(HashMap::new()),
-            statistics,
-            executable_path,
-            http_ipc,
-            use_http_ipc: false,
-        }))
-    }
-
-    /// HTTP IPC モードでコントロールプレーンを作成
-    pub fn new_with_http_ipc(
         listen_addr: SocketAddr,
         auth_policy: AuthPolicy,
         statistics: Arc<ServerStatistics>,
@@ -109,11 +61,9 @@ impl ControlPlane {
             listen_addr,
             auth_policy,
             dp_config,
-            dataplanes: RwLock::new(HashMap::new()),
             statistics,
             executable_path,
             http_ipc,
-            use_http_ipc: true,
         }))
     }
 
@@ -124,108 +74,16 @@ impl ControlPlane {
 
     /// コントロールプレーンを起動
     ///
-    /// 1. 既存のデータプレーンを検出して接続
-    /// 2. ACTIVE なデータプレーンがなければ新規起動
-    /// 3. 認証ポリシーを配布
+    /// 認証ポリシーを HttpIpcState に設定
     pub async fn start(self: Arc<Self>) -> Result<()> {
-        info!("Control plane starting (http_ipc={})", self.use_http_ipc);
+        info!("Control plane starting");
 
-        // HTTP IPC の場合は認証ポリシーを HttpIpcState に設定
-        if self.use_http_ipc {
-            *self.http_ipc.auth_policy.write().await = Some(self.auth_policy.clone());
-            *self.http_ipc.dp_config.write().await = self.dp_config.clone();
-        }
-
-        // 既存のデータプレーンを検出（レガシー IPC のみ）
-        if !self.use_http_ipc {
-            let existing_pids = discover_dataplanes()?;
-            info!("Discovered {} existing data plane(s)", existing_pids.len());
-
-            let mut has_active = false;
-
-            for pid in existing_pids {
-                match self.connect_to_dataplane(pid).await {
-                    Ok(status) => {
-                        info!(
-                            "Connected to data plane PID {} (state: {})",
-                            pid, status.state
-                        );
-                        if status.state == DataPlaneState::Active {
-                            has_active = true;
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to connect to data plane PID {}: {}", pid, e);
-                        // 接続できないデータプレーンはクリーンアップ
-                        let _ = crate::ipc::cleanup_dataplane_files(pid);
-                    }
-                }
-            }
-
-            // ACTIVE なデータプレーンがなければ新規起動
-            if !has_active {
-                info!("No active data plane found, starting new one");
-                self.start_dataplane().await?;
-            }
-
-            // 全データプレーンに認証ポリシーを配布
-            self.distribute_auth_policy().await?;
-        }
+        // 認証ポリシーを HttpIpcState に設定
+        *self.http_ipc.auth_policy.write().await = Some(self.auth_policy.clone());
+        *self.http_ipc.dp_config.write().await = self.dp_config.clone();
 
         info!("Control plane started successfully");
         Ok(())
-    }
-
-    /// データプレーンに接続（レガシー IPC）
-    async fn connect_to_dataplane(&self, pid: u32) -> Result<DataPlaneStatus> {
-        let port = read_dataplane_port(pid)
-            .with_context(|| format!("Failed to read port for data plane PID {}", pid))?;
-
-        let mut conn = IpcConnection::connect(port).await.with_context(|| {
-            format!(
-                "Failed to connect to data plane PID {} on port {}",
-                pid, port
-            )
-        })?;
-
-        // Ready イベントを受信
-        let event = conn.recv_event().await?;
-        let status = match event {
-            DataPlaneEvent::Ready {
-                pid: dp_pid,
-                listen_addr,
-            } => {
-                debug!("Data plane PID {} is ready on {}", dp_pid, listen_addr);
-                // 状態を取得
-                conn.send_command(&ControlCommand::GetStatus).await?;
-                match conn.recv_event().await? {
-                    DataPlaneEvent::Status(s) => s,
-                    _ => {
-                        return Err(anyhow::anyhow!("Unexpected response from data plane"));
-                    }
-                }
-            }
-            DataPlaneEvent::Status(s) => s,
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Unexpected event from data plane: {:?}",
-                    event
-                ));
-            }
-        };
-
-        // 接続を保存
-        let mut dataplanes = self.dataplanes.write().await;
-        dataplanes.insert(
-            pid,
-            DataPlaneConnection {
-                pid,
-                conn: Some(conn),
-                status: Some(status.clone()),
-            },
-        );
-
-        Ok(status)
     }
 
     /// 新しいデータプレーンを起動
@@ -233,10 +91,7 @@ impl ControlPlane {
     /// setsid() で独立したセッションとして起動し、
     /// 親プロセス（コントロールプレーン）の終了に影響されないようにします。
     pub async fn start_dataplane(&self) -> Result<u32> {
-        info!(
-            "Starting new data plane process (http_ipc={})",
-            self.use_http_ipc
-        );
+        info!("Starting new data plane process");
 
         #[cfg(unix)]
         {
@@ -252,28 +107,10 @@ impl ControlPlane {
                 .stdout(Stdio::null())
                 .stderr(Stdio::inherit());
 
-            if self.use_http_ipc {
-                // HTTP IPC モード: --control-plane-url を使用
-                let cp_url = format!("http://127.0.0.1:{}", self.listen_addr.port());
-                cmd.arg("--control-plane-url").arg(&cp_url);
-                info!("Data plane will connect to control plane at {}", cp_url);
-            } else {
-                // レガシー IPC モード: 環境変数経由で認証ポリシーを渡す
-                match &self.auth_policy {
-                    AuthPolicy::Psk { psk } => {
-                        cmd.env("QUICPORT_DP_AUTH_TYPE", "psk");
-                        cmd.env("QUICPORT_DP_PSK", psk);
-                    }
-                    AuthPolicy::X25519 {
-                        authorized_pubkeys,
-                        server_private_key,
-                    } => {
-                        cmd.env("QUICPORT_DP_AUTH_TYPE", "x25519");
-                        cmd.env("QUICPORT_DP_SERVER_PRIVKEY", server_private_key);
-                        cmd.env("QUICPORT_DP_CLIENT_PUBKEYS", authorized_pubkeys.join(","));
-                    }
-                }
-            }
+            // HTTP IPC: --control-plane-url を使用
+            let cp_url = format!("http://127.0.0.1:{}", self.listen_addr.port());
+            cmd.arg("--control-plane-url").arg(&cp_url);
+            info!("Data plane will connect to control plane at {}", cp_url);
 
             // setsid() を使用して独立したプロセスグループを作成
             // これにより親プロセス終了後もデータプレーンは動作し続ける
@@ -294,63 +131,31 @@ impl ControlPlane {
             // プロセスが起動するまで少し待つ
             tokio::time::sleep(Duration::from_millis(500)).await;
 
-            if self.use_http_ipc {
-                // HTTP IPC モード: データプレーンの登録を待つ
-                let mut retries = 0;
-                let max_retries = 20; // 10秒
-                let dp_id = format!("dp_{}", pid);
-                loop {
-                    {
-                        let dataplanes = self.http_ipc.dataplanes.read().await;
-                        if dataplanes.contains_key(&dp_id) {
-                            info!("Data plane {} registered via HTTP IPC", dp_id);
-                            return Ok(pid);
-                        }
-                    }
-                    retries += 1;
-                    if retries >= max_retries {
-                        return Err(anyhow::anyhow!(
-                            "Data plane {} did not register within {} retries",
-                            dp_id,
-                            max_retries
-                        ));
-                    }
-                    debug!(
-                        "Waiting for data plane {} to register (attempt {}/{})",
-                        dp_id, retries, max_retries
-                    );
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-            } else {
-                // レガシー IPC モード: 接続を試みる
-                let mut retries = 0;
-                let max_retries = 10;
-                loop {
-                    match self.connect_to_dataplane(pid).await {
-                        Ok(status) => {
-                            info!(
-                                "Connected to new data plane PID {} (state: {})",
-                                pid, status.state
-                            );
-                            return Ok(pid);
-                        }
-                        Err(e) => {
-                            retries += 1;
-                            if retries >= max_retries {
-                                return Err(anyhow::anyhow!(
-                                    "Failed to connect to data plane after {} retries: {}",
-                                    max_retries,
-                                    e
-                                ));
-                            }
-                            debug!(
-                                "Waiting for data plane to start (attempt {}/{})",
-                                retries, max_retries
-                            );
-                            tokio::time::sleep(Duration::from_millis(500)).await;
-                        }
+            // データプレーンの登録を待つ
+            let mut retries = 0;
+            let max_retries = 20; // 10秒
+            let dp_id = format!("dp_{}", pid);
+            loop {
+                {
+                    let dataplanes = self.http_ipc.dataplanes.read().await;
+                    if dataplanes.contains_key(&dp_id) {
+                        info!("Data plane {} registered via HTTP IPC", dp_id);
+                        return Ok(pid);
                     }
                 }
+                retries += 1;
+                if retries >= max_retries {
+                    return Err(anyhow::anyhow!(
+                        "Data plane {} did not register within {} retries",
+                        dp_id,
+                        max_retries
+                    ));
+                }
+                debug!(
+                    "Waiting for data plane {} to register (attempt {}/{})",
+                    dp_id, retries, max_retries
+                );
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
 
@@ -362,43 +167,13 @@ impl ControlPlane {
         }
     }
 
-    /// 認証ポリシーを全データプレーンに配布（レガシー IPC）
+    /// 認証ポリシーを全データプレーンに配布
     pub async fn distribute_auth_policy(&self) -> Result<()> {
-        if self.use_http_ipc {
-            // HTTP IPC モード: 認証ポリシーは HttpIpcState に既に設定されている
-            // データプレーンは RegisterDataPlane 時に取得する
-            self.http_ipc
-                .broadcast_command(ControlCommand::SetAuthPolicy(self.auth_policy.clone()))
-                .await;
-            return Ok(());
-        }
-
-        let cmd = ControlCommand::SetAuthPolicy(self.auth_policy.clone());
-
-        let mut dataplanes = self.dataplanes.write().await;
-        for (pid, dp) in dataplanes.iter_mut() {
-            if let Some(conn) = &mut dp.conn {
-                match conn.send_command(&cmd).await {
-                    Ok(_) => {
-                        debug!("Auth policy sent to data plane PID {}", pid);
-                        // 応答を受信
-                        match conn.recv_event().await {
-                            Ok(DataPlaneEvent::Status(status)) => {
-                                dp.status = Some(status);
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                warn!("Failed to receive response from data plane {}: {}", pid, e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to send auth policy to data plane {}: {}", pid, e);
-                    }
-                }
-            }
-        }
-
+        // HTTP IPC モード: 認証ポリシーは HttpIpcState に既に設定されている
+        // データプレーンは RegisterDataPlane 時に取得する
+        self.http_ipc
+            .broadcast_command(ControlCommand::SetAuthPolicy(self.auth_policy.clone()))
+            .await;
         Ok(())
     }
 
@@ -407,67 +182,35 @@ impl ControlPlane {
     /// 1. 新しいデータプレーンを起動
     /// 2. 旧データプレーンに DRAIN を送信
     pub async fn graceful_restart(&self) -> Result<()> {
-        info!("Starting graceful restart (http_ipc={})", self.use_http_ipc);
+        info!("Starting graceful restart");
 
-        if self.use_http_ipc {
-            // HTTP IPC モード: 現在の ACTIVE な DP を取得
-            let old_dp_ids: Vec<String> = {
-                let dataplanes = self.http_ipc.dataplanes.read().await;
-                dataplanes
-                    .iter()
-                    .filter_map(|(dp_id, dp)| {
-                        if dp.state == DataPlaneState::Active {
-                            Some(dp_id.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            };
+        // 現在の ACTIVE な DP を取得
+        let old_dp_ids: Vec<String> = {
+            let dataplanes = self.http_ipc.dataplanes.read().await;
+            dataplanes
+                .iter()
+                .filter_map(|(dp_id, dp)| {
+                    if dp.state == DataPlaneState::Active {
+                        Some(dp_id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
 
-            // 新しいデータプレーンを起動
-            let new_pid = self.start_dataplane().await?;
-            info!("New data plane started with PID {}", new_pid);
+        // 新しいデータプレーンを起動
+        let new_pid = self.start_dataplane().await?;
+        info!("New data plane started with PID {}", new_pid);
 
-            // 旧データプレーンに DRAIN を送信
-            for dp_id in old_dp_ids {
-                if let Err(e) = self
-                    .http_ipc
-                    .send_command(&dp_id, ControlCommand::Drain)
-                    .await
-                {
-                    warn!("Failed to drain data plane {}: {}", dp_id, e);
-                }
-            }
-        } else {
-            // レガシー IPC モード
-            // 現在の ACTIVE なデータプレーンを取得
-            let old_pids: Vec<u32> = {
-                let dataplanes = self.dataplanes.read().await;
-                dataplanes
-                    .iter()
-                    .filter_map(|(pid, dp)| {
-                        if dp.status.as_ref().map(|s| s.state) == Some(DataPlaneState::Active) {
-                            Some(*pid)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            };
-
-            // 新しいデータプレーンを起動
-            let new_pid = self.start_dataplane().await?;
-            info!("New data plane started with PID {}", new_pid);
-
-            // 認証ポリシーを配布
-            self.distribute_auth_policy().await?;
-
-            // 旧データプレーンに DRAIN を送信
-            for old_pid in old_pids {
-                if let Err(e) = self.drain_dataplane(old_pid).await {
-                    warn!("Failed to drain data plane PID {}: {}", old_pid, e);
-                }
+        // 旧データプレーンに DRAIN を送信
+        for dp_id in old_dp_ids {
+            if let Err(e) = self
+                .http_ipc
+                .send_command(&dp_id, ControlCommand::Drain)
+                .await
+            {
+                warn!("Failed to drain data plane {}: {}", dp_id, e);
             }
         }
 
@@ -479,33 +222,11 @@ impl ControlPlane {
     pub async fn drain_dataplane(&self, pid: u32) -> Result<()> {
         info!("Draining data plane PID {}", pid);
 
-        if self.use_http_ipc {
-            let dp_id = format!("dp_{}", pid);
-            self.http_ipc
-                .send_command(&dp_id, ControlCommand::Drain)
-                .await
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
-            return Ok(());
-        }
-
-        let mut dataplanes = self.dataplanes.write().await;
-        if let Some(dp) = dataplanes.get_mut(&pid) {
-            if let Some(conn) = &mut dp.conn {
-                conn.send_command(&ControlCommand::Drain).await?;
-                // 応答を受信
-                match conn.recv_event().await {
-                    Ok(DataPlaneEvent::Status(status)) => {
-                        info!("Data plane PID {} is now {}", pid, status.state);
-                        dp.status = Some(status);
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        warn!("Failed to receive response from data plane {}: {}", pid, e);
-                    }
-                }
-            }
-        }
-
+        let dp_id = format!("dp_{}", pid);
+        self.http_ipc
+            .send_command(&dp_id, ControlCommand::Drain)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(())
     }
 
@@ -513,40 +234,9 @@ impl ControlPlane {
     pub async fn get_all_connections(&self) -> Vec<crate::ipc::ConnectionInfo> {
         let mut all_connections = Vec::new();
 
-        if self.use_http_ipc {
-            let dataplanes = self.http_ipc.dataplanes.read().await;
-            for dp in dataplanes.values() {
-                all_connections.extend(dp.connections.clone());
-            }
-            return all_connections;
-        }
-
-        let pids: Vec<u32> = {
-            let dataplanes = self.dataplanes.read().await;
-            dataplanes.keys().copied().collect()
-        };
-
-        for pid in pids {
-            let mut dataplanes = self.dataplanes.write().await;
-            if let Some(dp) = dataplanes.get_mut(&pid) {
-                if let Some(conn) = &mut dp.conn {
-                    if conn
-                        .send_command(&ControlCommand::GetConnections)
-                        .await
-                        .is_ok()
-                    {
-                        match conn.recv_event().await {
-                            Ok(DataPlaneEvent::Connections { connections }) => {
-                                all_connections.extend(connections);
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                warn!("Failed to get connections from data plane {}: {}", pid, e);
-                            }
-                        }
-                    }
-                }
-            }
+        let dataplanes = self.http_ipc.dataplanes.read().await;
+        for dp in dataplanes.values() {
+            all_connections.extend(dp.connections.clone());
         }
 
         all_connections
@@ -557,23 +247,11 @@ impl ControlPlane {
     pub async fn shutdown_dataplane(&self, pid: u32) -> Result<()> {
         info!("Shutting down data plane PID {}", pid);
 
-        if self.use_http_ipc {
-            let dp_id = format!("dp_{}", pid);
-            self.http_ipc
-                .send_command(&dp_id, ControlCommand::Shutdown)
-                .await
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
-            return Ok(());
-        }
-
-        let mut dataplanes = self.dataplanes.write().await;
-        if let Some(dp) = dataplanes.get_mut(&pid) {
-            if let Some(conn) = &mut dp.conn {
-                conn.send_command(&ControlCommand::Shutdown).await?;
-            }
-            dataplanes.remove(&pid);
-        }
-
+        let dp_id = format!("dp_{}", pid);
+        self.http_ipc
+            .send_command(&dp_id, ControlCommand::Shutdown)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(())
     }
 
@@ -581,29 +259,13 @@ impl ControlPlane {
     pub async fn shutdown_all(&self) -> Result<()> {
         info!("Shutting down all data planes");
 
-        if self.use_http_ipc {
-            self.http_ipc.broadcast_command(ControlCommand::Drain).await;
-            // data-plane がコマンドを受け取るまで待機
-            // 長ポーリングは notify_waiters() で即座に起こされるが、
-            // HTTP レスポンスが完了するまで少し待機する
-            self.http_ipc
-                .wait_for_commands_delivered(std::time::Duration::from_secs(5))
-                .await;
-            return Ok(());
-        }
-
-        // 全データプレーンに DRAIN を送信
-        let pids: Vec<u32> = {
-            let dataplanes = self.dataplanes.read().await;
-            dataplanes.keys().copied().collect()
-        };
-
-        for pid in pids {
-            if let Err(e) = self.drain_dataplane(pid).await {
-                warn!("Failed to drain data plane PID {}: {}", pid, e);
-            }
-        }
-
+        self.http_ipc.broadcast_command(ControlCommand::Drain).await;
+        // data-plane がコマンドを受け取るまで待機
+        // 長ポーリングは notify_waiters() で即座に起こされるが、
+        // HTTP レスポンスが完了するまで少し待機する
+        self.http_ipc
+            .wait_for_commands_delivered(std::time::Duration::from_secs(5))
+            .await;
         Ok(())
     }
 
@@ -612,39 +274,16 @@ impl ControlPlane {
     pub async fn get_all_status(&self) -> Vec<DataPlaneStatus> {
         let mut statuses = Vec::new();
 
-        if self.use_http_ipc {
-            let dataplanes = self.http_ipc.dataplanes.read().await;
-            for dp in dataplanes.values() {
-                statuses.push(DataPlaneStatus {
-                    state: dp.state,
-                    pid: dp.pid,
-                    active_connections: dp.active_connections,
-                    bytes_sent: dp.bytes_sent,
-                    bytes_received: dp.bytes_received,
-                    started_at: dp.started_at,
-                });
-            }
-            return statuses;
-        }
-
-        // まず、接続済みのデータプレーンから状態を取得
-        {
-            let mut dataplanes = self.dataplanes.write().await;
-            for (pid, dp) in dataplanes.iter_mut() {
-                if let Some(conn) = &mut dp.conn {
-                    if conn.send_command(&ControlCommand::GetStatus).await.is_ok() {
-                        if let Ok(DataPlaneEvent::Status(status)) = conn.recv_event().await {
-                            dp.status = Some(status.clone());
-                            statuses.push(status);
-                            continue;
-                        }
-                    }
-                }
-                // IPC 接続に失敗した場合は状態ファイルから読み取る
-                if let Ok(status) = read_dataplane_state(*pid) {
-                    statuses.push(status);
-                }
-            }
+        let dataplanes = self.http_ipc.dataplanes.read().await;
+        for dp in dataplanes.values() {
+            statuses.push(DataPlaneStatus {
+                state: dp.state,
+                pid: dp.pid,
+                active_connections: dp.active_connections,
+                bytes_sent: dp.bytes_sent,
+                bytes_received: dp.bytes_received,
+                started_at: dp.started_at,
+            });
         }
 
         statuses
@@ -695,7 +334,7 @@ pub async fn run_with_api(
         ))
     };
 
-    let control_plane = ControlPlane::new_with_http_ipc(
+    let control_plane = ControlPlane::new(
         listen_addr,
         auth_policy,
         statistics.clone(),
@@ -843,36 +482,54 @@ pub async fn graceful_restart(api_addr: SocketAddr) -> Result<()> {
 }
 
 /// データプレーンの状態を表示（CLI コマンド用）
-pub async fn show_status() -> Result<()> {
-    let pids = discover_dataplanes()?;
-    if pids.is_empty() {
+///
+/// HTTP API 経由でデータプレーン一覧を取得して表示します。
+pub async fn show_status(api_addr: SocketAddr) -> Result<()> {
+    let url = format!("http://{}/api/v1/ListDataPlanes", api_addr);
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(&url)
+        .json(&crate::ipc::ListDataPlanesRequest {})
+        .send()
+        .await
+        .with_context(|| format!("Failed to connect to API server at {}", api_addr))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(anyhow::anyhow!(
+            "API request failed with status: {}",
+            status
+        ));
+    }
+
+    let body: crate::ipc::ListDataPlanesResponse = response
+        .json()
+        .await
+        .context("Failed to parse API response")?;
+
+    if body.dataplanes.is_empty() {
         println!("No running data planes found");
         return Ok(());
     }
 
     println!("Data Planes:");
     println!(
-        "{:<10} {:<12} {:<12} {:<15} {:<15}",
-        "PID", "State", "Connections", "Bytes Sent", "Bytes Received"
+        "{:<15} {:<10} {:<12} {:<12} {:<15} {:<15}",
+        "ID", "PID", "State", "Connections", "Bytes Sent", "Bytes Received"
     );
-    println!("{}", "-".repeat(64));
+    println!("{}", "-".repeat(79));
 
-    for pid in pids {
-        match read_dataplane_state(pid) {
-            Ok(status) => {
-                println!(
-                    "{:<10} {:<12} {:<12} {:<15} {:<15}",
-                    status.pid,
-                    status.state.to_string(),
-                    status.active_connections,
-                    status.bytes_sent,
-                    status.bytes_received
-                );
-            }
-            Err(e) => {
-                println!("{:<10} (error: {})", pid, e);
-            }
-        }
+    for dp in body.dataplanes {
+        println!(
+            "{:<15} {:<10} {:<12} {:<12} {:<15} {:<15}",
+            dp.dp_id,
+            dp.pid,
+            dp.state.to_string(),
+            dp.active_connections,
+            dp.bytes_sent,
+            dp.bytes_received
+        );
     }
 
     Ok(())
