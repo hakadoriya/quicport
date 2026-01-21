@@ -183,7 +183,6 @@ pub enum ControlMessage {
     // Remote Port Forwarding (RPF) 用メッセージ
     // サーバー側でポートをリッスンし、クライアント側のローカルサービスに転送
     // =========================================================================
-
     /// ポート開放リクエスト (Client → Server)
     ///
     /// - port: サーバー側でリッスンするポート番号
@@ -205,7 +204,6 @@ pub enum ControlMessage {
     // Local Port Forwarding (LPF) 用メッセージ
     // クライアント側でポートをリッスンし、サーバー側のリモートサービスに転送
     // =========================================================================
-
     /// ローカルフォワードリクエスト (Client → Server)
     ///
     /// - remote_destination: サーバー側の転送先 (例: "192.168.1.100:22")
@@ -226,14 +224,12 @@ pub enum ControlMessage {
     // =========================================================================
     // セッション制御メッセージ
     // =========================================================================
-
     /// セッション終了 (双方向)
     SessionClose,
 
     // =========================================================================
     // 接続管理メッセージ
     // =========================================================================
-
     /// 新しい接続の通知 (Server → Client) - RPF 用
     RemoteNewConnection {
         connection_id: u32,
@@ -1022,8 +1018,7 @@ mod tests {
         assert_eq!(port, 22);
         assert_eq!(protocol, Protocol::Tcp);
 
-        let (addr, port, protocol) =
-            parse_destination_spec("[2001:db8::1]:8080/tcp").unwrap();
+        let (addr, port, protocol) = parse_destination_spec("[2001:db8::1]:8080/tcp").unwrap();
         assert_eq!(addr, "2001:db8::1");
         assert_eq!(port, 8080);
         assert_eq!(protocol, Protocol::Tcp);

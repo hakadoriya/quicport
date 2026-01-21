@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument};
 
 // LPF で使用する追加 imports はファイル末尾の LPF 実装セクションに配置
 
@@ -93,7 +93,8 @@ impl ConnectionManager {
     }
 
     fn add_connection(&mut self, conn_id: u32, protocol: Protocol) {
-        self.connections.insert(conn_id, ConnectionInfo { protocol });
+        self.connections
+            .insert(conn_id, ConnectionInfo { protocol });
     }
 
     fn remove_connection(&mut self, conn_id: u32) {
@@ -139,10 +140,7 @@ fn format_socket_addr(host: &str, port: u16) -> String {
 /// TOFU 検証結果を処理（非同期版）
 ///
 /// 未知のホストや証明書が変更されたホストに対して、ユーザーに確認を求める
-async fn handle_tofu_status(
-    status: &TofuStatus,
-    known_hosts: &KnownHosts,
-) -> Result<()> {
+async fn handle_tofu_status(status: &TofuStatus, known_hosts: &KnownHosts) -> Result<()> {
     match status {
         TofuStatus::Known => {
             // 既知のホスト、何もしない
@@ -187,7 +185,9 @@ async fn handle_tofu_status(
             eprintln!("@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @");
             eprintln!("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
             eprintln!("IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!");
-            eprintln!("Someone could be eavesdropping on you right now (man-in-the-middle attack)!");
+            eprintln!(
+                "Someone could be eavesdropping on you right now (man-in-the-middle attack)!"
+            );
             eprintln!("It is also possible that a host key has just been changed.");
             eprintln!();
             eprintln!("Host: {}", host);
@@ -198,7 +198,11 @@ async fn handle_tofu_status(
             eprintln!("{}", cert_info);
             eprintln!();
 
-            if prompt_yes_no("Are you sure you want to continue connecting (and update the known host)?").await? {
+            if prompt_yes_no(
+                "Are you sure you want to continue connecting (and update the known host)?",
+            )
+            .await?
+            {
                 // known_hosts を更新
                 let line_number = known_hosts.add_host(host, new_fingerprint)?;
                 let file_path = known_hosts.path().display();
@@ -358,7 +362,11 @@ async fn run_remote_forward(
     match response {
         ControlMessage::RemoteForwardResponse { status, message } => {
             if status != ResponseStatus::Success {
-                anyhow::bail!("Server rejected RemoteForwardRequest: {:?} - {}", status, message);
+                anyhow::bail!(
+                    "Server rejected RemoteForwardRequest: {:?} - {}",
+                    status,
+                    message
+                );
             }
             info!("Server accepted RemoteForwardRequest: {}", message);
         }
@@ -403,7 +411,14 @@ pub async fn run_remote_forward_with_reconnect(
 ) -> Result<()> {
     if !reconnect_config.enabled {
         // 再接続が無効の場合は通常の run_remote_forward を呼び出す
-        return run_remote_forward(destination, remote_source, local_destination, auth_config, insecure).await;
+        return run_remote_forward(
+            destination,
+            remote_source,
+            local_destination,
+            auth_config,
+            insecure,
+        )
+        .await;
     }
 
     let mut attempt = 0u32;
@@ -650,17 +665,20 @@ async fn process_remote_new_connection(
                 .add_connection(connection_id, conn_protocol);
 
             let conn_manager_clone = conn_manager.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    relay_tcp_stream(connection_id, local_stream, quic_send, quic_recv).await
-                {
-                    debug!("TCP relay ended for {}: {}", connection_id, e);
+            tokio::spawn(
+                async move {
+                    if let Err(e) =
+                        relay_tcp_stream(connection_id, local_stream, quic_send, quic_recv).await
+                    {
+                        debug!("TCP relay ended for {}: {}", connection_id, e);
+                    }
+                    conn_manager_clone
+                        .lock()
+                        .await
+                        .remove_connection(connection_id);
                 }
-                conn_manager_clone
-                    .lock()
-                    .await
-                    .remove_connection(connection_id);
-            });
+                .instrument(tracing::Span::current()),
+            );
         }
         Protocol::Udp => {
             // UDP: ローカルソケットを作成してローカルサービスに接続
@@ -700,17 +718,20 @@ async fn process_remote_new_connection(
                 .add_connection(connection_id, conn_protocol);
 
             let conn_manager_clone = conn_manager.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    relay_udp_stream(connection_id, local_socket, quic_send, quic_recv).await
-                {
-                    debug!("UDP relay ended for {}: {}", connection_id, e);
+            tokio::spawn(
+                async move {
+                    if let Err(e) =
+                        relay_udp_stream(connection_id, local_socket, quic_send, quic_recv).await
+                    {
+                        debug!("UDP relay ended for {}: {}", connection_id, e);
+                    }
+                    conn_manager_clone
+                        .lock()
+                        .await
+                        .remove_connection(connection_id);
                 }
-                conn_manager_clone
-                    .lock()
-                    .await
-                    .remove_connection(connection_id);
-            });
+                .instrument(tracing::Span::current()),
+            );
         }
     }
 }
@@ -726,43 +747,49 @@ async fn relay_tcp_stream(
     let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
 
     // TCP -> QUIC (独立したタスクとして実行)
-    let tcp_to_quic = tokio::spawn(async move {
-        let mut buf = vec![0u8; 8192];
-        debug!("[{}] TCP->QUIC task started", conn_id);
-        loop {
-            let n = tcp_read.read(&mut buf).await?;
-            debug!("[{}] TCP read {} bytes", conn_id, n);
-            if n == 0 {
-                debug!("[{}] TCP read EOF", conn_id);
-                break;
-            }
-            quic_send.write_all(&buf[..n]).await?;
-            debug!("[{}] QUIC write {} bytes", conn_id, n);
-        }
-        debug!("[{}] TCP->QUIC finishing stream", conn_id);
-        quic_send.finish()?;
-        Ok::<_, anyhow::Error>(())
-    });
-
-    // QUIC -> TCP (独立したタスクとして実行)
-    let quic_to_tcp = tokio::spawn(async move {
-        let mut buf = vec![0u8; 8192];
-        debug!("[{}] QUIC->TCP task started", conn_id);
-        loop {
-            match quic_recv.read(&mut buf).await? {
-                Some(n) if n > 0 => {
-                    debug!("[{}] QUIC read {} bytes", conn_id, n);
-                    tcp_write.write_all(&buf[..n]).await?;
-                    debug!("[{}] TCP write {} bytes", conn_id, n);
-                }
-                _ => {
-                    debug!("[{}] QUIC read EOF", conn_id);
+    let tcp_to_quic = tokio::spawn(
+        async move {
+            let mut buf = vec![0u8; 8192];
+            debug!("[{}] TCP->QUIC task started", conn_id);
+            loop {
+                let n = tcp_read.read(&mut buf).await?;
+                debug!("[{}] TCP read {} bytes", conn_id, n);
+                if n == 0 {
+                    debug!("[{}] TCP read EOF", conn_id);
                     break;
                 }
+                quic_send.write_all(&buf[..n]).await?;
+                debug!("[{}] QUIC write {} bytes", conn_id, n);
             }
+            debug!("[{}] TCP->QUIC finishing stream", conn_id);
+            quic_send.finish()?;
+            Ok::<_, anyhow::Error>(())
         }
-        Ok::<_, anyhow::Error>(())
-    });
+        .instrument(tracing::Span::current()),
+    );
+
+    // QUIC -> TCP (独立したタスクとして実行)
+    let quic_to_tcp = tokio::spawn(
+        async move {
+            let mut buf = vec![0u8; 8192];
+            debug!("[{}] QUIC->TCP task started", conn_id);
+            loop {
+                match quic_recv.read(&mut buf).await? {
+                    Some(n) if n > 0 => {
+                        debug!("[{}] QUIC read {} bytes", conn_id, n);
+                        tcp_write.write_all(&buf[..n]).await?;
+                        debug!("[{}] TCP write {} bytes", conn_id, n);
+                    }
+                    _ => {
+                        debug!("[{}] QUIC read EOF", conn_id);
+                        break;
+                    }
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .instrument(tracing::Span::current()),
+    );
 
     // 両方向の完了を待つ（エコーパターンに対応）
     let (tcp_result, quic_result) = tokio::join!(tcp_to_quic, quic_to_tcp);
@@ -795,69 +822,75 @@ async fn relay_udp_stream(
 
     // QUIC -> UDP (サーバーからのパケットをローカルに転送)
     let socket_for_recv = local_socket.clone();
-    let quic_to_udp = tokio::spawn(async move {
-        debug!("[{}] QUIC->UDP task started", conn_id);
-        loop {
-            // Length-prefixed framing で読み取り
-            let mut len_buf = [0u8; 4];
-            if let Err(e) = quic_recv.read_exact(&mut len_buf).await {
-                debug!("[{}] QUIC read length error: {}", conn_id, e);
-                break;
-            }
-            let len = u32::from_be_bytes(len_buf) as usize;
+    let quic_to_udp = tokio::spawn(
+        async move {
+            debug!("[{}] QUIC->UDP task started", conn_id);
+            loop {
+                // Length-prefixed framing で読み取り
+                let mut len_buf = [0u8; 4];
+                if let Err(e) = quic_recv.read_exact(&mut len_buf).await {
+                    debug!("[{}] QUIC read length error: {}", conn_id, e);
+                    break;
+                }
+                let len = u32::from_be_bytes(len_buf) as usize;
 
-            let mut payload = vec![0u8; len];
-            if let Err(e) = quic_recv.read_exact(&mut payload).await {
-                debug!("[{}] QUIC read payload error: {}", conn_id, e);
-                break;
-            }
+                let mut payload = vec![0u8; len];
+                if let Err(e) = quic_recv.read_exact(&mut payload).await {
+                    debug!("[{}] QUIC read payload error: {}", conn_id, e);
+                    break;
+                }
 
-            debug!("[{}] QUIC read {} bytes", conn_id, len);
+                debug!("[{}] QUIC read {} bytes", conn_id, len);
 
-            // ローカルサービスに送信
-            if let Err(e) = socket_for_recv.send(&payload).await {
-                debug!("[{}] UDP send error: {}", conn_id, e);
-                break;
+                // ローカルサービスに送信
+                if let Err(e) = socket_for_recv.send(&payload).await {
+                    debug!("[{}] UDP send error: {}", conn_id, e);
+                    break;
+                }
+                debug!("[{}] UDP sent {} bytes", conn_id, len);
             }
-            debug!("[{}] UDP sent {} bytes", conn_id, len);
+            Ok::<_, anyhow::Error>(())
         }
-        Ok::<_, anyhow::Error>(())
-    });
+        .instrument(tracing::Span::current()),
+    );
 
     // UDP -> QUIC (ローカルからの応答をサーバーに転送)
-    let udp_to_quic = tokio::spawn(async move {
-        let mut buf = vec![0u8; 65535];
-        debug!("[{}] UDP->QUIC task started", conn_id);
-        loop {
-            let n = match local_socket.recv(&mut buf).await {
-                Ok(n) if n > 0 => n,
-                Ok(_) => {
-                    debug!("[{}] UDP recv returned 0", conn_id);
+    let udp_to_quic = tokio::spawn(
+        async move {
+            let mut buf = vec![0u8; 65535];
+            debug!("[{}] UDP->QUIC task started", conn_id);
+            loop {
+                let n = match local_socket.recv(&mut buf).await {
+                    Ok(n) if n > 0 => n,
+                    Ok(_) => {
+                        debug!("[{}] UDP recv returned 0", conn_id);
+                        break;
+                    }
+                    Err(e) => {
+                        debug!("[{}] UDP recv error: {}", conn_id, e);
+                        break;
+                    }
+                };
+
+                debug!("[{}] UDP recv {} bytes", conn_id, n);
+
+                // Length-prefixed framing で送信
+                let len = n as u32;
+                if let Err(e) = quic_send.write_all(&len.to_be_bytes()).await {
+                    debug!("[{}] QUIC write length error: {}", conn_id, e);
                     break;
                 }
-                Err(e) => {
-                    debug!("[{}] UDP recv error: {}", conn_id, e);
+                if let Err(e) = quic_send.write_all(&buf[..n]).await {
+                    debug!("[{}] QUIC write payload error: {}", conn_id, e);
                     break;
                 }
-            };
-
-            debug!("[{}] UDP recv {} bytes", conn_id, n);
-
-            // Length-prefixed framing で送信
-            let len = n as u32;
-            if let Err(e) = quic_send.write_all(&len.to_be_bytes()).await {
-                debug!("[{}] QUIC write length error: {}", conn_id, e);
-                break;
+                debug!("[{}] QUIC sent {} bytes", conn_id, n);
             }
-            if let Err(e) = quic_send.write_all(&buf[..n]).await {
-                debug!("[{}] QUIC write payload error: {}", conn_id, e);
-                break;
-            }
-            debug!("[{}] QUIC sent {} bytes", conn_id, n);
+            let _ = quic_send.finish();
+            Ok::<_, anyhow::Error>(())
         }
-        let _ = quic_send.finish();
-        Ok::<_, anyhow::Error>(())
-    });
+        .instrument(tracing::Span::current()),
+    );
 
     // 両方向の完了を待つ
     let (recv_result, send_result) = tokio::join!(quic_to_udp, udp_to_quic);
@@ -1049,7 +1082,11 @@ async fn run_local_forward(
     match response {
         ControlMessage::LocalForwardResponse { status, message } => {
             if status != ResponseStatus::Success {
-                anyhow::bail!("Server rejected LocalForwardRequest: {:?} - {}", status, message);
+                anyhow::bail!(
+                    "Server rejected LocalForwardRequest: {:?} - {}",
+                    status,
+                    message
+                );
             }
             info!("Server accepted LocalForwardRequest: {}", message);
         }
@@ -1199,7 +1236,7 @@ async fn handle_local_connections(
                                         debug!("TCP relay ended for {}: {}", conn_id, e);
                                     }
                                     conn_manager_clone.lock().await.remove_connection(conn_id);
-                                });
+                                }.instrument(tracing::Span::current()));
                             }
                             Err(e) => {
                                 error!("Failed to accept TCP connection: {}", e);
@@ -1268,8 +1305,9 @@ async fn handle_local_connections(
             };
 
             // UDP "仮想接続" を管理
-            let udp_connections: Arc<Mutex<HashMap<SocketAddr, (u32, tokio::sync::mpsc::Sender<Vec<u8>>)>>> =
-                Arc::new(Mutex::new(HashMap::new()));
+            let udp_connections: Arc<
+                Mutex<HashMap<SocketAddr, (u32, tokio::sync::mpsc::Sender<Vec<u8>>)>>,
+            > = Arc::new(Mutex::new(HashMap::new()));
 
             let mut recv_buf = vec![0u8; 65535];
 
@@ -1391,7 +1429,7 @@ async fn handle_local_connections(
                                         }
                                         conn_manager_clone.lock().await.remove_connection(conn_id);
                                         udp_connections_clone.lock().await.remove(&src_addr);
-                                    });
+                                    }.instrument(tracing::Span::current()));
                                 }
                             }
                             Err(e) => {
@@ -1463,62 +1501,68 @@ async fn relay_lpf_udp_stream(
     debug!("[{}] Starting LPF UDP relay for {}", conn_id, src_addr);
 
     // UDP -> QUIC (ローカルクライアントからのパケットをサーバーに送信)
-    let udp_to_quic = tokio::spawn(async move {
-        debug!("[{}] UDP->QUIC task started", conn_id);
-        loop {
-            match packet_rx.recv().await {
-                Some(data) => {
-                    // Length-prefixed framing
-                    let len = data.len() as u32;
-                    if let Err(e) = quic_send.write_all(&len.to_be_bytes()).await {
-                        debug!("[{}] Failed to write length: {}", conn_id, e);
+    let udp_to_quic = tokio::spawn(
+        async move {
+            debug!("[{}] UDP->QUIC task started", conn_id);
+            loop {
+                match packet_rx.recv().await {
+                    Some(data) => {
+                        // Length-prefixed framing
+                        let len = data.len() as u32;
+                        if let Err(e) = quic_send.write_all(&len.to_be_bytes()).await {
+                            debug!("[{}] Failed to write length: {}", conn_id, e);
+                            break;
+                        }
+                        if let Err(e) = quic_send.write_all(&data).await {
+                            debug!("[{}] Failed to write UDP data: {}", conn_id, e);
+                            break;
+                        }
+                        debug!("[{}] UDP->QUIC {} bytes", conn_id, data.len());
+                    }
+                    None => {
+                        debug!("[{}] UDP packet channel closed", conn_id);
                         break;
                     }
-                    if let Err(e) = quic_send.write_all(&data).await {
-                        debug!("[{}] Failed to write UDP data: {}", conn_id, e);
-                        break;
-                    }
-                    debug!("[{}] UDP->QUIC {} bytes", conn_id, data.len());
-                }
-                None => {
-                    debug!("[{}] UDP packet channel closed", conn_id);
-                    break;
                 }
             }
+            let _ = quic_send.finish();
+            Ok::<_, anyhow::Error>(())
         }
-        let _ = quic_send.finish();
-        Ok::<_, anyhow::Error>(())
-    });
+        .instrument(tracing::Span::current()),
+    );
 
     // QUIC -> UDP (サーバーからの応答をローカルクライアントに返す)
-    let quic_to_udp = tokio::spawn(async move {
-        debug!("[{}] QUIC->UDP task started", conn_id);
-        loop {
-            // Length-prefixed framing で読み取り
-            let mut len_buf = [0u8; 4];
-            if let Err(e) = quic_recv.read_exact(&mut len_buf).await {
-                debug!("[{}] QUIC read length error: {}", conn_id, e);
-                break;
-            }
-            let len = u32::from_be_bytes(len_buf) as usize;
+    let quic_to_udp = tokio::spawn(
+        async move {
+            debug!("[{}] QUIC->UDP task started", conn_id);
+            loop {
+                // Length-prefixed framing で読み取り
+                let mut len_buf = [0u8; 4];
+                if let Err(e) = quic_recv.read_exact(&mut len_buf).await {
+                    debug!("[{}] QUIC read length error: {}", conn_id, e);
+                    break;
+                }
+                let len = u32::from_be_bytes(len_buf) as usize;
 
-            let mut payload = vec![0u8; len];
-            if let Err(e) = quic_recv.read_exact(&mut payload).await {
-                debug!("[{}] QUIC read payload error: {}", conn_id, e);
-                break;
-            }
+                let mut payload = vec![0u8; len];
+                if let Err(e) = quic_recv.read_exact(&mut payload).await {
+                    debug!("[{}] QUIC read payload error: {}", conn_id, e);
+                    break;
+                }
 
-            debug!("[{}] QUIC read {} bytes", conn_id, len);
+                debug!("[{}] QUIC read {} bytes", conn_id, len);
 
-            // ローカルクライアントに返す
-            if let Err(e) = udp_socket.send_to(&payload, src_addr).await {
-                debug!("[{}] UDP send error: {}", conn_id, e);
-                break;
+                // ローカルクライアントに返す
+                if let Err(e) = udp_socket.send_to(&payload, src_addr).await {
+                    debug!("[{}] UDP send error: {}", conn_id, e);
+                    break;
+                }
+                debug!("[{}] UDP sent {} bytes to {}", conn_id, len, src_addr);
             }
-            debug!("[{}] UDP sent {} bytes to {}", conn_id, len, src_addr);
+            Ok::<_, anyhow::Error>(())
         }
-        Ok::<_, anyhow::Error>(())
-    });
+        .instrument(tracing::Span::current()),
+    );
 
     // 両方向の完了を待つ
     let (send_result, recv_result) = tokio::join!(udp_to_quic, quic_to_udp);
@@ -1607,19 +1651,29 @@ async fn run_ssh_proxy(
                 TofuStatus::Known => {
                     debug!("Server certificate verified (known host)");
                 }
-                TofuStatus::Unknown { host, fingerprint, .. } => {
+                TofuStatus::Unknown {
+                    host, fingerprint, ..
+                } => {
                     anyhow::bail!(
                         "Unknown host '{}' with fingerprint '{}'. \
                          Run quicport client first to add it to known_hosts, or use --insecure.",
-                        host, fingerprint
+                        host,
+                        fingerprint
                     );
                 }
-                TofuStatus::Changed { host, old_fingerprint, new_fingerprint, .. } => {
+                TofuStatus::Changed {
+                    host,
+                    old_fingerprint,
+                    new_fingerprint,
+                    ..
+                } => {
                     anyhow::bail!(
                         "Host '{}' certificate changed! Old: {}, New: {}. \
                          This could be a man-in-the-middle attack. \
                          Update known_hosts manually if this is expected.",
-                        host, old_fingerprint, new_fingerprint
+                        host,
+                        old_fingerprint,
+                        new_fingerprint
                     );
                 }
             }
@@ -1693,7 +1747,11 @@ async fn run_ssh_proxy(
     match response {
         ControlMessage::LocalForwardResponse { status, message } => {
             if status != ResponseStatus::Success {
-                anyhow::bail!("Server rejected LocalForwardRequest: {:?} - {}", status, message);
+                anyhow::bail!(
+                    "Server rejected LocalForwardRequest: {:?} - {}",
+                    status,
+                    message
+                );
             }
             info!("Server accepted LocalForwardRequest: {}", message);
         }
@@ -1727,7 +1785,10 @@ async fn run_ssh_proxy(
         .await
         .context("Failed to send LocalNewConnection")?;
 
-    info!("SSH proxy tunnel established: stdin/stdout -> {} -> {}", server_addr, remote_addr_str);
+    info!(
+        "SSH proxy tunnel established: stdin/stdout -> {} -> {}",
+        server_addr, remote_addr_str
+    );
 
     // stdin/stdout と QUIC ストリーム間でデータを中継
     relay_stdio_to_quic(conn_id, quic_send, quic_recv).await?;
@@ -1764,44 +1825,50 @@ async fn relay_stdio_to_quic(
     let mut stdout = tokio::io::stdout();
 
     // stdin -> QUIC (独立したタスクとして実行)
-    let stdin_to_quic = tokio::spawn(async move {
-        let mut buf = vec![0u8; 8192];
-        debug!("[{}] stdin->QUIC task started", conn_id);
-        loop {
-            let n = stdin.read(&mut buf).await?;
-            debug!("[{}] stdin read {} bytes", conn_id, n);
-            if n == 0 {
-                debug!("[{}] stdin EOF", conn_id);
-                break;
-            }
-            quic_send.write_all(&buf[..n]).await?;
-            debug!("[{}] QUIC write {} bytes", conn_id, n);
-        }
-        debug!("[{}] stdin->QUIC finishing stream", conn_id);
-        quic_send.finish()?;
-        Ok::<_, anyhow::Error>(())
-    });
-
-    // QUIC -> stdout (独立したタスクとして実行)
-    let quic_to_stdout = tokio::spawn(async move {
-        let mut buf = vec![0u8; 8192];
-        debug!("[{}] QUIC->stdout task started", conn_id);
-        loop {
-            match quic_recv.read(&mut buf).await? {
-                Some(n) if n > 0 => {
-                    debug!("[{}] QUIC read {} bytes", conn_id, n);
-                    stdout.write_all(&buf[..n]).await?;
-                    stdout.flush().await?;
-                    debug!("[{}] stdout write {} bytes", conn_id, n);
-                }
-                _ => {
-                    debug!("[{}] QUIC read EOF", conn_id);
+    let stdin_to_quic = tokio::spawn(
+        async move {
+            let mut buf = vec![0u8; 8192];
+            debug!("[{}] stdin->QUIC task started", conn_id);
+            loop {
+                let n = stdin.read(&mut buf).await?;
+                debug!("[{}] stdin read {} bytes", conn_id, n);
+                if n == 0 {
+                    debug!("[{}] stdin EOF", conn_id);
                     break;
                 }
+                quic_send.write_all(&buf[..n]).await?;
+                debug!("[{}] QUIC write {} bytes", conn_id, n);
             }
+            debug!("[{}] stdin->QUIC finishing stream", conn_id);
+            quic_send.finish()?;
+            Ok::<_, anyhow::Error>(())
         }
-        Ok::<_, anyhow::Error>(())
-    });
+        .instrument(tracing::Span::current()),
+    );
+
+    // QUIC -> stdout (独立したタスクとして実行)
+    let quic_to_stdout = tokio::spawn(
+        async move {
+            let mut buf = vec![0u8; 8192];
+            debug!("[{}] QUIC->stdout task started", conn_id);
+            loop {
+                match quic_recv.read(&mut buf).await? {
+                    Some(n) if n > 0 => {
+                        debug!("[{}] QUIC read {} bytes", conn_id, n);
+                        stdout.write_all(&buf[..n]).await?;
+                        stdout.flush().await?;
+                        debug!("[{}] stdout write {} bytes", conn_id, n);
+                    }
+                    _ => {
+                        debug!("[{}] QUIC read EOF", conn_id);
+                        break;
+                    }
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .instrument(tracing::Span::current()),
+    );
 
     // どちらかが終了したら完了
     tokio::select! {
@@ -1833,7 +1900,14 @@ pub async fn run_local_forward_with_reconnect(
     reconnect_config: ReconnectConfig,
 ) -> Result<()> {
     if !reconnect_config.enabled {
-        return run_local_forward(destination, local_source, remote_destination, auth_config, insecure).await;
+        return run_local_forward(
+            destination,
+            local_source,
+            remote_destination,
+            auth_config,
+            insecure,
+        )
+        .await;
     }
 
     let mut attempt = 0u32;

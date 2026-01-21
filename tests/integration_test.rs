@@ -69,7 +69,15 @@ impl TestServer {
         eprintln!("[TestServer] Starting with PSK: listen={}", listen_addr);
 
         let process = Command::new(quicport_binary())
-            .args(["control-plane", "--listen", &listen_addr, "--no-public-api", "--no-private-api", "--psk", psk])
+            .args([
+                "control-plane",
+                "--listen",
+                &listen_addr,
+                "--no-public-api",
+                "--no-private-api",
+                "--psk",
+                psk,
+            ])
             .stdout(Stdio::inherit()) // 標準出力を継承してログを見る
             .stderr(Stdio::inherit()) // 標準エラーを継承してログを見る
             .spawn()
@@ -92,7 +100,8 @@ impl TestServer {
                 "control-plane",
                 "--listen",
                 &listen_addr,
-                "--no-public-api", "--no-private-api",
+                "--no-public-api",
+                "--no-private-api",
                 "--privkey",
                 server_privkey,
                 "--client-pubkeys",
@@ -421,10 +430,7 @@ impl LocalUdpService {
         let mut buf = vec![0u8; 65535];
         let (len, src_addr) = self.socket.recv_from(&mut buf)?;
 
-        eprintln!(
-            "[LocalUdpService] Received {} bytes from {}",
-            len, src_addr
-        );
+        eprintln!("[LocalUdpService] Received {} bytes from {}", len, src_addr);
 
         let received = String::from_utf8_lossy(&buf[..len]).to_string();
 

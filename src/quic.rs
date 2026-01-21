@@ -250,8 +250,7 @@ impl KnownHosts {
             }
         }
 
-        let mut file =
-            fs::File::create(&self.path).context("Failed to create known_hosts file")?;
+        let mut file = fs::File::create(&self.path).context("Failed to create known_hosts file")?;
 
         // ヘッダー行（3行）
         writeln!(file, "# quicport known_hosts file").ok();
@@ -402,10 +401,7 @@ fn server_cert_lock_path() -> Result<PathBuf> {
 }
 
 /// 証明書と秘密鍵をファイルに保存（アトミック操作）
-fn save_server_cert(
-    cert_der: &[u8],
-    key_der: &[u8],
-) -> Result<()> {
+fn save_server_cert(cert_der: &[u8], key_der: &[u8]) -> Result<()> {
     let cert_path = server_cert_path()?;
     let key_path = server_key_path()?;
     let config_dir = server_config_dir()?;
@@ -434,10 +430,7 @@ fn save_server_cert(
     fs::rename(&cert_tmp, &cert_path)
         .with_context(|| format!("Failed to rename {:?} to {:?}", cert_tmp, cert_path))?;
 
-    tracing::info!(
-        "Server certificate saved to {:?}",
-        cert_path
-    );
+    tracing::info!("Server certificate saved to {:?}", cert_path);
 
     Ok(())
 }
@@ -460,10 +453,7 @@ fn load_server_cert() -> Result<Option<(Vec<CertificateDer<'static>>, PrivateKey
     let cert = CertificateDer::from(cert_der);
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der));
 
-    tracing::info!(
-        "Server certificate loaded from {:?}",
-        cert_path
-    );
+    tracing::info!("Server certificate loaded from {:?}", cert_path);
 
     Ok(Some((vec![cert], key)))
 }
@@ -597,8 +587,8 @@ pub fn create_server_endpoint(bind_addr: SocketAddr, _psk: &str) -> Result<Endpo
         .context("Failed to create UDP socket with SO_REUSEPORT")?;
 
     // カスタムソケットから Endpoint を作成
-    let runtime = quinn::default_runtime()
-        .ok_or_else(|| anyhow::anyhow!("No async runtime found"))?;
+    let runtime =
+        quinn::default_runtime().ok_or_else(|| anyhow::anyhow!("No async runtime found"))?;
 
     let endpoint = Endpoint::new(
         quinn::EndpointConfig::default(),
@@ -624,8 +614,7 @@ pub fn create_client_endpoint(server_addr: &std::net::SocketAddr) -> Result<Endp
         "0.0.0.0:0".parse().unwrap()
     };
 
-    let mut endpoint =
-        Endpoint::client(bind_addr).context("Failed to create client endpoint")?;
+    let mut endpoint = Endpoint::client(bind_addr).context("Failed to create client endpoint")?;
 
     // 自己署名証明書を許可するカスタム証明書検証
     let mut crypto = rustls::ClientConfig::builder()
@@ -675,8 +664,7 @@ pub fn create_client_endpoint_with_tofu(
         "0.0.0.0:0".parse().unwrap()
     };
 
-    let mut endpoint =
-        Endpoint::client(bind_addr).context("Failed to create client endpoint")?;
+    let mut endpoint = Endpoint::client(bind_addr).context("Failed to create client endpoint")?;
 
     // TOFU 証明書検証器を作成
     let verifier = Arc::new(TofuVerifier::new(server_host.to_string(), known_hosts));

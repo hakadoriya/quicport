@@ -525,10 +525,7 @@ impl IpcConnection {
     async fn send_raw(&mut self, msg_type: u8, payload: &[u8]) -> Result<(), IpcError> {
         let length = (payload.len() + 1) as u32;
         if length as usize > MAX_MESSAGE_SIZE {
-            return Err(IpcError::MessageTooLarge(
-                length as usize,
-                MAX_MESSAGE_SIZE,
-            ));
+            return Err(IpcError::MessageTooLarge(length as usize, MAX_MESSAGE_SIZE));
         }
 
         // Length (4 bytes, big-endian)
@@ -588,7 +585,9 @@ impl IpcConnection {
 pub fn dataplanes_dir() -> Result<PathBuf, io::Error> {
     let state_dir = dirs::state_dir()
         .or_else(|| dirs::data_local_dir())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Cannot determine state directory"))?;
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "Cannot determine state directory")
+        })?;
 
     Ok(state_dir.join("quicport").join("dataplanes"))
 }

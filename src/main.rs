@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+use quicport::client;
 use quicport::control_plane;
 use quicport::data_plane;
 use quicport::ipc::{AuthPolicy, DataPlaneConfig};
@@ -18,7 +19,6 @@ use quicport::quic::{
     parse_base64_key, psk_file_path,
 };
 use quicport::statistics::ServerStatistics;
-use quicport::client;
 
 /// ログ出力形式
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -189,7 +189,6 @@ enum Commands {
         // Remote Port Forwarding (RPF) オプション
         // サーバー側でポートをリッスンし、クライアント側のローカルサービスに転送
         // =========================================================================
-
         /// [RPF] Remote source port to open on server (e.g., "9022/tcp")
         /// Mutually exclusive with --local-source
         #[arg(short = 'r', long, conflicts_with = "local_source")]
@@ -204,7 +203,6 @@ enum Commands {
         // Local Port Forwarding (LPF) オプション
         // クライアント側でポートをリッスンし、サーバー側のリモートサービスに転送
         // =========================================================================
-
         /// [LPF] Local source port to listen on client (e.g., "9022/tcp")
         /// Mutually exclusive with --remote-source
         #[arg(short = 'L', long, conflicts_with = "remote_source")]
@@ -218,7 +216,6 @@ enum Commands {
         // =========================================================================
         // 認証オプション
         // =========================================================================
-
         /// Private key in Base64 format
         #[arg(long, env = "QUICPORT_PRIVKEY")]
         privkey: Option<String>,
@@ -345,16 +342,15 @@ fn build_client_auth_config(
 
 /// データプレーン用の認証ポリシーを構築（環境変数から）
 fn build_dataplane_auth_policy() -> Result<AuthPolicy> {
-    let auth_type = std::env::var("QUICPORT_DP_AUTH_TYPE")
-        .unwrap_or_else(|_| "psk".to_string());
+    let auth_type = std::env::var("QUICPORT_DP_AUTH_TYPE").unwrap_or_else(|_| "psk".to_string());
 
     match auth_type.as_str() {
         "x25519" => {
             let server_privkey = std::env::var("QUICPORT_DP_SERVER_PRIVKEY")
                 .context("QUICPORT_DP_SERVER_PRIVKEY is required for X25519 authentication")?;
 
-            let client_pubkeys_str = std::env::var("QUICPORT_DP_CLIENT_PUBKEYS")
-                .unwrap_or_default();
+            let client_pubkeys_str =
+                std::env::var("QUICPORT_DP_CLIENT_PUBKEYS").unwrap_or_default();
             let authorized_pubkeys: Vec<String> = client_pubkeys_str
                 .split(',')
                 .filter(|s| !s.is_empty())
@@ -378,7 +374,10 @@ fn build_dataplane_auth_policy() -> Result<AuthPolicy> {
             Ok(AuthPolicy::Psk { psk })
         }
         _ => {
-            anyhow::bail!("Invalid auth type: {}. Expected 'psk' or 'x25519'", auth_type)
+            anyhow::bail!(
+                "Invalid auth type: {}. Expected 'psk' or 'x25519'",
+                auth_type
+            )
         }
     }
 }
@@ -491,8 +490,7 @@ async fn main() -> Result<()> {
     let use_stderr = matches!(cli.command, Commands::SshProxy { .. });
 
     // Initialize logging
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     // ログ出力先を決定
     if let Some(ref log_path) = cli.log_output {
@@ -516,6 +514,8 @@ async fn main() -> Result<()> {
                     .with_writer(writer)
                     .with_env_filter(env_filter)
                     .json()
+                    .flatten_event(true)
+                    .with_span_list(true)
                     .init();
             }
         }
@@ -533,6 +533,8 @@ async fn main() -> Result<()> {
                     .with_writer(std::io::stderr)
                     .with_env_filter(env_filter)
                     .json()
+                    .flatten_event(true)
+                    .with_span_list(true)
                     .init();
             }
         }
@@ -550,10 +552,16 @@ async fn main() -> Result<()> {
                     .with_writer(std::io::stdout)
                     .with_env_filter(env_filter)
                     .json()
+                    .flatten_event(true)
+                    .with_span_list(true)
                     .init();
             }
         }
     }
+
+    // PID を含むルートスパンを作成（全ログに PID が含まれる）
+    let pid = std::process::id();
+    let _root_span = tracing::info_span!("quicport", pid).entered();
 
     match cli.command {
         Commands::DataPlane {
@@ -593,10 +601,15 @@ async fn main() -> Result<()> {
                 CtlCommands::Drain { pid } => {
                     use quicport::ipc::{read_dataplane_port, ControlCommand, IpcConnection};
 
-                    let port = read_dataplane_port(pid)
-                        .with_context(|| format!("Failed to read port for data plane PID {}", pid))?;
-                    let mut conn = IpcConnection::connect(port).await
-                        .with_context(|| format!("Failed to connect to data plane PID {} on port {}", pid, port))?;
+                    let port = read_dataplane_port(pid).with_context(|| {
+                        format!("Failed to read port for data plane PID {}", pid)
+                    })?;
+                    let mut conn = IpcConnection::connect(port).await.with_context(|| {
+                        format!(
+                            "Failed to connect to data plane PID {} on port {}",
+                            pid, port
+                        )
+                    })?;
 
                     // Ready イベントをスキップ
                     let _ = conn.recv_event().await;
@@ -629,11 +642,8 @@ async fn main() -> Result<()> {
                 psk,
             )?;
 
-            let reconnect_config = client::ReconnectConfig::new(
-                reconnect,
-                reconnect_max_attempts,
-                reconnect_delay,
-            );
+            let reconnect_config =
+                client::ReconnectConfig::new(reconnect, reconnect_max_attempts, reconnect_delay);
 
             info!(
                 "SSH proxy connecting to {} (remote={})",
@@ -681,7 +691,10 @@ async fn main() -> Result<()> {
                 } else {
                     Some(private_api_listen.unwrap_or_else(|| {
                         // デフォルト: 127.0.0.1:<listen_port>
-                        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), listen.port())
+                        SocketAddr::new(
+                            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                            listen.port(),
+                        )
                     }))
                 };
 
@@ -710,11 +723,21 @@ async fn main() -> Result<()> {
                     info!("Starting public API server on {} (TCP, /healthcheck)", addr);
                 }
                 if let Some(addr) = config.private_addr {
-                    info!("Starting private API server on {} (/metrics, /graceful-restart)", addr);
+                    info!(
+                        "Starting private API server on {} (/metrics, /graceful-restart)",
+                        addr
+                    );
                 }
             }
 
-            control_plane::run_with_api(listen, auth_policy, statistics, api_config, no_auto_dataplane).await?;
+            control_plane::run_with_api(
+                listen,
+                auth_policy,
+                statistics,
+                api_config,
+                no_auto_dataplane,
+            )
+            .await?;
         }
         Commands::Client {
             server,
@@ -740,14 +763,16 @@ async fn main() -> Result<()> {
                 psk,
             )?;
 
-            let reconnect_config = client::ReconnectConfig::new(
-                reconnect,
-                reconnect_max_attempts,
-                reconnect_delay,
-            );
+            let reconnect_config =
+                client::ReconnectConfig::new(reconnect, reconnect_max_attempts, reconnect_delay);
 
             // フォワーディングモードを判定
-            match (remote_source, local_destination, local_source, remote_destination) {
+            match (
+                remote_source,
+                local_destination,
+                local_source,
+                remote_destination,
+            ) {
                 // Remote Port Forwarding (RPF): --remote-source + --local-destination
                 (Some(rs), Some(ld), None, None) => {
                     info!(

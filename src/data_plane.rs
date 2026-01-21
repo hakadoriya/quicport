@@ -25,7 +25,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument};
 
 use crate::ipc::{
     cleanup_dataplane_files, ensure_dataplanes_dir, write_dataplane_port, write_dataplane_state,
@@ -33,7 +33,9 @@ use crate::ipc::{
     DataPlaneState, DataPlaneStatus, IpcConnection, PollCommandsRequest, PollCommandsResponse,
     RegisterDataPlaneRequest, RegisterDataPlaneResponse, ReportEventRequest,
 };
-use crate::protocol::{CloseReason, ControlMessage, ControlStream, Protocol, ProtocolError, ResponseStatus};
+use crate::protocol::{
+    CloseReason, ControlMessage, ControlStream, Protocol, ProtocolError, ResponseStatus,
+};
 use crate::quic::{
     authenticate_client_psk, authenticate_client_x25519, create_server_endpoint, encode_base64_key,
     parse_base64_key,
@@ -193,7 +195,10 @@ impl DataPlane {
 
     /// 接続情報を登録
     pub async fn register_connection(&self, id: u32, protocol: Protocol, remote_addr: SocketAddr) {
-        self.connection_list.write().await.insert(id, (protocol, remote_addr));
+        self.connection_list
+            .write()
+            .await
+            .insert(id, (protocol, remote_addr));
     }
 
     /// 接続情報を削除
@@ -236,9 +241,9 @@ impl HttpIpcClient {
     /// 新しい HTTP IPC クライアントを作成
     pub fn new(base_url: &str) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(35))           // HTTP タイムアウト
-            .connect_timeout(Duration::from_secs(5))    // 接続タイムアウト
-            .tcp_keepalive(Duration::from_secs(15))     // TCP キープアライブ
+            .timeout(Duration::from_secs(35)) // HTTP タイムアウト
+            .connect_timeout(Duration::from_secs(5)) // 接続タイムアウト
+            .tcp_keepalive(Duration::from_secs(15)) // TCP キープアライブ
             .pool_idle_timeout(Duration::from_secs(90)) // コネクションプール
             .build()
             .expect("Failed to create HTTP client");
@@ -264,7 +269,8 @@ impl HttpIpcClient {
 
         debug!("RegisterDataPlane: url={}, pid={}", url, pid);
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .json(&request)
             .send()
@@ -276,7 +282,8 @@ impl HttpIpcClient {
             let text = response.text().await.unwrap_or_default();
             return Err(anyhow::anyhow!(
                 "RegisterDataPlane failed: status={}, body={}",
-                status, text
+                status,
+                text
             ));
         }
 
@@ -292,8 +299,13 @@ impl HttpIpcClient {
     }
 
     /// コマンドをポーリング（長ポーリング）
-    pub async fn poll_commands(&self, wait_timeout_secs: u64) -> anyhow::Result<Vec<CommandWithId>> {
-        let dp_id = self.dp_id.as_ref()
+    pub async fn poll_commands(
+        &self,
+        wait_timeout_secs: u64,
+    ) -> anyhow::Result<Vec<CommandWithId>> {
+        let dp_id = self
+            .dp_id
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Not registered with Control Plane"))?;
 
         let url = format!("{}/api/v1/PollCommands", self.base_url);
@@ -302,7 +314,8 @@ impl HttpIpcClient {
             wait_timeout_secs,
         };
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .json(&request)
             .send()
@@ -314,7 +327,8 @@ impl HttpIpcClient {
             let text = response.text().await.unwrap_or_default();
             return Err(anyhow::anyhow!(
                 "PollCommands failed: status={}, body={}",
-                status, text
+                status,
+                text
             ));
         }
 
@@ -333,7 +347,9 @@ impl HttpIpcClient {
         status_str: &str,
         result: Option<DataPlaneStatus>,
     ) -> anyhow::Result<()> {
-        let dp_id = self.dp_id.as_ref()
+        let dp_id = self
+            .dp_id
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Not registered with Control Plane"))?;
 
         let url = format!("{}/api/v1/AckCommand", self.base_url);
@@ -344,7 +360,8 @@ impl HttpIpcClient {
             result,
         };
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .json(&request)
             .send()
@@ -356,7 +373,8 @@ impl HttpIpcClient {
             let text = response.text().await.unwrap_or_default();
             return Err(anyhow::anyhow!(
                 "AckCommand failed: status={}, body={}",
-                status, text
+                status,
+                text
             ));
         }
 
@@ -365,7 +383,9 @@ impl HttpIpcClient {
 
     /// イベントを報告
     pub async fn report_event(&self, event: DataPlaneEvent) -> anyhow::Result<()> {
-        let dp_id = self.dp_id.as_ref()
+        let dp_id = self
+            .dp_id
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Not registered with Control Plane"))?;
 
         let url = format!("{}/api/v1/ReportEvent", self.base_url);
@@ -374,7 +394,8 @@ impl HttpIpcClient {
             event,
         };
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .json(&request)
             .send()
@@ -386,7 +407,8 @@ impl HttpIpcClient {
             let text = response.text().await.unwrap_or_default();
             return Err(anyhow::anyhow!(
                 "ReportEvent failed: status={}, body={}",
-                status, text
+                status,
+                text
             ));
         }
 
@@ -536,7 +558,7 @@ pub async fn run(config: DataPlaneConfig, auth_policy: Option<AuthPolicy>) -> Re
                             if let Err(e) = handle_ipc_connection(dp, stream).await {
                                 error!("IPC handler error: {}", e);
                             }
-                        });
+                        }.instrument(tracing::Span::current()));
                     }
                     Err(e) => {
                         error!("Failed to accept IPC connection: {}", e);
@@ -574,7 +596,7 @@ pub async fn run(config: DataPlaneConfig, auth_policy: Option<AuthPolicy>) -> Re
                                     error!("Failed to accept QUIC connection: {}", e);
                                 }
                             }
-                        });
+                        }.instrument(tracing::Span::current()));
                     }
                     None => {
                         info!("QUIC endpoint closed");
@@ -625,7 +647,10 @@ pub async fn run_with_control_plane_url(config: DataPlaneConfig, cp_url: &str) -
         let mut retries = 0;
         let max_retries = 30;
         loop {
-            match http_client.register(pid, &config.listen_addr.to_string()).await {
+            match http_client
+                .register(pid, &config.listen_addr.to_string())
+                .await
+            {
                 Ok(result) => break result,
                 Err(e) => {
                     retries += 1;
@@ -755,7 +780,7 @@ pub async fn run_with_control_plane_url(config: DataPlaneConfig, cp_url: &str) -
                 }
             }
         }
-    });
+    }.instrument(tracing::Span::current()));
 
     // メインループ
     loop {
@@ -825,7 +850,7 @@ pub async fn run_with_control_plane_url(config: DataPlaneConfig, cp_url: &str) -
                                     error!("Failed to accept QUIC connection: {}", e);
                                 }
                             }
-                        });
+                        }.instrument(tracing::Span::current()));
                     }
                     None => {
                         info!("QUIC endpoint closed");
@@ -845,10 +870,7 @@ pub async fn run_with_control_plane_url(config: DataPlaneConfig, cp_url: &str) -
 }
 
 /// IPC 接続を処理
-async fn handle_ipc_connection(
-    data_plane: Arc<DataPlane>,
-    stream: TcpStream,
-) -> Result<()> {
+async fn handle_ipc_connection(data_plane: Arc<DataPlane>, stream: TcpStream) -> Result<()> {
     let mut conn = IpcConnection::new(stream);
 
     // Ready イベントを送信
@@ -956,11 +978,9 @@ async fn process_ipc_command(data_plane: &DataPlane, cmd: ControlCommand) -> Dat
             }))
         }
 
-        ControlCommand::GetConnections => {
-            DataPlaneEvent::Connections {
-                connections: data_plane.get_connections().await,
-            }
-        }
+        ControlCommand::GetConnections => DataPlaneEvent::Connections {
+            connections: data_plane.get_connections().await,
+        },
     }
 }
 
@@ -995,8 +1015,8 @@ async fn handle_quic_connection(data_plane: Arc<DataPlane>, connection: Connecti
                 .iter()
                 .filter_map(|k| parse_base64_key(k).ok())
                 .collect();
-            let server_key = parse_base64_key(server_private_key)
-                .context("Invalid server private key")?;
+            let server_key =
+                parse_base64_key(server_private_key).context("Invalid server private key")?;
 
             match authenticate_client_x25519(&mut send, &mut recv, &pubkeys, &server_key).await {
                 Ok(client_pubkey) => {
@@ -1023,19 +1043,17 @@ async fn handle_quic_connection(data_plane: Arc<DataPlane>, connection: Connecti
                 }
             }
         }
-        AuthPolicy::Psk { psk } => {
-            match authenticate_client_psk(&mut send, &mut recv, psk).await {
-                Ok(()) => {
-                    data_plane.statistics.auth_psk_success();
-                    info!("Client {} authenticated (PSK)", remote_addr);
-                }
-                Err(e) => {
-                    data_plane.statistics.auth_psk_failed();
-                    warn!("PSK authentication failed for {}: {}", remote_addr, e);
-                    return Ok(());
-                }
+        AuthPolicy::Psk { psk } => match authenticate_client_psk(&mut send, &mut recv, psk).await {
+            Ok(()) => {
+                data_plane.statistics.auth_psk_success();
+                info!("Client {} authenticated (PSK)", remote_addr);
             }
-        }
+            Err(e) => {
+                data_plane.statistics.auth_psk_failed();
+                warn!("PSK authentication failed for {}: {}", remote_addr, e);
+                return Ok(());
+            }
+        },
     }
 
     // 制御ストリームをラップ
@@ -1293,7 +1311,7 @@ async fn handle_remote_forward(
                                     }
                                     conn_manager_clone.lock().await.remove_connection(conn_id);
                                     dp_clone.unregister_connection(conn_id).await;
-                                });
+                                }.instrument(tracing::Span::current()));
                             }
                             Err(e) => {
                                 error!("Failed to accept TCP connection: {}", e);
@@ -1378,8 +1396,9 @@ async fn handle_remote_forward(
             // 【ロック順序】デッドロック防止のため、複数ロック取得時は以下の順序を厳守:
             //   conn_manager → udp_connections
             // また、ロック保持中の await は最小限に抑える（tx.clone() 後に解放してから send）
-            let udp_connections: Arc<Mutex<HashMap<SocketAddr, (u32, tokio::sync::mpsc::Sender<Vec<u8>>)>>> =
-                Arc::new(Mutex::new(HashMap::new()));
+            let udp_connections: Arc<
+                Mutex<HashMap<SocketAddr, (u32, tokio::sync::mpsc::Sender<Vec<u8>>)>>,
+            > = Arc::new(Mutex::new(HashMap::new()));
 
             let mut recv_buf = vec![0u8; 65535]; // UDP 最大パケットサイズ
 
@@ -1500,7 +1519,7 @@ async fn handle_remote_forward(
                                         conn_manager_clone.lock().await.remove_connection(conn_id);
                                         udp_connections_clone.lock().await.remove(&src_addr);
                                         dp_clone.unregister_connection(conn_id).await;
-                                    });
+                                    }.instrument(tracing::Span::current()));
                                 }
                             }
                             Err(e) => {
@@ -1570,7 +1589,10 @@ async fn handle_local_forward(
         message: format!("Ready to forward to {}", remote_destination),
     };
     control_stream.send_message(&response).await?;
-    info!("LocalForwardResponse sent: ready to forward to {}", remote_destination);
+    info!(
+        "LocalForwardResponse sent: ready to forward to {}",
+        remote_destination
+    );
 
     let remote_destination = remote_destination.to_string();
 
@@ -1659,7 +1681,7 @@ async fn handle_local_forward(
                                                     }
                                                     conn_manager_clone.lock().await.remove_connection(conn_id);
                                                     dp_clone.unregister_connection(conn_id).await;
-                                                });
+                                                }.instrument(tracing::Span::current()));
                                             }
                                             Err(e) => {
                                                 error!("Failed to connect to remote TCP service {}: {}", remote_dest, e);
@@ -1713,7 +1735,7 @@ async fn handle_local_forward(
                                                     }
                                                     conn_manager_clone.lock().await.remove_connection(conn_id);
                                                     dp_clone.unregister_connection(conn_id).await;
-                                                });
+                                                }.instrument(tracing::Span::current()));
                                             }
                                             Err(e) => {
                                                 error!("Failed to create UDP socket: {}", e);
@@ -1799,56 +1821,62 @@ async fn relay_tcp_stream(
     // TCP -> QUIC
     let dp_for_send = data_plane.clone();
     let cancel_for_send = cancel_token.clone();
-    let tcp_to_quic = tokio::spawn(async move {
-        let mut buf = vec![0u8; 8192];
-        let mut total_sent = 0u64;
-        loop {
-            tokio::select! {
-                _ = cancel_for_send.cancelled() => {
-                    debug!("[{}] TCP->QUIC cancelled", conn_id);
-                    break;
-                }
-                result = tcp_read.read(&mut buf) => {
-                    let n = result?;
-                    if n == 0 {
+    let tcp_to_quic = tokio::spawn(
+        async move {
+            let mut buf = vec![0u8; 8192];
+            let mut total_sent = 0u64;
+            loop {
+                tokio::select! {
+                    _ = cancel_for_send.cancelled() => {
+                        debug!("[{}] TCP->QUIC cancelled", conn_id);
                         break;
                     }
-                    quic_send.write_all(&buf[..n]).await?;
-                    total_sent += n as u64;
+                    result = tcp_read.read(&mut buf) => {
+                        let n = result?;
+                        if n == 0 {
+                            break;
+                        }
+                        quic_send.write_all(&buf[..n]).await?;
+                        total_sent += n as u64;
+                    }
                 }
             }
+            let _ = quic_send.finish();
+            dp_for_send.add_bytes(total_sent, 0);
+            Ok::<_, anyhow::Error>(())
         }
-        let _ = quic_send.finish();
-        dp_for_send.add_bytes(total_sent, 0);
-        Ok::<_, anyhow::Error>(())
-    });
+        .instrument(tracing::Span::current()),
+    );
 
     // QUIC -> TCP
     let dp_for_recv = data_plane.clone();
     let cancel_for_recv = cancel_token.clone();
-    let quic_to_tcp = tokio::spawn(async move {
-        let mut buf = vec![0u8; 8192];
-        let mut total_received = 0u64;
-        loop {
-            tokio::select! {
-                _ = cancel_for_recv.cancelled() => {
-                    debug!("[{}] QUIC->TCP cancelled", conn_id);
-                    break;
-                }
-                result = quic_recv.read(&mut buf) => {
-                    match result? {
-                        Some(n) if n > 0 => {
-                            tcp_write.write_all(&buf[..n]).await?;
-                            total_received += n as u64;
+    let quic_to_tcp = tokio::spawn(
+        async move {
+            let mut buf = vec![0u8; 8192];
+            let mut total_received = 0u64;
+            loop {
+                tokio::select! {
+                    _ = cancel_for_recv.cancelled() => {
+                        debug!("[{}] QUIC->TCP cancelled", conn_id);
+                        break;
+                    }
+                    result = quic_recv.read(&mut buf) => {
+                        match result? {
+                            Some(n) if n > 0 => {
+                                tcp_write.write_all(&buf[..n]).await?;
+                                total_received += n as u64;
+                            }
+                            _ => break,
                         }
-                        _ => break,
                     }
                 }
             }
+            dp_for_recv.add_bytes(0, total_received);
+            Ok::<_, anyhow::Error>(())
         }
-        dp_for_recv.add_bytes(0, total_received);
-        Ok::<_, anyhow::Error>(())
-    });
+        .instrument(tracing::Span::current()),
+    );
 
     let (tcp_result, quic_result) = tokio::join!(tcp_to_quic, quic_to_tcp);
 
@@ -1885,91 +1913,97 @@ async fn relay_rpf_udp_stream(
     // UDP -> QUIC (受信したパケットをチャネル経由で受け取り、QUIC に送信)
     let dp_for_send = data_plane.clone();
     let cancel_for_send = cancel_token.clone();
-    let udp_to_quic = tokio::spawn(async move {
-        let mut total_sent = 0u64;
-        debug!("[{}] UDP->QUIC task started", conn_id);
-        loop {
-            tokio::select! {
-                _ = cancel_for_send.cancelled() => {
-                    debug!("[{}] UDP->QUIC cancelled", conn_id);
-                    break;
-                }
-                packet = packet_rx.recv() => {
-                    match packet {
-                        Some(data) => {
-                            // Length-prefixed framing: [4 bytes length] + [payload]
-                            let len = data.len() as u32;
-                            if let Err(e) = quic_send.write_all(&len.to_be_bytes()).await {
-                                debug!("[{}] Failed to write length: {}", conn_id, e);
+    let udp_to_quic = tokio::spawn(
+        async move {
+            let mut total_sent = 0u64;
+            debug!("[{}] UDP->QUIC task started", conn_id);
+            loop {
+                tokio::select! {
+                    _ = cancel_for_send.cancelled() => {
+                        debug!("[{}] UDP->QUIC cancelled", conn_id);
+                        break;
+                    }
+                    packet = packet_rx.recv() => {
+                        match packet {
+                            Some(data) => {
+                                // Length-prefixed framing: [4 bytes length] + [payload]
+                                let len = data.len() as u32;
+                                if let Err(e) = quic_send.write_all(&len.to_be_bytes()).await {
+                                    debug!("[{}] Failed to write length: {}", conn_id, e);
+                                    break;
+                                }
+                                if let Err(e) = quic_send.write_all(&data).await {
+                                    debug!("[{}] Failed to write UDP data: {}", conn_id, e);
+                                    break;
+                                }
+                                total_sent += 4 + data.len() as u64;
+                                debug!("[{}] UDP->QUIC {} bytes", conn_id, data.len());
+                            }
+                            None => {
+                                // チャネルが閉じられた
+                                debug!("[{}] UDP packet channel closed", conn_id);
                                 break;
                             }
-                            if let Err(e) = quic_send.write_all(&data).await {
-                                debug!("[{}] Failed to write UDP data: {}", conn_id, e);
-                                break;
-                            }
-                            total_sent += 4 + data.len() as u64;
-                            debug!("[{}] UDP->QUIC {} bytes", conn_id, data.len());
-                        }
-                        None => {
-                            // チャネルが閉じられた
-                            debug!("[{}] UDP packet channel closed", conn_id);
-                            break;
                         }
                     }
                 }
             }
+            let _ = quic_send.finish();
+            dp_for_send.add_bytes(total_sent, 0);
+            Ok::<_, anyhow::Error>(())
         }
-        let _ = quic_send.finish();
-        dp_for_send.add_bytes(total_sent, 0);
-        Ok::<_, anyhow::Error>(())
-    });
+        .instrument(tracing::Span::current()),
+    );
 
     // QUIC -> UDP (QUIC から受信してオリジナルの送信元に返す)
     let dp_for_recv = data_plane.clone();
     let cancel_for_recv = cancel_token.clone();
-    let quic_to_udp = tokio::spawn(async move {
-        let mut total_received = 0u64;
-        debug!("[{}] QUIC->UDP task started", conn_id);
-        loop {
-            tokio::select! {
-                _ = cancel_for_recv.cancelled() => {
-                    debug!("[{}] QUIC->UDP cancelled", conn_id);
-                    break;
-                }
-                // Length-prefixed framing で読み取り
-                result = async {
-                    // 4 bytes の長さを読み取り
-                    let mut len_buf = [0u8; 4];
-                    quic_recv.read_exact(&mut len_buf).await?;
-                    let len = u32::from_be_bytes(len_buf) as usize;
+    let quic_to_udp = tokio::spawn(
+        async move {
+            let mut total_received = 0u64;
+            debug!("[{}] QUIC->UDP task started", conn_id);
+            loop {
+                tokio::select! {
+                    _ = cancel_for_recv.cancelled() => {
+                        debug!("[{}] QUIC->UDP cancelled", conn_id);
+                        break;
+                    }
+                    // Length-prefixed framing で読み取り
+                    result = async {
+                        // 4 bytes の長さを読み取り
+                        let mut len_buf = [0u8; 4];
+                        quic_recv.read_exact(&mut len_buf).await?;
+                        let len = u32::from_be_bytes(len_buf) as usize;
 
-                    // ペイロードを読み取り
-                    let mut payload = vec![0u8; len];
-                    quic_recv.read_exact(&mut payload).await?;
+                        // ペイロードを読み取り
+                        let mut payload = vec![0u8; len];
+                        quic_recv.read_exact(&mut payload).await?;
 
-                    Ok::<_, quinn::ReadExactError>((len, payload))
-                } => {
-                    match result {
-                        Ok((len, payload)) => {
-                            total_received += 4 + len as u64;
-                            // オリジナルの送信元に返す
-                            if let Err(e) = udp_socket.send_to(&payload, src_addr).await {
-                                debug!("[{}] Failed to send UDP response: {}", conn_id, e);
+                        Ok::<_, quinn::ReadExactError>((len, payload))
+                    } => {
+                        match result {
+                            Ok((len, payload)) => {
+                                total_received += 4 + len as u64;
+                                // オリジナルの送信元に返す
+                                if let Err(e) = udp_socket.send_to(&payload, src_addr).await {
+                                    debug!("[{}] Failed to send UDP response: {}", conn_id, e);
+                                    break;
+                                }
+                                debug!("[{}] QUIC->UDP {} bytes to {}", conn_id, len, src_addr);
+                            }
+                            Err(e) => {
+                                debug!("[{}] QUIC read error: {}", conn_id, e);
                                 break;
                             }
-                            debug!("[{}] QUIC->UDP {} bytes to {}", conn_id, len, src_addr);
-                        }
-                        Err(e) => {
-                            debug!("[{}] QUIC read error: {}", conn_id, e);
-                            break;
                         }
                     }
                 }
             }
+            dp_for_recv.add_bytes(0, total_received);
+            Ok::<_, anyhow::Error>(())
         }
-        dp_for_recv.add_bytes(0, total_received);
-        Ok::<_, anyhow::Error>(())
-    });
+        .instrument(tracing::Span::current()),
+    );
 
     // 両方向の完了を待つ
     let (send_result, recv_result) = tokio::join!(udp_to_quic, quic_to_udp);
@@ -2002,93 +2036,99 @@ async fn relay_lpf_udp_stream(
     let socket_for_send = udp_socket.clone();
     let dp_for_recv = data_plane.clone();
     let cancel_for_recv = cancel_token.clone();
-    let quic_to_udp = tokio::spawn(async move {
-        let mut total_received = 0u64;
-        debug!("[{}] QUIC->UDP task started", conn_id);
-        loop {
-            tokio::select! {
-                _ = cancel_for_recv.cancelled() => {
-                    debug!("[{}] QUIC->UDP cancelled", conn_id);
-                    break;
-                }
-                // Length-prefixed framing で読み取り
-                result = async {
-                    let mut len_buf = [0u8; 4];
-                    quic_recv.read_exact(&mut len_buf).await?;
-                    let len = u32::from_be_bytes(len_buf) as usize;
+    let quic_to_udp = tokio::spawn(
+        async move {
+            let mut total_received = 0u64;
+            debug!("[{}] QUIC->UDP task started", conn_id);
+            loop {
+                tokio::select! {
+                    _ = cancel_for_recv.cancelled() => {
+                        debug!("[{}] QUIC->UDP cancelled", conn_id);
+                        break;
+                    }
+                    // Length-prefixed framing で読み取り
+                    result = async {
+                        let mut len_buf = [0u8; 4];
+                        quic_recv.read_exact(&mut len_buf).await?;
+                        let len = u32::from_be_bytes(len_buf) as usize;
 
-                    let mut payload = vec![0u8; len];
-                    quic_recv.read_exact(&mut payload).await?;
+                        let mut payload = vec![0u8; len];
+                        quic_recv.read_exact(&mut payload).await?;
 
-                    Ok::<_, quinn::ReadExactError>((len, payload))
-                } => {
-                    match result {
-                        Ok((len, payload)) => {
-                            total_received += 4 + len as u64;
-                            // リモートサービスに送信
-                            if let Err(e) = socket_for_send.send(&payload).await {
-                                debug!("[{}] UDP send error: {}", conn_id, e);
+                        Ok::<_, quinn::ReadExactError>((len, payload))
+                    } => {
+                        match result {
+                            Ok((len, payload)) => {
+                                total_received += 4 + len as u64;
+                                // リモートサービスに送信
+                                if let Err(e) = socket_for_send.send(&payload).await {
+                                    debug!("[{}] UDP send error: {}", conn_id, e);
+                                    break;
+                                }
+                                debug!("[{}] QUIC->UDP {} bytes", conn_id, len);
+                            }
+                            Err(e) => {
+                                debug!("[{}] QUIC read error: {}", conn_id, e);
                                 break;
                             }
-                            debug!("[{}] QUIC->UDP {} bytes", conn_id, len);
-                        }
-                        Err(e) => {
-                            debug!("[{}] QUIC read error: {}", conn_id, e);
-                            break;
                         }
                     }
                 }
             }
+            dp_for_recv.add_bytes(0, total_received);
+            Ok::<_, anyhow::Error>(())
         }
-        dp_for_recv.add_bytes(0, total_received);
-        Ok::<_, anyhow::Error>(())
-    });
+        .instrument(tracing::Span::current()),
+    );
 
     // UDP -> QUIC (リモートサービスからの応答をクライアントに返す)
     let dp_for_send = data_plane.clone();
     let cancel_for_send = cancel_token.clone();
-    let udp_to_quic = tokio::spawn(async move {
-        let mut buf = vec![0u8; 65535];
-        let mut total_sent = 0u64;
-        debug!("[{}] UDP->QUIC task started", conn_id);
-        loop {
-            tokio::select! {
-                _ = cancel_for_send.cancelled() => {
-                    debug!("[{}] UDP->QUIC cancelled", conn_id);
-                    break;
-                }
-                result = udp_socket.recv(&mut buf) => {
-                    match result {
-                        Ok(len) if len > 0 => {
-                            // Length-prefixed framing で送信
-                            let len_u32 = len as u32;
-                            if let Err(e) = quic_send.write_all(&len_u32.to_be_bytes()).await {
-                                debug!("[{}] QUIC write length error: {}", conn_id, e);
+    let udp_to_quic = tokio::spawn(
+        async move {
+            let mut buf = vec![0u8; 65535];
+            let mut total_sent = 0u64;
+            debug!("[{}] UDP->QUIC task started", conn_id);
+            loop {
+                tokio::select! {
+                    _ = cancel_for_send.cancelled() => {
+                        debug!("[{}] UDP->QUIC cancelled", conn_id);
+                        break;
+                    }
+                    result = udp_socket.recv(&mut buf) => {
+                        match result {
+                            Ok(len) if len > 0 => {
+                                // Length-prefixed framing で送信
+                                let len_u32 = len as u32;
+                                if let Err(e) = quic_send.write_all(&len_u32.to_be_bytes()).await {
+                                    debug!("[{}] QUIC write length error: {}", conn_id, e);
+                                    break;
+                                }
+                                if let Err(e) = quic_send.write_all(&buf[..len]).await {
+                                    debug!("[{}] QUIC write payload error: {}", conn_id, e);
+                                    break;
+                                }
+                                total_sent += 4 + len as u64;
+                                debug!("[{}] UDP->QUIC {} bytes", conn_id, len);
+                            }
+                            Ok(_) => {
+                                debug!("[{}] UDP recv returned 0", conn_id);
                                 break;
                             }
-                            if let Err(e) = quic_send.write_all(&buf[..len]).await {
-                                debug!("[{}] QUIC write payload error: {}", conn_id, e);
+                            Err(e) => {
+                                debug!("[{}] UDP recv error: {}", conn_id, e);
                                 break;
                             }
-                            total_sent += 4 + len as u64;
-                            debug!("[{}] UDP->QUIC {} bytes", conn_id, len);
-                        }
-                        Ok(_) => {
-                            debug!("[{}] UDP recv returned 0", conn_id);
-                            break;
-                        }
-                        Err(e) => {
-                            debug!("[{}] UDP recv error: {}", conn_id, e);
-                            break;
                         }
                     }
                 }
             }
+            let _ = quic_send.finish();
+            dp_for_send.add_bytes(total_sent, 0);
+            Ok::<_, anyhow::Error>(())
         }
-        let _ = quic_send.finish();
-        dp_for_send.add_bytes(total_sent, 0);
-        Ok::<_, anyhow::Error>(())
-    });
+        .instrument(tracing::Span::current()),
+    );
 
     // 両方向の完了を待つ
     let (recv_result, send_result) = tokio::join!(quic_to_udp, udp_to_quic);

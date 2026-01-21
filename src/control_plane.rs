@@ -19,9 +19,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, Instrument};
 
-use crate::api::{HttpIpcState, run_private_with_http_ipc};
+use crate::api::{run_private_with_http_ipc, HttpIpcState};
 use crate::ipc::{
     discover_dataplanes, read_dataplane_port, read_dataplane_state, AuthPolicy, ControlCommand,
     DataPlaneConfig, DataPlaneEvent, DataPlaneState, DataPlaneStatus, IpcConnection,
@@ -68,8 +68,8 @@ impl ControlPlane {
         auth_policy: AuthPolicy,
         statistics: Arc<ServerStatistics>,
     ) -> Result<Arc<Self>> {
-        let executable_path = std::env::current_exe()
-            .context("Failed to get current executable path")?;
+        let executable_path =
+            std::env::current_exe().context("Failed to get current executable path")?;
 
         let dp_config = DataPlaneConfig {
             listen_addr,
@@ -97,8 +97,8 @@ impl ControlPlane {
         statistics: Arc<ServerStatistics>,
         http_ipc: Arc<HttpIpcState>,
     ) -> Result<Arc<Self>> {
-        let executable_path = std::env::current_exe()
-            .context("Failed to get current executable path")?;
+        let executable_path =
+            std::env::current_exe().context("Failed to get current executable path")?;
 
         let dp_config = DataPlaneConfig {
             listen_addr,
@@ -181,14 +181,20 @@ impl ControlPlane {
         let port = read_dataplane_port(pid)
             .with_context(|| format!("Failed to read port for data plane PID {}", pid))?;
 
-        let mut conn = IpcConnection::connect(port)
-            .await
-            .with_context(|| format!("Failed to connect to data plane PID {} on port {}", pid, port))?;
+        let mut conn = IpcConnection::connect(port).await.with_context(|| {
+            format!(
+                "Failed to connect to data plane PID {} on port {}",
+                pid, port
+            )
+        })?;
 
         // Ready イベントを受信
         let event = conn.recv_event().await?;
         let status = match event {
-            DataPlaneEvent::Ready { pid: dp_pid, listen_addr } => {
+            DataPlaneEvent::Ready {
+                pid: dp_pid,
+                listen_addr,
+            } => {
                 debug!("Data plane PID {} is ready on {}", dp_pid, listen_addr);
                 // 状態を取得
                 conn.send_command(&ControlCommand::GetStatus).await?;
@@ -201,7 +207,10 @@ impl ControlPlane {
             }
             DataPlaneEvent::Status(s) => s,
             _ => {
-                return Err(anyhow::anyhow!("Unexpected event from data plane: {:?}", event));
+                return Err(anyhow::anyhow!(
+                    "Unexpected event from data plane: {:?}",
+                    event
+                ));
             }
         };
 
@@ -224,7 +233,10 @@ impl ControlPlane {
     /// setsid() で独立したセッションとして起動し、
     /// 親プロセス（コントロールプレーン）の終了に影響されないようにします。
     pub async fn start_dataplane(&self) -> Result<u32> {
-        info!("Starting new data plane process (http_ipc={})", self.use_http_ipc);
+        info!(
+            "Starting new data plane process (http_ipc={})",
+            self.use_http_ipc
+        );
 
         #[cfg(unix)]
         {
@@ -273,7 +285,9 @@ impl ControlPlane {
             }
 
             let child = cmd.spawn().context("Failed to spawn data plane process")?;
-            let pid = child.id().ok_or_else(|| anyhow::anyhow!("Failed to get child PID"))?;
+            let pid = child
+                .id()
+                .ok_or_else(|| anyhow::anyhow!("Failed to get child PID"))?;
 
             info!("Data plane process started with PID {}", pid);
 
@@ -301,7 +315,10 @@ impl ControlPlane {
                             max_retries
                         ));
                     }
-                    debug!("Waiting for data plane {} to register (attempt {}/{})", dp_id, retries, max_retries);
+                    debug!(
+                        "Waiting for data plane {} to register (attempt {}/{})",
+                        dp_id, retries, max_retries
+                    );
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             } else {
@@ -311,7 +328,10 @@ impl ControlPlane {
                 loop {
                     match self.connect_to_dataplane(pid).await {
                         Ok(status) => {
-                            info!("Connected to new data plane PID {} (state: {})", pid, status.state);
+                            info!(
+                                "Connected to new data plane PID {} (state: {})",
+                                pid, status.state
+                            );
                             return Ok(pid);
                         }
                         Err(e) => {
@@ -323,7 +343,10 @@ impl ControlPlane {
                                     e
                                 ));
                             }
-                            debug!("Waiting for data plane to start (attempt {}/{})", retries, max_retries);
+                            debug!(
+                                "Waiting for data plane to start (attempt {}/{})",
+                                retries, max_retries
+                            );
                             tokio::time::sleep(Duration::from_millis(500)).await;
                         }
                     }
@@ -333,7 +356,9 @@ impl ControlPlane {
 
         #[cfg(not(unix))]
         {
-            Err(anyhow::anyhow!("Data plane process management is only supported on Unix"))
+            Err(anyhow::anyhow!(
+                "Data plane process management is only supported on Unix"
+            ))
         }
     }
 
@@ -342,9 +367,9 @@ impl ControlPlane {
         if self.use_http_ipc {
             // HTTP IPC モード: 認証ポリシーは HttpIpcState に既に設定されている
             // データプレーンは RegisterDataPlane 時に取得する
-            self.http_ipc.broadcast_command(
-                ControlCommand::SetAuthPolicy(self.auth_policy.clone())
-            ).await;
+            self.http_ipc
+                .broadcast_command(ControlCommand::SetAuthPolicy(self.auth_policy.clone()))
+                .await;
             return Ok(());
         }
 
@@ -406,7 +431,11 @@ impl ControlPlane {
 
             // 旧データプレーンに DRAIN を送信
             for dp_id in old_dp_ids {
-                if let Err(e) = self.http_ipc.send_command(&dp_id, ControlCommand::Drain).await {
+                if let Err(e) = self
+                    .http_ipc
+                    .send_command(&dp_id, ControlCommand::Drain)
+                    .await
+                {
                     warn!("Failed to drain data plane {}: {}", dp_id, e);
                 }
             }
@@ -452,7 +481,9 @@ impl ControlPlane {
 
         if self.use_http_ipc {
             let dp_id = format!("dp_{}", pid);
-            self.http_ipc.send_command(&dp_id, ControlCommand::Drain).await
+            self.http_ipc
+                .send_command(&dp_id, ControlCommand::Drain)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
             return Ok(());
         }
@@ -499,7 +530,11 @@ impl ControlPlane {
             let mut dataplanes = self.dataplanes.write().await;
             if let Some(dp) = dataplanes.get_mut(&pid) {
                 if let Some(conn) = &mut dp.conn {
-                    if conn.send_command(&ControlCommand::GetConnections).await.is_ok() {
+                    if conn
+                        .send_command(&ControlCommand::GetConnections)
+                        .await
+                        .is_ok()
+                    {
                         match conn.recv_event().await {
                             Ok(DataPlaneEvent::Connections { connections }) => {
                                 all_connections.extend(connections);
@@ -524,7 +559,9 @@ impl ControlPlane {
 
         if self.use_http_ipc {
             let dp_id = format!("dp_{}", pid);
-            self.http_ipc.send_command(&dp_id, ControlCommand::Shutdown).await
+            self.http_ipc
+                .send_command(&dp_id, ControlCommand::Shutdown)
+                .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
             return Ok(());
         }
@@ -549,7 +586,9 @@ impl ControlPlane {
             // data-plane がコマンドを受け取るまで待機
             // 長ポーリングは notify_waiters() で即座に起こされるが、
             // HTTP レスポンスが完了するまで少し待機する
-            self.http_ipc.wait_for_commands_delivered(std::time::Duration::from_secs(5)).await;
+            self.http_ipc
+                .wait_for_commands_delivered(std::time::Duration::from_secs(5))
+                .await;
             return Ok(());
         }
 
@@ -640,7 +679,9 @@ pub async fn run_with_api(
 
     // Private API がない場合は HTTP IPC を使用できないため、
     // 内部的に HTTP IPC サーバーを起動する
-    let has_private_api = api_config.as_ref().map_or(false, |c| c.private_addr.is_some());
+    let has_private_api = api_config
+        .as_ref()
+        .map_or(false, |c| c.private_addr.is_some());
 
     // HTTP IPC 用の内部 API アドレスを決定
     // Private API が有効な場合はそれを使用、そうでなければ localhost でリッスン
@@ -648,7 +689,10 @@ pub async fn run_with_api(
         None // Private API が HTTP IPC を提供
     } else {
         // Private API がない場合は内部的に HTTP IPC サーバーを起動
-        Some(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), listen_addr.port()))
+        Some(SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            listen_addr.port(),
+        ))
     };
 
     let control_plane = ControlPlane::new_with_http_ipc(
@@ -668,37 +712,46 @@ pub async fn run_with_api(
         let stats_for_internal = statistics.clone();
         let http_ipc_for_internal = http_ipc.clone();
         let cp_for_internal = control_plane.clone();
-        api_handles.push(tokio::spawn(async move {
-            run_private_with_http_ipc(
-                internal_addr,
-                stats_for_internal,
-                Some(cp_for_internal),
-                http_ipc_for_internal,
-            ).await
-        }));
+        api_handles.push(tokio::spawn(
+            async move {
+                run_private_with_http_ipc(
+                    internal_addr,
+                    stats_for_internal,
+                    Some(cp_for_internal),
+                    http_ipc_for_internal,
+                )
+                .await
+            }
+            .instrument(tracing::Span::current()),
+        ));
         info!("Internal HTTP IPC server started on {}", internal_addr);
     }
 
     if let Some(config) = api_config {
         // Public API サーバー（/healthcheck のみ）
         if let Some(public_addr) = config.public_addr {
-            api_handles.push(tokio::spawn(async move {
-                crate::api::run_public(public_addr).await
-            }));
+            api_handles.push(tokio::spawn(
+                async move { crate::api::run_public(public_addr).await }
+                    .instrument(tracing::Span::current()),
+            ));
         }
 
         // Private API サーバー（/metrics, /graceful-restart, HTTP IPC）
         if let Some(private_addr) = config.private_addr {
             let stats_for_api = statistics.clone();
             let http_ipc_for_api = http_ipc.clone();
-            api_handles.push(tokio::spawn(async move {
-                run_private_with_http_ipc(
-                    private_addr,
-                    stats_for_api,
-                    Some(cp_for_api),
-                    http_ipc_for_api,
-                ).await
-            }));
+            api_handles.push(tokio::spawn(
+                async move {
+                    run_private_with_http_ipc(
+                        private_addr,
+                        stats_for_api,
+                        Some(cp_for_api),
+                        http_ipc_for_api,
+                    )
+                    .await
+                }
+                .instrument(tracing::Span::current()),
+            ));
         }
     }
 
@@ -798,7 +851,10 @@ pub async fn show_status() -> Result<()> {
     }
 
     println!("Data Planes:");
-    println!("{:<10} {:<12} {:<12} {:<15} {:<15}", "PID", "State", "Connections", "Bytes Sent", "Bytes Received");
+    println!(
+        "{:<10} {:<12} {:<12} {:<15} {:<15}",
+        "PID", "State", "Connections", "Bytes Sent", "Bytes Received"
+    );
     println!("{}", "-".repeat(64));
 
     for pid in pids {
