@@ -257,17 +257,6 @@ enum Commands {
 /// Control subcommands
 #[derive(Subcommand, Debug)]
 enum CtlCommands {
-    /// Trigger graceful restart of data planes
-    ///
-    /// This will call the control plane's API to:
-    /// 1. Start a new data plane
-    /// 2. Send DRAIN to all currently ACTIVE data planes
-    GracefulRestart {
-        /// Private API server address to connect to
-        #[arg(long, default_value = "127.0.0.1:39000")]
-        api_addr: SocketAddr,
-    },
-
     /// Show status of all data planes
     Status {
         /// Private API server address to connect to
@@ -554,9 +543,6 @@ async fn main() -> Result<()> {
 
         Commands::Ctl(ctl_cmd) => {
             match ctl_cmd {
-                CtlCommands::GracefulRestart { api_addr } => {
-                    control_plane::graceful_restart(api_addr).await?;
-                }
                 CtlCommands::Status { api_addr } => {
                     control_plane::show_status(api_addr).await?;
                 }

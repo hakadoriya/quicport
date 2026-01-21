@@ -1,10 +1,10 @@
 //! コントロールプレーン実装
 //!
-//! データプレーンの管理、認証ポリシーの配布、グレースフルリスタートなどを担当します。
+//! データプレーンの管理、認証ポリシーの配布などを担当します。
 //!
 //! ## 責務
 //!
-//! - プロセス管理: データプレーンの起動・グレースフルリスタート
+//! - プロセス管理: データプレーンの起動・管理
 //! - 認証ポリシー: PSK/X25519 認証情報の管理と配布
 //! - 設定管理: 設定ファイルの読み込みと配布
 //! - API サーバー: 管理用 REST API + HTTP IPC API の提供
@@ -17,10 +17,10 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
-use tracing::{debug, info, warn, Instrument};
+use tracing::{debug, info, Instrument};
 
 use crate::api::{run_private_with_http_ipc, HttpIpcState};
-use crate::ipc::{AuthPolicy, ControlCommand, DataPlaneConfig, DataPlaneState, DataPlaneStatus};
+use crate::ipc::{AuthPolicy, ControlCommand, DataPlaneConfig, DataPlaneStatus};
 use crate::statistics::ServerStatistics;
 
 /// コントロールプレーン
@@ -168,53 +168,13 @@ impl ControlPlane {
     }
 
     /// 認証ポリシーを全データプレーンに配布
+    #[allow(dead_code)]
     pub async fn distribute_auth_policy(&self) -> Result<()> {
         // HTTP IPC モード: 認証ポリシーは HttpIpcState に既に設定されている
         // データプレーンは RegisterDataPlane 時に取得する
         self.http_ipc
             .broadcast_command(ControlCommand::SetAuthPolicy(self.auth_policy.clone()))
             .await;
-        Ok(())
-    }
-
-    /// グレースフルリスタートを実行
-    ///
-    /// 1. 新しいデータプレーンを起動
-    /// 2. 旧データプレーンに DRAIN を送信
-    pub async fn graceful_restart(&self) -> Result<()> {
-        info!("Starting graceful restart");
-
-        // 現在の ACTIVE な DP を取得
-        let old_dp_ids: Vec<String> = {
-            let dataplanes = self.http_ipc.dataplanes.read().await;
-            dataplanes
-                .iter()
-                .filter_map(|(dp_id, dp)| {
-                    if dp.state == DataPlaneState::Active {
-                        Some(dp_id.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-
-        // 新しいデータプレーンを起動
-        let new_pid = self.start_dataplane().await?;
-        info!("New data plane started with PID {}", new_pid);
-
-        // 旧データプレーンに DRAIN を送信
-        for dp_id in old_dp_ids {
-            if let Err(e) = self
-                .http_ipc
-                .send_command(&dp_id, ControlCommand::Drain)
-                .await
-            {
-                warn!("Failed to drain data plane {}: {}", dp_id, e);
-            }
-        }
-
-        info!("Graceful restart completed");
         Ok(())
     }
 
@@ -294,7 +254,7 @@ impl ControlPlane {
 pub struct ApiConfig {
     /// Public API アドレス（/healthcheck のみ、インターネットから見える）
     pub public_addr: Option<SocketAddr>,
-    /// Private API アドレス（/metrics, /graceful-restart、localhost のみ）
+    /// Private API アドレス（/metrics, HTTP IPC、localhost のみ）
     pub private_addr: Option<SocketAddr>,
 }
 
@@ -375,7 +335,7 @@ pub async fn run_with_api(
             ));
         }
 
-        // Private API サーバー（/metrics, /graceful-restart, HTTP IPC）
+        // Private API サーバー（/metrics, HTTP IPC）
         if let Some(private_addr) = config.private_addr {
             let stats_for_api = statistics.clone();
             let http_ipc_for_api = http_ipc.clone();
@@ -442,43 +402,6 @@ pub async fn run_with_api(
     cp_for_shutdown.shutdown_all().await?;
 
     Ok(())
-}
-
-/// グレースフルリスタートを実行（CLI コマンド用）
-///
-/// API サーバーの /api/graceful-restart エンドポイントを呼び出して、
-/// control-plane に graceful restart を実行させます。
-pub async fn graceful_restart(api_addr: SocketAddr) -> Result<()> {
-    info!("Executing graceful restart command via API");
-
-    let url = format!("http://{}/api/graceful-restart", api_addr);
-    let client = reqwest::Client::new();
-
-    let response = client
-        .post(&url)
-        .send()
-        .await
-        .with_context(|| format!("Failed to connect to API server at {}", api_addr))?;
-
-    let status = response.status();
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .context("Failed to parse API response")?;
-
-    if status.is_success() {
-        info!(
-            "Graceful restart initiated: {}",
-            body.get("message").and_then(|v| v.as_str()).unwrap_or("")
-        );
-        Ok(())
-    } else {
-        let message = body
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error");
-        Err(anyhow::anyhow!("Graceful restart failed: {}", message))
-    }
 }
 
 /// データプレーンの状態を表示（CLI コマンド用）

@@ -266,13 +266,6 @@ struct HealthCheckResponse {
     status: &'static str,
 }
 
-/// Graceful restart レスポンス
-#[derive(Serialize)]
-struct GracefulRestartResponse {
-    status: &'static str,
-    message: String,
-}
-
 // =============================================================================
 // API ハンドラー
 // =============================================================================
@@ -294,37 +287,6 @@ async fn metrics(State(state): State<PrivateApiState>) -> impl IntoResponse {
         )],
         state.statistics.to_prometheus(),
     )
-}
-
-/// POST /graceful-restart
-///
-/// グレースフルリスタートを実行
-async fn graceful_restart(State(state): State<PrivateApiState>) -> impl IntoResponse {
-    match &state.control_plane {
-        Some(cp) => match cp.graceful_restart().await {
-            Ok(()) => (
-                StatusCode::OK,
-                Json(GracefulRestartResponse {
-                    status: "OK",
-                    message: "Graceful restart initiated".to_string(),
-                }),
-            ),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(GracefulRestartResponse {
-                    status: "ERROR",
-                    message: format!("Graceful restart failed: {}", e),
-                }),
-            ),
-        },
-        None => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(GracefulRestartResponse {
-                status: "ERROR",
-                message: "Control plane not available".to_string(),
-            }),
-        ),
-    }
 }
 
 // =============================================================================
@@ -732,7 +694,7 @@ pub async fn run_public(listen: SocketAddr) -> Result<()> {
     Ok(())
 }
 
-/// Private API サーバーを起動（/metrics, /graceful-restart, HTTP IPC）
+/// Private API サーバーを起動（/metrics, HTTP IPC）
 ///
 /// localhost からのみアクセス可能なエンドポイント
 pub async fn run_private(
@@ -761,7 +723,6 @@ pub async fn run_private_with_http_ipc(
         // API
         .route("/healthcheck", get(healthcheck))
         .route("/metrics", get(metrics))
-        .route("/api/graceful-restart", post(graceful_restart))
         // HTTP IPC API (v1)
         .route("/api/v1/RegisterDataPlane", post(register_data_plane))
         .route("/api/v1/PollCommands", post(poll_commands))
