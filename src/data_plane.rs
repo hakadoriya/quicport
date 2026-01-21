@@ -28,9 +28,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn, Instrument};
 
 use crate::ipc::{
-    cleanup_dataplane_files, ensure_dataplanes_dir, write_dataplane_port, write_dataplane_state,
     AckCommandRequest, AuthPolicy, CommandWithId, ControlCommand, DataPlaneConfig, DataPlaneEvent,
-    DataPlaneState, DataPlaneStatus, IpcConnection, PollCommandsRequest, PollCommandsResponse,
+    DataPlaneState, DataPlaneStatus, PollCommandsRequest, PollCommandsResponse,
     RegisterDataPlaneRequest, RegisterDataPlaneResponse, ReportEventRequest,
 };
 use crate::protocol::{
@@ -108,10 +107,6 @@ impl DataPlane {
     /// 状態を設定
     pub async fn set_state(&self, state: DataPlaneState) {
         *self.state.write().await = state;
-        // 状態ファイルを更新
-        if let Ok(status) = self.get_status().await {
-            let _ = write_dataplane_state(self.pid, &status);
-        }
     }
 
     /// 認証ポリシーを設定
@@ -473,162 +468,15 @@ impl ConnectionManager {
 
 /// データプレーンを起動
 ///
-/// 独立したデーモンとして動作し、以下を行います：
-/// 1. IPC ソケットを作成
-/// 2. QUIC エンドポイントを起動
-/// 3. コントロールプレーンからのコマンドを待機
-pub async fn run(config: DataPlaneConfig, auth_policy: Option<AuthPolicy>) -> Result<()> {
-    let data_plane = DataPlane::new(config.clone());
-    if let Some(policy) = auth_policy {
-        data_plane.set_auth_policy(policy).await;
-    }
-
-    // ディレクトリを作成
-    ensure_dataplanes_dir()?;
-
-    let pid = std::process::id();
-
-    // IPC 用 TCP リスナーを作成（OS が空きポートを自動割り当て）
-    let ipc_listener = TcpListener::bind("127.0.0.1:0").await?;
-    let ipc_port = ipc_listener.local_addr()?.port();
-
-    // ポート番号をファイルに書き込む
-    write_dataplane_port(pid, ipc_port)?;
-
-    info!("Data plane IPC listening on 127.0.0.1:{}", ipc_port);
-
-    // 初期状態を書き込み
-    data_plane.set_state(DataPlaneState::Starting).await;
-
-    // QUIC エンドポイントを作成
-    let endpoint = create_server_endpoint(config.listen_addr, "quicport-dataplane")?;
-    info!("Data plane QUIC listening on {}", config.listen_addr);
-
-    // ACTIVE 状態に移行
-    data_plane.set_state(DataPlaneState::Active).await;
-
-    let mut shutdown_rx = data_plane.subscribe_shutdown();
-    let _drain_rx = data_plane.subscribe_drain();
-    let drain_timeout = data_plane.get_config().await.drain_timeout;
-
-    // メインループ
-    loop {
-        tokio::select! {
-            // シャットダウン
-            _ = shutdown_rx.recv() => {
-                info!("Data plane received shutdown signal");
-                break;
-            }
-
-            // ドレインタイムアウト（drain_timeout == 0 の場合は無限待機）
-            _ = async {
-                let state = data_plane.get_state().await;
-                if state == DataPlaneState::Draining && drain_timeout > 0 {
-                    tokio::time::sleep(Duration::from_secs(drain_timeout)).await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            } => {
-                warn!("Drain timeout reached ({} seconds), forcing shutdown", drain_timeout);
-                break;
-            }
-
-            // ドレイン状態で接続数が 0 になった場合
-            _ = async {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    let state = data_plane.get_state().await;
-                    let connections = data_plane.active_connections.load(Ordering::SeqCst);
-                    debug!("Drain check: state={:?}, active_connections={}", state, connections);
-                    if state == DataPlaneState::Draining && connections == 0 {
-                        return;
-                    }
-                }
-            } => {
-                info!("All connections drained, shutting down");
-                break;
-            }
-
-            // IPC 接続
-            result = ipc_listener.accept() => {
-                match result {
-                    Ok((stream, _)) => {
-                        let dp = data_plane.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = handle_ipc_connection(dp, stream).await {
-                                error!("IPC handler error: {}", e);
-                            }
-                        }.instrument(tracing::Span::current()));
-                    }
-                    Err(e) => {
-                        error!("Failed to accept IPC connection: {}", e);
-                    }
-                }
-            }
-
-            // QUIC 接続
-            result = endpoint.accept() => {
-                match result {
-                    Some(incoming) => {
-                        let state = data_plane.get_state().await;
-                        if state == DataPlaneState::Draining {
-                            // DRAINING 状態では新規接続を拒否
-                            debug!("Rejecting new connection in DRAINING state");
-                            continue;
-                        }
-
-                        let dp = data_plane.clone();
-                        tokio::spawn(async move {
-                            match incoming.await {
-                                Ok(connection) => {
-                                    let remote_addr = connection.remote_address();
-                                    info!("New QUIC connection from {}", remote_addr);
-                                    dp.connection_opened();
-
-                                    if let Err(e) = handle_quic_connection(dp.clone(), connection).await {
-                                        error!("QUIC handler error: {}", e);
-                                    }
-
-                                    dp.connection_closed();
-                                    info!("QUIC connection closed: {}", remote_addr);
-                                }
-                                Err(e) => {
-                                    error!("Failed to accept QUIC connection: {}", e);
-                                }
-                            }
-                        }.instrument(tracing::Span::current()));
-                    }
-                    None => {
-                        info!("QUIC endpoint closed");
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // 終了処理
-    data_plane.set_state(DataPlaneState::Terminated).await;
-    cleanup_dataplane_files(pid)?;
-    info!("Data plane terminated");
-
-    Ok(())
-}
-
-/// コントロールプレーンに HTTP IPC で接続してデータプレーンを起動
-///
-/// HTTP IPC アーキテクチャ用のモード:
+/// HTTP IPC アーキテクチャ:
 /// 1. STARTING 状態で起動
 /// 2. HTTP で CP に登録（リトライ付き）
 /// 3. 登録成功後、認証ポリシーを取得
 /// 4. ACTIVE 状態に遷移
 /// 5. SO_REUSEPORT で QUIC ポートを LISTEN 開始
 /// 6. 長ポーリングでコマンドを待機
-pub async fn run_with_control_plane_url(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
+pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     let data_plane = DataPlane::new(config.clone());
-
-    // ディレクトリを作成
-    ensure_dataplanes_dir()?;
 
     let pid = std::process::id();
 
@@ -685,10 +533,6 @@ pub async fn run_with_control_plane_url(config: DataPlaneConfig, cp_url: &str) -
     if let Err(e) = http_client.report_event(event).await {
         warn!("Failed to report Ready event: {}", e);
     }
-
-    // IPC 用 TCP リスナーは不要（HTTP IPC を使用するため）
-    // 状態ファイルは互換性のために作成
-    write_dataplane_port(pid, 0)?; // ポート 0 は HTTP IPC モードを示す
 
     // QUIC エンドポイントを作成
     let endpoint = create_server_endpoint(config.listen_addr, "quicport-dataplane")?;
@@ -863,41 +707,7 @@ pub async fn run_with_control_plane_url(config: DataPlaneConfig, cp_url: &str) -
 
     // 終了処理
     data_plane.set_state(DataPlaneState::Terminated).await;
-    cleanup_dataplane_files(pid)?;
     info!("Data plane terminated");
-
-    Ok(())
-}
-
-/// IPC 接続を処理
-async fn handle_ipc_connection(data_plane: Arc<DataPlane>, stream: TcpStream) -> Result<()> {
-    let mut conn = IpcConnection::new(stream);
-
-    // Ready イベントを送信
-    let config = data_plane.get_config().await;
-    let event = DataPlaneEvent::Ready {
-        pid: data_plane.pid,
-        listen_addr: config.listen_addr.to_string(),
-    };
-    conn.send_event(&event).await?;
-
-    // コマンドを処理
-    loop {
-        match conn.recv_command().await {
-            Ok(cmd) => {
-                let response = process_ipc_command(&data_plane, cmd).await;
-                conn.send_event(&response).await?;
-            }
-            Err(crate::ipc::IpcError::ConnectionClosed) => {
-                debug!("IPC connection closed");
-                break;
-            }
-            Err(e) => {
-                error!("IPC recv error: {}", e);
-                break;
-            }
-        }
-    }
 
     Ok(())
 }

@@ -63,7 +63,7 @@ enum Commands {
         /// Control plane HTTP URL to connect to for receiving auth policy (HTTP IPC).
         /// Example: http://127.0.0.1:39000
         #[arg(long)]
-        control_plane_url: Option<String>,
+        control_plane_url: String,
 
         /// Drain timeout in seconds (force shutdown after this time in DRAINING state, 0 means infinite)
         #[arg(long, default_value = "0")]
@@ -269,13 +269,21 @@ enum CtlCommands {
     },
 
     /// Show status of all data planes
-    Status,
+    Status {
+        /// Private API server address to connect to
+        #[arg(long, default_value = "127.0.0.1:39000")]
+        api_addr: SocketAddr,
+    },
 
     /// Drain a specific data plane
     Drain {
-        /// PID of the data plane to drain
-        #[arg(short, long)]
-        pid: u32,
+        /// Data plane ID to drain (e.g., "dp_12345")
+        #[arg(short = 'd', long)]
+        dp_id: String,
+
+        /// Private API server address to connect to
+        #[arg(long, default_value = "127.0.0.1:39000")]
+        api_addr: SocketAddr,
     },
 }
 
@@ -340,49 +348,7 @@ fn build_client_auth_config(
     anyhow::bail!("No authentication configured. Provide --privkey, --privkey-file, or --psk")
 }
 
-/// データプレーン用の認証ポリシーを構築（環境変数から）
-fn build_dataplane_auth_policy() -> Result<AuthPolicy> {
-    let auth_type = std::env::var("QUICPORT_DP_AUTH_TYPE").unwrap_or_else(|_| "psk".to_string());
-
-    match auth_type.as_str() {
-        "x25519" => {
-            let server_privkey = std::env::var("QUICPORT_DP_SERVER_PRIVKEY")
-                .context("QUICPORT_DP_SERVER_PRIVKEY is required for X25519 authentication")?;
-
-            let client_pubkeys_str =
-                std::env::var("QUICPORT_DP_CLIENT_PUBKEYS").unwrap_or_default();
-            let authorized_pubkeys: Vec<String> = client_pubkeys_str
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .collect();
-
-            if authorized_pubkeys.is_empty() {
-                anyhow::bail!("QUICPORT_DP_CLIENT_PUBKEYS is required for X25519 authentication");
-            }
-
-            Ok(AuthPolicy::X25519 {
-                authorized_pubkeys,
-                server_private_key: server_privkey,
-            })
-        }
-        "psk" => {
-            let psk = std::env::var("QUICPORT_DP_PSK")
-                .or_else(|_| std::env::var("QUICPORT_PSK"))
-                .context("QUICPORT_DP_PSK or QUICPORT_PSK is required for PSK authentication")?;
-
-            Ok(AuthPolicy::Psk { psk })
-        }
-        _ => {
-            anyhow::bail!(
-                "Invalid auth type: {}. Expected 'psk' or 'x25519'",
-                auth_type
-            )
-        }
-    }
-}
-
-/// サーバー用の認証ポリシーを構築（IPC 用）
+/// サーバー用の認証ポリシーを構築
 fn build_server_auth_policy(
     privkey: Option<String>,
     privkey_file: Option<PathBuf>,
@@ -578,19 +544,12 @@ async fn main() -> Result<()> {
                 ..Default::default()
             };
 
-            if let Some(cp_url) = control_plane_url {
-                // HTTP IPC モード: control-plane に HTTP で接続して認証ポリシーを取得
-                info!(
-                    "Starting data plane on {} (HTTP IPC to control plane at {})",
-                    listen, cp_url
-                );
-                data_plane::run_with_control_plane_url(config, &cp_url).await?;
-            } else {
-                // 環境変数から認証ポリシーを取得するモード（従来互換）
-                let auth_policy = build_dataplane_auth_policy()?;
-                info!("Starting data plane on {}", listen);
-                data_plane::run(config, Some(auth_policy)).await?;
-            }
+            // HTTP IPC: control-plane に HTTP で接続して認証ポリシーを取得
+            info!(
+                "Starting data plane on {} (HTTP IPC to control plane at {})",
+                listen, control_plane_url
+            );
+            data_plane::run(config, &control_plane_url).await?;
         }
 
         Commands::Ctl(ctl_cmd) => {
@@ -598,28 +557,40 @@ async fn main() -> Result<()> {
                 CtlCommands::GracefulRestart { api_addr } => {
                     control_plane::graceful_restart(api_addr).await?;
                 }
-                CtlCommands::Status => {
-                    control_plane::show_status().await?;
+                CtlCommands::Status { api_addr } => {
+                    control_plane::show_status(api_addr).await?;
                 }
-                CtlCommands::Drain { pid } => {
-                    use quicport::ipc::{read_dataplane_port, ControlCommand, IpcConnection};
+                CtlCommands::Drain { dp_id, api_addr } => {
+                    use quicport::ipc::DrainDataPlaneRequest;
 
-                    let port = read_dataplane_port(pid).with_context(|| {
-                        format!("Failed to read port for data plane PID {}", pid)
-                    })?;
-                    let mut conn = IpcConnection::connect(port).await.with_context(|| {
-                        format!(
-                            "Failed to connect to data plane PID {} on port {}",
-                            pid, port
-                        )
-                    })?;
+                    let url = format!("http://{}/api/v1/DrainDataPlane", api_addr);
+                    let client = reqwest::Client::new();
 
-                    // Ready イベントをスキップ
-                    let _ = conn.recv_event().await;
+                    let response = client
+                        .post(&url)
+                        .json(&DrainDataPlaneRequest {
+                            dp_id: dp_id.clone(),
+                        })
+                        .send()
+                        .await
+                        .with_context(|| {
+                            format!("Failed to connect to API server at {}", api_addr)
+                        })?;
 
-                    // DRAIN を送信
-                    conn.send_command(&ControlCommand::Drain).await?;
-                    info!("Sent DRAIN to data plane PID {}", pid);
+                    let status = response.status();
+                    if status.is_success() {
+                        info!("Sent DRAIN to data plane {}", dp_id);
+                    } else {
+                        let body: serde_json::Value = response
+                            .json()
+                            .await
+                            .context("Failed to parse API response")?;
+                        let message = body
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Unknown error");
+                        anyhow::bail!("Failed to drain data plane {}: {}", dp_id, message);
+                    }
                 }
             }
         }
