@@ -515,6 +515,7 @@ async fn main() -> Result<()> {
                     .with_env_filter(env_filter)
                     .json()
                     .flatten_event(true)
+                    .with_current_span(false)
                     .with_span_list(true)
                     .init();
             }
@@ -534,6 +535,7 @@ async fn main() -> Result<()> {
                     .with_env_filter(env_filter)
                     .json()
                     .flatten_event(true)
+                    .with_current_span(false)
                     .with_span_list(true)
                     .init();
             }
@@ -553,6 +555,7 @@ async fn main() -> Result<()> {
                     .with_env_filter(env_filter)
                     .json()
                     .flatten_event(true)
+                    .with_current_span(false)
                     .with_span_list(true)
                     .init();
             }
