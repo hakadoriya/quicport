@@ -92,6 +92,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Install build dependencies for libbpf-sys vendored build (Linux only)
+      - name: Install build dependencies (ubuntu only)
+        if: startsWith(matrix.runner, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autopoint
+
       # Use Zig for Linux cross-compilation (aarch64-unknown-linux-gnu only)
       # Note: x86_64-unknown-linux-gnu uses native cargo build to properly link system libelf
       - name: Install Zig (ubuntu only)
