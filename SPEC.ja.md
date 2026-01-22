@@ -269,39 +269,17 @@ quicport data-plane [OPTIONS]
 |-----------|------|------|
 | `--listen`, `-l` | No | QUIC リッスンアドレス（デフォルト: `0.0.0.0:39000`） |
 | `--drain-timeout` | No | DRAIN 状態のタイムアウト秒数（デフォルト: `0` = 無限） |
-| `--control-plane-url` | No | コントロールプレーンの HTTP API URL（HTTP IPC モード用） |
+| `--control-plane-url` | Yes | コントロールプレーンの HTTP API URL（HTTP IPC 接続用） |
 
-**起動モード:**
+**動作:**
 
-データプレーンは 2 つのモードで起動できます:
-
-1. **環境変数モード（直接起動）**: 認証設定を環境変数から取得
-2. **HTTP IPC モード**: `--control-plane-url` でコントロールプレーンに接続し、認証設定を取得
-
-**認証設定（環境変数モード）:**
-
-データプレーンは認証設定を環境変数から取得します：
-
-| 環境変数 | 説明 |
-|---------|------|
-| `QUICPORT_DP_AUTH_TYPE` | 認証タイプ（`psk` または `x25519`） |
-| `QUICPORT_DP_PSK` | PSK 認証時の事前共有キー |
-| `QUICPORT_DP_SERVER_PRIVKEY` | X25519 認証時のサーバー秘密鍵（Base64） |
-| `QUICPORT_DP_CLIENT_PUBKEYS` | X25519 認証時の許可されたクライアント公開鍵（カンマ区切り、Base64） |
+データプレーンは `--control-plane-url` で指定したコントロールプレーンに HTTP IPC で接続し、認証設定を取得します。
+通常はコントロールプレーン（`quicport control-plane`）から自動的に起動されるため、直接起動する必要はありません。
 
 **例:**
 
 ```bash
-# PSK 認証でデータプレーンを直接起動（環境変数モード）
-QUICPORT_DP_AUTH_TYPE=psk QUICPORT_DP_PSK="secret" quicport data-plane --listen 0.0.0.0:39000
-
-# X25519 認証でデータプレーンを起動（環境変数モード）
-QUICPORT_DP_AUTH_TYPE=x25519 \
-  QUICPORT_DP_SERVER_PRIVKEY="SERVER_PRIVKEY" \
-  QUICPORT_DP_CLIENT_PUBKEYS="CLIENT_PUBKEY1,CLIENT_PUBKEY2" \
-  quicport data-plane
-
-# HTTP IPC モードでデータプレーンを起動
+# HTTP IPC でコントロールプレーンに接続してデータプレーンを起動
 quicport data-plane --listen 0.0.0.0:39000 --control-plane-url http://127.0.0.1:39000
 ```
 
@@ -317,27 +295,14 @@ quicport ctl <COMMAND>
 
 | コマンド | 説明 |
 |----------|------|
-| `graceful-restart [--api-addr <ADDR>]` | グレースフルリスタートを実行（Private API 経由） |
 | `status` | 全データプレーンの状態を表示 |
 | `drain --pid <PID>` | 特定のデータプレーンに DRAIN を送信 |
-
-**graceful-restart オプション:**
-
-| オプション | デフォルト | 説明 |
-|-----------|-----------|------|
-| `--api-addr` | `127.0.0.1:39000` | Private API サーバーのアドレス |
 
 **例:**
 
 ```bash
 # 全データプレーンの状態を確認
 quicport ctl status
-
-# グレースフルリスタート（Private API 経由で新しいデータプレーンを起動し、旧データプレーンをドレイン）
-quicport ctl graceful-restart
-
-# 別のポートで起動している場合
-quicport ctl graceful-restart --api-addr 127.0.0.1:9000
 
 # 特定のデータプレーンをドレイン
 quicport ctl drain --pid 12345
@@ -379,7 +344,7 @@ quicport はサーバー再起動時の接続維持を実現するため、デ�
           |                                   |
           v                                   v
 +------------------------+    +------------------------------------+
-| cgroup A (systemd)     |    | cgroup B (systemd-run --scope)     |
+| cgroup A (systemd)     |    | cgroup B (systemd-run)             |
 | +--------------------+ |    | +--------------------------------+ |
 | | Control Plane      | |    | | Data Plane                     | |
 | | (quicport cp)      |<-----| | (quicport dp)                  | |
@@ -418,7 +383,7 @@ quicport はサーバー再起動時の接続維持を実現するため、デ�
 #   QUICPORT_CP_URL=http://127.0.0.1:39000
 
 # 1. データプレーンを別 cgroup で起動（HTTP IPC モード）
-systemd-run --scope \
+systemd-run --slice=user.slice --unit="quicport-dp-$$.service" \
   quicport data-plane \
     --listen "${QUICPORT_LISTEN_ADDR}" \
     --control-plane-url "${QUICPORT_CP_URL}"
@@ -456,7 +421,7 @@ systemd                quicport.sh              data-plane              control-
 ```
 
 1. systemd が `quicport.sh` を起動
-2. シェルスクリプトが `systemd-run --scope` で dp を別 cgroup に起動
+2. シェルスクリプトが `systemd-run` で dp を別 cgroup に起動
 3. dp は cp への接続を試行（cp 起動まで接続リトライ）
 4. シェルスクリプトが `exec` で cp に置き換わる（systemd から直接 cp が見える）
 5. dp が cp への接続に成功し、ACTIVE 状態に遷移
@@ -852,30 +817,6 @@ quicport は以下のディレクトリにファイルを配置します（XDG B
 | `~/.config/quicport/server.key` | サーバー秘密鍵（DER 形式、パーミッション 0600） |
 | `~/.config/quicport/psk` | 自動生成された PSK（Base64 形式、32 バイト） |
 | `~/.local/share/quicport/known_hosts` | クライアントの既知ホスト一覧 |
-| `~/.local/state/quicport/dataplanes/dp-<pid>.port` | データプレーン IPC ポート番号（TCP 127.0.0.1） |
-| `~/.local/state/quicport/dataplanes/dp-<pid>.state` | データプレーン状態ファイル（JSON 形式） |
-
-#### データプレーン管理ファイル
-
-データプレーンは `~/.local/state/quicport/dataplanes/` ディレクトリで管理されます:
-
-- **ポートファイル** (`dp-<pid>.port`): IPC 用 TCP ポート番号（127.0.0.1 で待ち受け）
-- **状態ファイル** (`dp-<pid>.state`): データプレーンの現在の状態を JSON 形式で記録
-
-状態ファイルの例:
-
-```json
-{
-  "state": "Active",
-  "pid": 12345,
-  "active_connections": 3,
-  "bytes_sent": 10485760,
-  "bytes_received": 5242880,
-  "started_at": 1705639200
-}
-```
-
-データプレーン終了時、これらのファイルは自動的にクリーンアップされます。
 
 #### サーバー証明書の永続化
 
@@ -1353,7 +1294,6 @@ localhost からのみアクセス可能な管理用 API です。
 |---------------|---------|------|
 | `/healthcheck` | GET | ヘルスチェック |
 | `/metrics` | GET | Prometheus 形式のメトリクス |
-| `/api/graceful-restart` | POST | グレースフルリスタートを実行 |
 | `/api/v1/RegisterDataPlane` | POST | データプレーン登録（HTTP IPC） |
 | `/api/v1/PollCommands` | POST | コマンドポーリング（HTTP IPC） |
 | `/api/v1/AckCommand` | POST | コマンド応答（HTTP IPC） |
@@ -1384,32 +1324,6 @@ localhost からのみアクセス可能な管理用 API です。
 ```json
 {
   "status": "SERVING"
-}
-```
-
-### POST /api/graceful-restart
-
-グレースフルリスタートを実行します（Private API のみ）。
-
-1. 新しいデータプレーンを起動（SO_REUSEPORT で同一ポートで LISTEN）
-2. 旧データプレーンに DRAIN コマンドを送信
-3. 旧データプレーンは新規接続を拒否し、既存接続のみ処理
-
-**レスポンス例（成功）:**
-
-```json
-{
-  "status": "OK",
-  "message": "Graceful restart initiated"
-}
-```
-
-**レスポンス例（失敗）:**
-
-```json
-{
-  "status": "ERROR",
-  "message": "Graceful restart failed: ..."
 }
 ```
 

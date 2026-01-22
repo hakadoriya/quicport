@@ -34,7 +34,7 @@
 │  │  - コントロールプレーン終了後も独立動作                               │   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
 │                         ↑                                                    │
-│                         │ Unix Socket (制御用 IPC、任意)                    │
+│                         │ HTTP IPC (制御用)                                 │
 │                         ↓                                                    │
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
 │  │ コントロールプレーン (quicport control-plane)                                │   │
@@ -75,14 +75,8 @@
 
 ### プロセス登録
 
-データプレーンは起動時に自身を登録:
-
-```
-~/.local/state/quicport/dataplanes/
-├── dp-12345.sock         # データプレーン PID 12345 の制御ソケット
-├── dp-12345.state        # 状態ファイル (JSON: state, connections, etc.)
-└── dp-67890.sock         # データプレーン PID 67890
-```
+データプレーンは起動時にコントロールプレーンに HTTP IPC で登録し、認証ポリシーを取得します。
+データプレーンの状態はコントロールプレーンのメモリ内で管理されます。
 
 ### systemd 連携
 
@@ -92,8 +86,7 @@ Description=quicport control-plane
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/quicport control-plane
-ExecReload=/usr/local/bin/quicport ctl graceful-restart
+ExecStart=/usr/local/bin/quicport-starter
 # stop はコントロールプレーンのみ終了、データプレーンは残留
 Restart=on-failure
 
@@ -105,20 +98,16 @@ WantedBy=multi-user.target
 |------|---------------------|----------------|
 | `systemctl start quicport` | 起動、データプレーン起動 | 起動 (ACTIVE) |
 | `systemctl stop quicport` | DRAIN 指示後に終了 | DRAINING → 全接続終了後に自動終了 |
-| `systemctl reload quicport` | 新データプレーン起動 + 旧に DRAIN 指示 | 旧: DRAINING、新: ACTIVE |
 | `systemctl restart quicport` | stop → start | 旧: DRAINING → 自動終了、新: ACTIVE |
 
 ### 起動シーケンス
 
 ```
 1. コントロールプレーン起動
-2. ~/.local/state/quicport/dataplanes/ をスキャン
-3. 発見したデータプレーンに接続:
-   ├─ ACTIVE → 接続して使用
-   └─ DRAINING → 接続してモニタリング（終了を監視）
-4. ACTIVE なデータプレーンがない場合:
-   └─ 新規データプレーン起動
-5. 全データプレーンに認証ポリシー等を配布
+2. 新規データプレーンを起動
+3. データプレーンがコントロールプレーンに HTTP IPC で接続・登録
+4. コントロールプレーンが認証ポリシーを配布
+5. データプレーンが QUIC リスナーを開始
 6. 通常稼働開始
 ```
 
@@ -129,26 +118,13 @@ WantedBy=multi-user.target
 
 ### 複数 DRAINING データプレーンの許容
 
-連続した restart/reload により、複数の DRAINING データプレーンが同時に存在することを許容する。
-
-**例: 2 回連続で restart した場合**
-
-```
-~/.local/state/quicport/dataplanes/
-├── dp-1000.sock    # DRAINING (1回目の restart で残留)
-├── dp-1000.state   # {"state": "DRAINING", "connections": 5}
-├── dp-2000.sock    # DRAINING (2回目の restart で残留)
-├── dp-2000.state   # {"state": "DRAINING", "connections": 3}
-├── dp-3000.sock    # ACTIVE (最新)
-└── dp-3000.state   # {"state": "ACTIVE", "connections": 10}
-```
+連続した restart により、複数の DRAINING データプレーンが同時に存在することを許容する。
 
 **動作:**
 
 - 各 DRAINING データプレーンは独立して動作
 - それぞれの接続数が 0 になったら自動終了
-- 終了時にソケットファイルと状態ファイルを削除
-- コントロールプレーンは全データプレーンをモニタリング
+- コントロールプレーンは全データプレーンをメモリ内で管理
 
 ### グレースフルリスタート (systemctl reload)
 
@@ -225,41 +201,32 @@ enum DataPlaneState {
 
 ### 通信方式
 
-- Unix Domain Socket
-- パス: `~/.local/state/quicport/control-<pid>.sock`（データプレーン の PID を含む）
+- HTTP/JSON (RPC スタイル)
+- データプレーンは `--control-plane-url` で指定したコントロールプレーンに HTTP で接続
 
 ### プロトコル
 
-#### quicport control-plane → データプレーン (制御コマンド)
+コントロールプレーンとデータプレーン間は HTTP IPC で通信します。
+詳細は [SPEC.ja.md](./SPEC.ja.md) の「HTTP IPC エンドポイント詳細」セクションを参照してください。
+
+#### データプレーン → コントロールプレーン (HTTP リクエスト)
+
+| エンドポイント | 説明 |
+|---------------|------|
+| `POST /api/v1/RegisterDataPlane` | 起動時に登録、認証ポリシーを取得 |
+| `POST /api/v1/PollCommands` | コマンドを長ポーリングで取得 |
+| `POST /api/v1/AckCommand` | コマンド実行結果を応答 |
+| `POST /api/v1/ReportEvent` | 接続イベントを報告 |
+
+#### コントロールプレーン → データプレーン (コマンド)
+
+コントロールプレーンは PollCommands レスポンスでコマンドを配信します：
 
 | コマンド | 説明 |
 |----------|------|
-| `SET_AUTH_POLICY` | 認証ポリシーを設定（PSK、X25519 公開鍵等） |
-| `SET_CONFIG` | 設定を更新 |
-| `DRAIN` | DRAIN モードに移行（新規接続拒否） |
-| `SHUTDOWN` | 即座にシャットダウン |
-| `GET_STATUS` | 状態を取得（接続数、状態等） |
-| `GET_CONNECTIONS` | アクティブ接続の一覧を取得 |
-
-#### データプレーン → quicport control-plane (イベント)
-
-| イベント | 説明 |
-|----------|------|
-| `READY` | 初期化完了、接続受付可能 |
-| `STATUS` | 状態レポート（定期送信） |
-| `CONNECTION_OPENED` | 新規接続確立 |
-| `CONNECTION_CLOSED` | 接続終了 |
-| `AUTH_REQUEST` | 認証判断の問い合わせ（将来の拡張用） |
-| `DRAINED` | 全接続終了、終了準備完了 |
-
-### メッセージフレーミング
-
-```
-+----------------+----------------+------------------+
-| Length (4byte) | Type (1byte)   | Payload (JSON)   |
-| big-endian     |                | (Length - 1)     |
-+----------------+----------------+------------------+
-```
+| `Drain` | DRAIN モードに移行（新規接続拒否） |
+| `Shutdown` | 即座にシャットダウン |
+| `SetConfig` | 設定を更新 |
 
 ## SO_REUSEPORT によるグレースフルリスタート
 
@@ -301,7 +268,7 @@ enum DataPlaneState {
 | 項目 | デフォルト値 | 説明 |
 |------|--------------|------|
 | `listen_addr` | `0.0.0.0:39000` | QUIC リッスンアドレス |
-| `control_socket` | `~/.local/state/quicport/control-<pid>.sock` | 制御用 Unix Socket |
+| `control_plane_url` | - | コントロールプレーンの HTTP API URL（必須） |
 | `drain_timeout` | `0` (無限) | DRAIN 状態のタイムアウト（強制終了、0 = 無限） |
 | `idle_connection_timeout` | `3600` (秒) | アイドル接続のタイムアウト |
 
@@ -355,10 +322,10 @@ struct BackendConnection {
 
 ## セキュリティ
 
-- Unix Socket のパーミッション: `0600`
-- データプレーン と quicport control-plane は同じユーザーで実行
+- HTTP IPC は localhost (127.0.0.1) のみでリッスン
+- データプレーンとコントロールプレーンは同じユーザーで実行
 - 認証情報はコントロールプレーン経由でのみ設定
-- QUIC の TLS 証明書・秘密鍵は データプレーン が保持
+- QUIC の TLS 証明書・秘密鍵はデータプレーンが保持
 
 ## バイナリ構成
 
@@ -366,9 +333,9 @@ struct BackendConnection {
 |----------|------|
 | `quicport` | メインバイナリ。サブコマンドで動作を切り替え |
 | `quicport control-plane` | コントロールプレーン + データプレーン起動 |
-| `quicport data-plane` | データプレーン（通常は server から起動される） |
+| `quicport data-plane` | データプレーン（通常はコントロールプレーンから起動される） |
 | `quicport client` | クライアント（変更なし） |
-| `quicport ctl` | 制御コマンド（graceful-restart 等） |
+| `quicport ctl` | 制御コマンド（status, drain 等） |
 
 ## 将来の拡張
 
