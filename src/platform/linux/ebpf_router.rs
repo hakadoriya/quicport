@@ -59,14 +59,15 @@
 //! router.register_server(server_id, &udp_socket)?;
 //! ```
 
+use std::mem::MaybeUninit;
 use std::net::UdpSocket;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use libbpf_rs::skel::SkelBuilder;
-use libbpf_rs::{MapCore, MapFlags};
-use tracing::{debug, info, warn};
+use libbpf_rs::skel::{OpenSkel, SkelBuilder};
+use libbpf_rs::{MapCore, MapFlags, OpenObject};
+use tracing::{debug, info};
 
 // libbpf-cargo が生成するスケルトン
 // build.rs で OUT_DIR に quicport_reuseport.skel.rs として生成される
@@ -101,7 +102,11 @@ impl Default for EbpfRouterConfig {
 /// 4. (Drop 時): プログラムとマップが自動的にクリーンアップ
 pub struct EbpfRouter {
     /// ロード済み BPF オブジェクト (スケルトン)
+    /// Box でヒープに配置し、自己参照構造を避ける
     skel: QuicportReuseportSkel<'static>,
+    /// OpenObject の所有権を保持（skel がこれを参照する）
+    /// Box<MaybeUninit<...>> で安定したアドレスを確保
+    _open_object: Box<MaybeUninit<OpenObject>>,
     /// 設定
     #[allow(dead_code)]
     config: EbpfRouterConfig,
@@ -118,10 +123,14 @@ impl EbpfRouter {
     pub fn load(config: EbpfRouterConfig) -> Result<Self> {
         info!("Loading eBPF SK_REUSEPORT router");
 
+        // OpenObject を Box でヒープに配置し、安定したアドレスを確保
+        // これにより skel がこのオブジェクトを参照できる
+        let mut open_object: Box<MaybeUninit<OpenObject>> = Box::new(MaybeUninit::uninit());
+
         // スケルトンをオープン
         let skel_builder = QuicportReuseportSkelBuilder::default();
         let open_skel = skel_builder
-            .open()
+            .open(&mut *open_object)
             .context("Failed to open eBPF skeleton")?;
 
         // eBPF プログラムをカーネルにロード
@@ -131,7 +140,17 @@ impl EbpfRouter {
 
         info!("eBPF SK_REUSEPORT router loaded successfully");
 
-        Ok(Self { skel, config })
+        // SAFETY: open_object は Box でヒープに配置されており、
+        // EbpfRouter が Drop されるまで有効なアドレスを保持する。
+        // skel のライフタイムを 'static に変換するが、実際には
+        // _open_object と同じライフタイムで有効。
+        let skel: QuicportReuseportSkel<'static> = unsafe { std::mem::transmute(skel) };
+
+        Ok(Self {
+            skel,
+            _open_object: open_object,
+            config,
+        })
     }
 
     /// eBPF プログラムをソケットにアタッチ
