@@ -367,6 +367,24 @@ pub struct DataPlaneConfig {
     /// アイドル接続のタイムアウト（秒）
     #[serde(default = "default_idle_connection_timeout")]
     pub idle_connection_timeout: u64,
+
+    /// サーバー ID（eBPF ルーティング用）
+    ///
+    /// この値は QUIC Connection ID の先頭 4 バイトに埋め込まれ、
+    /// eBPF プログラムがパケットを正しい Data Plane プロセスに
+    /// ルーティングするために使用されます。
+    ///
+    /// None の場合、従来の接続 ID カウンターが使用されます。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<u32>,
+
+    /// eBPF ルーティングを有効にするか
+    ///
+    /// true の場合、eBPF プログラムを使用して QUIC パケットを
+    /// Connection ID に基づいてルーティングします。
+    /// Linux + ebpf feature が必要です。
+    #[serde(default)]
+    pub enable_ebpf_routing: bool,
 }
 
 fn default_drain_timeout() -> u64 {
@@ -383,6 +401,8 @@ impl Default for DataPlaneConfig {
             listen_addr: "0.0.0.0:39000".parse().unwrap(),
             drain_timeout: default_drain_timeout(),
             idle_connection_timeout: default_idle_connection_timeout(),
+            server_id: None,
+            enable_ebpf_routing: false,
         }
     }
 }

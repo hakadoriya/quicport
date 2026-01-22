@@ -9,6 +9,16 @@ Type=exec
 # NOTE: systemd-run --scope を使用するため root で実行
 # data-plane を別 cgroup に起動するには root 権限が必要
 
+# NOTE: eBPF ルーティング用の capabilities (--features ebpf でビルド時に必要)
+# - CAP_BPF: eBPF プログラムのロード
+# - CAP_NET_ADMIN: ソケットへのプログラムアタッチ
+# - CAP_SYS_ADMIN: BPF マップのピン留め (/sys/fs/bpf/)
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_BIND_SERVICE
+
+# NOTE: BPF ファイルシステムへのアクセス (eBPF マップのピン留め用)
+ReadWritePaths=/sys/fs/bpf
+
 # NOTE: cgroup 分離アーキテクチャ
 # quicport-starter は以下を行います:
 # 1. data-plane を systemd-run --scope で別 cgroup に起動
