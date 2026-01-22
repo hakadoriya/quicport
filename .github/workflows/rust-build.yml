@@ -92,6 +92,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Install libelf-dev for libbpf-sys compilation (required for eBPF graceful restart)
+      - name: Install libelf-dev (ubuntu only)
+        if: startsWith(matrix.runner, 'ubuntu')
+        run: sudo apt-get update && sudo apt-get install -y libelf-dev
+
       # Use Zig to stabilize Linux cross-compilation (aarch64-unknown-linux-gnu)
       - name: Install Zig (ubuntu only)
         if: startsWith(matrix.runner, 'ubuntu')
