@@ -11,6 +11,8 @@
 //! - [`protocol`] - 制御プロトコル定義
 //! - [`quic`] - QUIC/TLS 関連ユーティリティ
 //! - [`ipc`] - プロセス間通信プロトコル
+//! - [`cid_generator`] - eBPF ルーティング対応の Connection ID Generator
+//! - [`platform`] - プラットフォーム固有の機能（eBPF ルーティング等）
 //!
 //! # アーキテクチャ
 //!
@@ -60,10 +62,12 @@
 //! ```
 
 pub mod api;
+pub mod cid_generator;
 pub mod client;
 pub mod control_plane;
 pub mod data_plane;
 pub mod ipc;
+pub mod platform;
 pub mod protocol;
 pub mod quic;
 pub mod statistics;

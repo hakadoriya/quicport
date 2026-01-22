@@ -601,6 +601,166 @@ pub fn create_server_endpoint(bind_addr: SocketAddr, _psk: &str) -> Result<Endpo
     Ok(endpoint)
 }
 
+/// サーバー用の QUIC エンドポイントを作成（カスタム Connection ID Generator 付き）
+///
+/// # Arguments
+///
+/// * `bind_addr` - バインドするアドレス
+/// * `_psk` - 認証用 PSK（将来のために保持）
+/// * `server_id` - eBPF ルーティング用の server_id
+///
+/// # CID フォーマット
+///
+/// ```text
+/// +------------------+------------------+
+/// | server_id (4B)   | counter (4B)     |
+/// | Big Endian       | Big Endian       |
+/// +------------------+------------------+
+///  0                4                  8
+/// ```
+///
+/// 証明書は ~/.config/quicport/ に永続化される
+/// SO_REUSEPORT を設定して複数プロセスが同じポートで LISTEN 可能にする
+pub fn create_server_endpoint_with_cid(
+    bind_addr: SocketAddr,
+    _psk: &str,
+    server_id: u32,
+) -> Result<Endpoint> {
+    use crate::cid_generator::RoutableCidGenerator;
+
+    let (certs, key) = get_or_create_server_cert()?;
+
+    let mut server_crypto = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .context("Failed to create server TLS config")?;
+
+    server_crypto.alpn_protocols = vec![ALPN_QUICPORT.to_vec()];
+
+    let mut server_config = ServerConfig::with_crypto(Arc::new(
+        quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
+            .context("Failed to create QUIC server config")?,
+    ));
+
+    // トランスポート設定
+    // Keep-alive: 5 秒ごとに ping を送信
+    // Idle timeout: 10 秒間応答がなければ接続をクローズ
+    // これによりクライアントが強制終了された場合も 10 秒以内に検出可能
+    let mut transport_config = quinn::TransportConfig::default();
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    transport_config.max_idle_timeout(Some(
+        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(10)).unwrap(),
+    ));
+    server_config.transport_config(Arc::new(transport_config));
+
+    // SO_REUSEPORT を設定した UDP ソケットを作成（グレースフルリスタート用）
+    let udp_socket = create_udp_socket_with_reuseport(bind_addr)
+        .context("Failed to create UDP socket with SO_REUSEPORT")?;
+
+    // カスタムソケットから Endpoint を作成
+    let runtime =
+        quinn::default_runtime().ok_or_else(|| anyhow::anyhow!("No async runtime found"))?;
+
+    // カスタム CID Generator を使用した EndpointConfig
+    let mut endpoint_config = quinn::EndpointConfig::default();
+    endpoint_config.cid_generator(move || Box::new(RoutableCidGenerator::new(server_id)));
+
+    let endpoint = Endpoint::new(endpoint_config, Some(server_config), udp_socket, runtime)
+        .context("Failed to create server endpoint with custom CID generator")?;
+
+    tracing::info!(
+        "Server endpoint created with server_id={} (CID format: [server_id:4B][counter:4B])",
+        server_id
+    );
+
+    Ok(endpoint)
+}
+
+/// サーバー用の QUIC エンドポイントを作成（eBPF 統合用）
+///
+/// この関数は eBPF ルーターの統合に必要な UDP ソケットへの参照も返します。
+/// eBPF SK_REUSEPORT プログラムをアタッチするために使用します。
+///
+/// # Arguments
+///
+/// * `bind_addr` - バインドするアドレス
+/// * `_psk` - 認証用 PSK（将来のために保持）
+/// * `server_id` - eBPF ルーティング用の server_id
+///
+/// # Returns
+///
+/// (Endpoint, UdpSocket) - QUIC エンドポイントと eBPF アタッチ用のソケットクローン
+///
+/// # eBPF 統合の流れ
+///
+/// ```ignore
+/// let (endpoint, socket) = create_server_endpoint_for_ebpf(addr, psk, server_id)?;
+///
+/// #[cfg(all(target_os = "linux", feature = "ebpf"))]
+/// {
+///     let router = EbpfRouter::load(EbpfRouterConfig::default())?;
+///     router.attach_to_socket(&socket)?;
+///     router.register_server(server_id, &socket)?;
+/// }
+/// ```
+pub fn create_server_endpoint_for_ebpf(
+    bind_addr: SocketAddr,
+    _psk: &str,
+    server_id: u32,
+) -> Result<(Endpoint, std::net::UdpSocket)> {
+    use crate::cid_generator::RoutableCidGenerator;
+
+    let (certs, key) = get_or_create_server_cert()?;
+
+    let mut server_crypto = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .context("Failed to create server TLS config")?;
+
+    server_crypto.alpn_protocols = vec![ALPN_QUICPORT.to_vec()];
+
+    let mut server_config = ServerConfig::with_crypto(Arc::new(
+        quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
+            .context("Failed to create QUIC server config")?,
+    ));
+
+    // トランスポート設定
+    let mut transport_config = quinn::TransportConfig::default();
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    transport_config.max_idle_timeout(Some(
+        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(10)).unwrap(),
+    ));
+    server_config.transport_config(Arc::new(transport_config));
+
+    // SO_REUSEPORT を設定した UDP ソケットを作成
+    let udp_socket = create_udp_socket_with_reuseport(bind_addr)
+        .context("Failed to create UDP socket with SO_REUSEPORT")?;
+
+    // eBPF アタッチ用にソケットをクローン
+    // try_clone() は新しい fd を作成するが、同じ reuseport グループに属する
+    let socket_for_ebpf = udp_socket
+        .try_clone()
+        .context("Failed to clone UDP socket for eBPF")?;
+
+    // カスタムソケットから Endpoint を作成
+    let runtime =
+        quinn::default_runtime().ok_or_else(|| anyhow::anyhow!("No async runtime found"))?;
+
+    // カスタム CID Generator を使用した EndpointConfig
+    let mut endpoint_config = quinn::EndpointConfig::default();
+    endpoint_config.cid_generator(move || Box::new(RoutableCidGenerator::new(server_id)));
+
+    let endpoint = Endpoint::new(endpoint_config, Some(server_config), udp_socket, runtime)
+        .context("Failed to create server endpoint with custom CID generator")?;
+
+    tracing::info!(
+        "Server endpoint created with server_id={} (eBPF-ready)",
+        server_id
+    );
+
+    Ok((endpoint, socket_for_ebpf))
+}
+
 /// クライアント用の QUIC エンドポイントを作成
 ///
 /// server_addr の IP バージョンに応じて適切なバインドアドレスを選択:

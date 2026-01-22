@@ -36,8 +36,8 @@ use crate::protocol::{
     CloseReason, ControlMessage, ControlStream, Protocol, ProtocolError, ResponseStatus,
 };
 use crate::quic::{
-    authenticate_client_psk, authenticate_client_x25519, create_server_endpoint, encode_base64_key,
-    parse_base64_key,
+    authenticate_client_psk, authenticate_client_x25519, create_server_endpoint,
+    create_server_endpoint_for_ebpf, encode_base64_key, parse_base64_key,
 };
 use crate::statistics::ServerStatistics;
 
@@ -521,6 +521,9 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
 
     info!("Registered with control plane, received auth policy");
 
+    // server_id を先に取得（後で QUIC エンドポイント作成時に使用）
+    let server_id = dp_config.server_id;
+
     // 認証ポリシーと設定を適用
     data_plane.set_auth_policy(auth_policy).await;
     data_plane.set_config(dp_config).await;
@@ -535,7 +538,79 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     }
 
     // QUIC エンドポイントを作成
-    let endpoint = create_server_endpoint(config.listen_addr, "quicport-dataplane")?;
+    // server_id が設定されている場合は eBPF ルーティング対応の CID Generator を使用
+    let endpoint = if let Some(sid) = server_id {
+        info!(
+            "Creating QUIC endpoint with server_id={} for eBPF routing",
+            sid
+        );
+
+        // eBPF 統合用: ソケットも取得
+        let (endpoint, socket_for_ebpf) =
+            create_server_endpoint_for_ebpf(config.listen_addr, "quicport-dataplane", sid)?;
+
+        // Linux + ebpf feature 時は eBPF ルーターをロードしてアタッチ
+        #[cfg(all(target_os = "linux", feature = "ebpf"))]
+        {
+            use crate::platform::linux::{EbpfRouter, EbpfRouterConfig, is_ebpf_available};
+
+            if is_ebpf_available() {
+                match EbpfRouter::load(EbpfRouterConfig::default()) {
+                    Ok(mut router) => {
+                        // ソケットにプログラムをアタッチ
+                        if let Err(e) = router.attach_to_socket(&socket_for_ebpf) {
+                            warn!(
+                                "Failed to attach eBPF SK_REUSEPORT program: {}. \
+                                 Falling back to kernel default SO_REUSEPORT behavior. \
+                                 This may cause connection resets during graceful restart.",
+                                e
+                            );
+                        } else {
+                            // サーバーを登録
+                            if let Err(e) = router.register_server(sid, &socket_for_ebpf) {
+                                warn!(
+                                    "Failed to register server_id={} in eBPF map: {}",
+                                    sid, e
+                                );
+                            } else {
+                                info!(
+                                    "eBPF SK_REUSEPORT routing enabled for server_id={}",
+                                    sid
+                                );
+                                // router は scope を抜けると Drop されるが、
+                                // eBPF プログラムはソケットにアタッチされたままになる
+                                // TODO: router を保持して unregister できるようにする
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to load eBPF router: {}. \
+                             Falling back to kernel default SO_REUSEPORT behavior. \
+                             This may cause connection resets during graceful restart.",
+                            e
+                        );
+                    }
+                }
+            } else {
+                info!(
+                    "eBPF not available on this system. \
+                     Using kernel default SO_REUSEPORT behavior."
+                );
+            }
+        }
+
+        // 非 Linux または ebpf feature 無効時
+        #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
+        {
+            let _ = socket_for_ebpf; // unused variable warning 抑制
+            debug!("eBPF routing not available (non-Linux or ebpf feature disabled)");
+        }
+
+        endpoint
+    } else {
+        create_server_endpoint(config.listen_addr, "quicport-dataplane")?
+    };
     info!("Data plane QUIC listening on {}", config.listen_addr);
 
     // ACTIVE 状態に移行
