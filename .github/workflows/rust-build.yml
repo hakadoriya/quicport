@@ -27,14 +27,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux (x86_64/arm64)
+          # Linux (x86_64/arm64) - musl で静的リンク、glibc 依存なし
           - runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             os_name: Linux
             arch: x86_64
             kind: unix
           - runner: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             os_name: Linux
             arch: arm64
             kind: unix
@@ -97,10 +97,9 @@ jobs:
         if: startsWith(matrix.runner, 'ubuntu')
         run: |
           sudo apt-get update
-          sudo apt-get install -y autopoint
+          sudo apt-get install -y autopoint musl-tools
 
-      # Use Zig for Linux cross-compilation (aarch64-unknown-linux-gnu only)
-      # Note: x86_64-unknown-linux-gnu uses native cargo build to properly link system libelf
+      # Use Zig for Linux cross-compilation (aarch64-unknown-linux-musl)
       - name: Install Zig (ubuntu only)
         if: startsWith(matrix.runner, 'ubuntu')
         uses: mlugg/setup-zig@v2
