@@ -64,7 +64,8 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use libbpf_rs::{MapCore, MapFlags, OpenObject, Object};
+use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::{MapCore, MapFlags};
 use tracing::{debug, info, warn};
 
 // libbpf-cargo が生成するスケルトン
@@ -149,7 +150,7 @@ impl EbpfRouter {
     /// * `socket` - SO_REUSEPORT が有効な UDP ソケット
     pub fn attach_to_socket(&self, socket: &UdpSocket) -> Result<()> {
         let sock_fd = socket.as_raw_fd();
-        let prog = self.skel.progs.quicport_select_socket;
+        let prog = &self.skel.progs.quicport_select_socket;
         let prog_fd = prog.as_fd().as_raw_fd();
 
         debug!(

@@ -1305,6 +1305,7 @@ dependencies = [
  "hmac",
  "libbpf-cargo",
  "libbpf-rs",
+ "libbpf-sys",
  "libc",
  "portpicker",
  "predicates",
