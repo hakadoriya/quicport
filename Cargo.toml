@@ -70,6 +70,8 @@ libc = "0.2"
 # libbpf-rs は BPF_PROG_TYPE_SK_REUSEPORT を完全サポート
 [target.'cfg(target_os = "linux")'.dependencies]
 libbpf-rs = "0.24"
+# vendored-libbpf と vendored-libelf を有効にしてクロスコンパイル時も動作するようにする
+libbpf-sys = { version = "1", default-features = false, features = ["vendored-libbpf", "vendored-libelf"] }
 
 # eBPF プログラムのビルド用 (Linux only)
 [target.'cfg(target_os = "linux")'.build-dependencies]
