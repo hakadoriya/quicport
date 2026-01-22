@@ -549,8 +549,8 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
         let (endpoint, socket_for_ebpf) =
             create_server_endpoint_for_ebpf(config.listen_addr, "quicport-dataplane", sid)?;
 
-        // Linux + ebpf feature 時は eBPF ルーターをロードしてアタッチ
-        #[cfg(all(target_os = "linux", feature = "ebpf"))]
+        // Linux 時は eBPF ルーターをロードしてアタッチ
+        #[cfg(target_os = "linux")]
         {
             use crate::platform::linux::{EbpfRouter, EbpfRouterConfig, is_ebpf_available};
 
@@ -600,11 +600,11 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
             }
         }
 
-        // 非 Linux または ebpf feature 無効時
-        #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
+        // 非 Linux 時
+        #[cfg(not(target_os = "linux"))]
         {
             let _ = socket_for_ebpf; // unused variable warning 抑制
-            debug!("eBPF routing not available (non-Linux or ebpf feature disabled)");
+            debug!("eBPF routing not available (non-Linux platform)");
         }
 
         endpoint

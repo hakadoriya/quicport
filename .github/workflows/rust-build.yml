@@ -97,7 +97,8 @@ jobs:
         if: startsWith(matrix.runner, 'ubuntu')
         run: sudo apt-get update && sudo apt-get install -y libelf-dev
 
-      # Use Zig to stabilize Linux cross-compilation (aarch64-unknown-linux-gnu)
+      # Use Zig for Linux cross-compilation (aarch64-unknown-linux-gnu only)
+      # Note: x86_64-unknown-linux-gnu uses native cargo build to properly link system libelf
       - name: Install Zig (ubuntu only)
         if: startsWith(matrix.runner, 'ubuntu')
         uses: mlugg/setup-zig@v2
