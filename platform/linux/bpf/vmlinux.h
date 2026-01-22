@@ -41,49 +41,27 @@ typedef _Bool bool;
  * on a socket group. The program can inspect packet data and select which
  * socket should receive the packet.
  *
- * Note: data and data_end are __u64 (BPF pointers are always 64-bit)
+ * Note: This definition must exactly match the kernel's BTF.
+ * Generated from: bpftool btf dump file /sys/kernel/btf/vmlinux format c
  */
 struct sk_reuseport_md {
-    /*
-     * Start of directly accessible data. It points to the byte
-     * following UDP header (or IPv4/IPv6 header for TCP syn packets)
-     */
-    __u64 data;
-
-    /* End of directly accessible data */
-    __u64 data_end;
-
-    /*
-     * Total length of packet (starting from the MAC header).
-     * Note that the directly accessible bytes (data_end - data)
-     * could be less than this "len". Those bytes could be
-     * indirectly read by bpf_skb_load_bytes().
-     */
+    union {
+        void *data;
+    };
+    union {
+        void *data_end;
+    };
     __u32 len;
-
-    /*
-     * Eth protocol in network order. Since mac header is not yet
-     * validated, only eth->h_proto is available.
-     */
     __u32 eth_protocol;
-
-    /* IP protocol (IPPROTO_TCP, IPPROTO_UDP, etc.) */
     __u32 ip_protocol;
-
-    /* Is header checksum bound to the packet (i.e. not from CHECKSUM_PARTIAL) */
     __u32 bind_inany;
-
-    /* Hash value for the packet */
     __u32 hash;
-
-    /* Reserved for future use */
-    __u32 :32; /* padding */
-    __u32 :32; /* padding */
-    __u32 :32; /* padding */
-    __u32 :32; /* padding */
-
-    /* Migration type */
-    __u32 migration;
+    union {
+        struct bpf_sock *sk;
+    };
+    union {
+        struct bpf_sock *migrating_sk;
+    };
 };
 
 /*
