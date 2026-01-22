@@ -2,7 +2,7 @@
 //!
 //! # eBPF ルーティング
 //!
-//! `ebpf` feature が有効な場合、`EbpfRouter` が利用可能になります。
+//! Linux では eBPF ベースのパケットルーティングが常に有効です。
 //! これは BPF_PROG_TYPE_SK_REUSEPORT を使用して、
 //! QUIC Connection ID に基づいてパケットを正しい Data Plane プロセスに
 //! ルーティングします。
@@ -10,7 +10,7 @@
 //! # 使用方法
 //!
 //! ```ignore
-//! #[cfg(all(target_os = "linux", feature = "ebpf"))]
+//! #[cfg(target_os = "linux")]
 //! {
 //!     use quicport::platform::linux::{EbpfRouter, EbpfRouterConfig, is_ebpf_available};
 //!
@@ -22,10 +22,8 @@
 //! }
 //! ```
 
-#[cfg(feature = "ebpf")]
 pub mod ebpf_router;
 
-#[cfg(feature = "ebpf")]
 pub use ebpf_router::{
     EbpfRouter,
     EbpfRouterConfig,

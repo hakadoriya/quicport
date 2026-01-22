@@ -2,7 +2,7 @@
 //!
 //! このスクリプトは以下の処理を行います:
 //!
-//! # Linux + ebpf feature 時
+//! # Linux 環境
 //! 1. libbpf-cargo を使用して eBPF プログラム (C) をコンパイル
 //! 2. Rust バインディング (スケルトン) を自動生成
 //! 3. 生成されたコードを OUT_DIR に配置
@@ -21,17 +21,9 @@ fn main() {
     println!("cargo:rerun-if-changed=platform/linux/bpf/bpf_helpers.h");
     println!("cargo:rerun-if-changed=platform/linux/bpf/vmlinux.h");
 
-    // ebpf feature が有効かつ Linux の場合のみ eBPF プログラムをビルド
-    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    // Linux の場合のみ eBPF プログラムをビルド
+    #[cfg(target_os = "linux")]
     build_ebpf();
-
-    // 非 Linux 環境または ebpf feature 無効時
-    #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
-    {
-        // ebpf feature が有効だが非 Linux の場合は警告
-        #[cfg(feature = "ebpf")]
-        println!("cargo:warning=ebpf feature is only supported on Linux");
-    }
 }
 
 /// eBPF プログラムをビルドし、Rust スケルトンを生成
@@ -39,7 +31,7 @@ fn main() {
 /// libbpf-cargo の SkeletonBuilder を使用して:
 /// 1. platform/linux/bpf/quicport_reuseport.bpf.c を BPF バイトコードにコンパイル
 /// 2. Rust バインディングを生成
-#[cfg(all(target_os = "linux", feature = "ebpf"))]
+#[cfg(target_os = "linux")]
 fn build_ebpf() {
     use libbpf_cargo::SkeletonBuilder;
     use std::env;

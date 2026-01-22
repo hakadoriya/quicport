@@ -696,7 +696,7 @@ pub fn create_server_endpoint_with_cid(
 /// ```ignore
 /// let (endpoint, socket) = create_server_endpoint_for_ebpf(addr, psk, server_id)?;
 ///
-/// #[cfg(all(target_os = "linux", feature = "ebpf"))]
+/// #[cfg(target_os = "linux")]
 /// {
 ///     let router = EbpfRouter::load(EbpfRouterConfig::default())?;
 ///     router.attach_to_socket(&socket)?;

@@ -8,9 +8,6 @@ license = "Apache-2.0"
 
 [features]
 default = []
-# eBPF ベースのパケットルーティング (Linux only)
-# BPF_PROG_TYPE_SK_REUSEPORT を使用して QUIC Connection ID に基づくパケット転送を実現
-ebpf = ["libbpf-rs"]
 
 [workspace]
 members = ["."]
@@ -68,10 +65,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# eBPF (Linux only, optional)
+# eBPF (Linux only)
+# BPF_PROG_TYPE_SK_REUSEPORT を使用して QUIC Connection ID に基づくパケット転送を実現
 # libbpf-rs は BPF_PROG_TYPE_SK_REUSEPORT を完全サポート
 [target.'cfg(target_os = "linux")'.dependencies]
-libbpf-rs = { version = "0.24", optional = true }
+libbpf-rs = "0.24"
 
 # eBPF プログラムのビルド用 (Linux only)
 [target.'cfg(target_os = "linux")'.build-dependencies]
