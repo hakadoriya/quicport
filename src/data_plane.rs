@@ -539,6 +539,12 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
 
     // QUIC エンドポイントを作成
     // server_id が設定されている場合は eBPF ルーティング対応の CID Generator を使用
+
+    // eBPF ルーターを保持する変数（Linux のみ）
+    // run() 関数終了まで保持され、その間 eBPF マップが有効
+    #[cfg(target_os = "linux")]
+    let _ebpf_router: Option<crate::platform::linux::EbpfRouter>;
+
     let endpoint = if let Some(sid) = server_id {
         info!(
             "Creating QUIC endpoint with server_id={} for eBPF routing",
@@ -554,7 +560,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
         {
             use crate::platform::linux::{EbpfRouter, EbpfRouterConfig, is_ebpf_available};
 
-            if is_ebpf_available() {
+            _ebpf_router = if is_ebpf_available() {
                 match EbpfRouter::load(EbpfRouterConfig::default()) {
                     Ok(mut router) => {
                         // ソケットにプログラムをアタッチ
@@ -565,6 +571,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                                  This may cause connection resets during graceful restart.",
                                 e
                             );
+                            None
                         } else {
                             // サーバーを登録
                             if let Err(e) = router.register_server(sid, &socket_for_ebpf) {
@@ -572,14 +579,14 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                                     "Failed to register server_id={} in eBPF map: {}",
                                     sid, e
                                 );
+                                None
                             } else {
                                 info!(
                                     "eBPF SK_REUSEPORT routing enabled for server_id={}",
                                     sid
                                 );
-                                // router は scope を抜けると Drop されるが、
-                                // eBPF プログラムはソケットにアタッチされたままになる
-                                // TODO: router を保持して unregister できるようにする
+                                // router を保持して run() 終了まで eBPF マップを維持
+                                Some(router)
                             }
                         }
                     }
@@ -590,6 +597,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                              This may cause connection resets during graceful restart.",
                             e
                         );
+                        None
                     }
                 }
             } else {
@@ -597,7 +605,8 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                     "eBPF not available on this system. \
                      Using kernel default SO_REUSEPORT behavior."
                 );
-            }
+                None
+            };
         }
 
         // 非 Linux 時
@@ -609,6 +618,11 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
 
         endpoint
     } else {
+        // eBPF なしの場合
+        #[cfg(target_os = "linux")]
+        {
+            _ebpf_router = None;
+        }
         create_server_endpoint(config.listen_addr, "quicport-dataplane")?
     };
     info!("Data plane QUIC listening on {}", config.listen_addr);
