@@ -40,16 +40,18 @@ typedef _Bool bool;
  * This structure is passed to SK_REUSEPORT programs when a packet arrives
  * on a socket group. The program can inspect packet data and select which
  * socket should receive the packet.
+ *
+ * Note: data and data_end are __u64 (BPF pointers are always 64-bit)
  */
 struct sk_reuseport_md {
     /*
      * Start of directly accessible data. It points to the byte
      * following UDP header (or IPv4/IPv6 header for TCP syn packets)
      */
-    __u32 data;
+    __u64 data;
 
     /* End of directly accessible data */
-    __u32 data_end;
+    __u64 data_end;
 
     /*
      * Total length of packet (starting from the MAC header).
