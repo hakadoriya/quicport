@@ -69,9 +69,9 @@ libc = "0.2"
 # BPF_PROG_TYPE_SK_REUSEPORT を使用して QUIC Connection ID に基づくパケット転送を実現
 # libbpf-rs は BPF_PROG_TYPE_SK_REUSEPORT を完全サポート
 [target.'cfg(target_os = "linux")'.dependencies]
-libbpf-rs = "0.24"
-# vendored-libbpf と vendored-libelf を有効にしてクロスコンパイル時も動作するようにする
-libbpf-sys = { version = "1", default-features = false, features = ["vendored-libbpf", "vendored-libelf"] }
+# vendored feature を有効にして libbpf/libelf/zlib をベンダリングし、
+# クロスコンパイル時（cargo zigbuild）もシステムの libelf に依存せずビルドできるようにする
+libbpf-rs = { version = "0.24", features = ["vendored"] }
 
 # eBPF プログラムのビルド用 (Linux only)
 [target.'cfg(target_os = "linux")'.build-dependencies]
