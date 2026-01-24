@@ -28,9 +28,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn, Instrument};
 
 use crate::ipc::{
-    AckCommandRequest, AuthPolicy, CommandWithId, ControlCommand, DataPlaneConfig, DataPlaneEvent,
-    DataPlaneState, DataPlaneStatus, PollCommandsRequest, PollCommandsResponse,
-    RegisterDataPlaneRequest, RegisterDataPlaneResponse, ReportEventRequest,
+    AckCommandRequest, AuthPolicy, CheckServerIdRequest, CheckServerIdResponse, CommandWithId,
+    ControlCommand, DataPlaneConfig, DataPlaneEvent, DataPlaneState, DataPlaneStatus,
+    PollCommandsRequest, PollCommandsResponse, RegisterDataPlaneRequest,
+    RegisterDataPlaneResponse, ReportEventRequest,
 };
 use crate::protocol::{
     CloseReason, ControlMessage, ControlStream, Protocol, ProtocolError, ResponseStatus,
@@ -409,6 +410,40 @@ impl HttpIpcClient {
 
         Ok(())
     }
+
+    /// server_id が使用可能かどうかを確認
+    ///
+    /// Control Plane に問い合わせて、指定した server_id が既に使用中かどうかを確認する。
+    /// CP に接続できない場合はエラーを返す。
+    pub async fn check_server_id(&self, server_id: u32) -> anyhow::Result<bool> {
+        let url = format!("{}/api/v1/CheckServerId", self.base_url);
+        let request = CheckServerIdRequest { server_id };
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send CheckServerId request")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "CheckServerId failed: status={}, body={}",
+                status,
+                text
+            ));
+        }
+
+        let resp: CheckServerIdResponse = response
+            .json()
+            .await
+            .context("Failed to parse CheckServerId response")?;
+
+        Ok(resp.available)
+    }
 }
 
 // =============================================================================
@@ -522,27 +557,71 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     info!("Registered with control plane, received auth policy");
 
     // server_id を 1 から MAX_SOCKETS-1 (65535) の範囲でランダム生成
+    // Control Plane に問い合わせて重複がないことを確認し、重複していたら再生成
+    // CP に接続できない場合は警告を出してランダム値をそのまま使用
     //
     // 【制約】
     // - REUSEPORT_SOCKARRAY マップはキーが 0 から max_entries-1 の範囲でなければならない
     // - platform/linux/bpf/quicport_reuseport.h で MAX_SOCKETS = 65536 と定義
     // - よって server_id は 1 から 65535 の範囲で生成（0 は無効値として避ける）
-    //
-    // 【衝突確率】
-    // - 65535 通りの値空間で同時稼働 DP 数が 2-3 個の場合、
-    //   衝突確率は約 0.0015-0.0046% と極めて低い
     const MAX_SOCKETS: u32 = 65536;
-    let server_id: u32 = (rand::random::<u32>() % (MAX_SOCKETS - 1)) + 1;
-    info!("Generated random server_id={:#06x} for eBPF routing", server_id);
+    const MAX_SERVER_ID_RETRY: u32 = 10;
+
+    let server_id = {
+        let mut candidate = (rand::random::<u32>() % (MAX_SOCKETS - 1)) + 1;
+        let mut retries = 0;
+
+        loop {
+            match http_client.check_server_id(candidate).await {
+                Ok(true) => {
+                    // 利用可能
+                    debug!("server_id={:#06x} is available", candidate);
+                    break candidate;
+                }
+                Ok(false) => {
+                    // 重複している
+                    warn!(
+                        "server_id={:#06x} is already in use, generating new one (attempt {}/{})",
+                        candidate,
+                        retries + 1,
+                        MAX_SERVER_ID_RETRY
+                    );
+                    retries += 1;
+                    if retries >= MAX_SERVER_ID_RETRY {
+                        warn!(
+                            "Failed to find available server_id after {} attempts, using last candidate {:#06x}",
+                            MAX_SERVER_ID_RETRY, candidate
+                        );
+                        break candidate;
+                    }
+                    candidate = (rand::random::<u32>() % (MAX_SOCKETS - 1)) + 1;
+                }
+                Err(e) => {
+                    // CP に接続できない場合は警告を出して続行
+                    warn!(
+                        "Failed to check server_id with Control Plane: {}. \
+                         Using unchecked server_id={:#06x}",
+                        e, candidate
+                    );
+                    break candidate;
+                }
+            }
+        }
+    };
+    info!(
+        "Generated random server_id={:#06x} for eBPF routing",
+        server_id
+    );
 
     // 認証ポリシーと設定を適用
     data_plane.set_auth_policy(auth_policy).await;
     data_plane.set_config(dp_config).await;
 
-    // Ready イベントを送信
+    // Ready イベントを送信（server_id を含めて CP に登録）
     let event = DataPlaneEvent::Ready {
         pid,
         listen_addr: config.listen_addr.to_string(),
+        server_id,
     };
     if let Err(e) = http_client.report_event(event).await {
         warn!("Failed to report Ready event: {}", e);
