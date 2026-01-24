@@ -41,23 +41,24 @@
 //!             └─────────────┘                       └─────────────┘
 //! ```
 //!
-//! # マップピン留め（Graceful Restart 対応）
+//! # マップ・プログラムのピン留め（Graceful Restart 対応）
 //!
-//! `socket_map` は BPF filesystem にピン留めされ、複数の Data Plane プロセス間で
-//! 共有されます。これにより graceful restart 時に既存の QUIC 接続が維持されます。
+//! `socket_map` と BPF プログラムは BPF filesystem にピン留めされ、複数の Data Plane
+//! プロセス間で共有されます。これにより graceful restart 時に既存の QUIC 接続が維持されます。
 //!
 //! ```text
-//! /sys/fs/bpf/quicport/socket_map  ← ピン留めされたマップ
-//!      │
-//!      ├── key=1 → 旧 DP のソケット（draining 中）
-//!      └── key=2 → 新 DP のソケット（新規接続受付中）
+//! /sys/fs/bpf/quicport/
+//!      ├── socket_map              ← ピン留めされたマップ
+//!      │     ├── key=1 → 旧 DP のソケット（draining 中）
+//!      │     └── key=2 → 新 DP のソケット（新規接続受付中）
+//!      └── quicport_select_socket  ← ピン留めされた BPF プログラム
 //! ```
 //!
 //! ## ピン留めの動作
 //!
-//! 1. 最初の DP 起動時: 新規マップを作成してピン留め
-//! 2. graceful restart 時: 既存のピン留めマップを再利用
-//! 3. DP 終了時: 自分が登録した server_id のみ削除、マップは保持
+//! 1. 最初の DP 起動時: 新規マップ・プログラムを作成してピン留め
+//! 2. graceful restart 時: 既存のピン留めマップ・プログラムを再利用
+//! 3. DP 終了時: 自分が登録した server_id のみ削除、マップ・プログラムは保持
 //!
 //! # 必要な権限
 //!
@@ -85,7 +86,7 @@
 
 use std::mem::MaybeUninit;
 use std::net::UdpSocket;
-use std::os::fd::{AsFd, AsRawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -134,10 +135,10 @@ impl Default for EbpfRouterConfig {
 ///
 /// # ライフサイクル
 ///
-/// 1. `load()`: eBPF プログラムをカーネルにロード
+/// 1. `load()`: eBPF プログラムをカーネルにロード（または既存を再利用）
 /// 2. `attach_to_socket()`: SO_REUSEPORT ソケットグループにアタッチ
 /// 3. `register_server()`: Data Plane のソケットを登録
-/// 4. (Drop 時): プログラムとマップが自動的にクリーンアップ
+/// 4. (Drop 時): server_id のみクリーンアップ、プログラム・マップは保持
 pub struct EbpfRouter {
     /// ロード済み BPF オブジェクト (スケルトン)
     /// Box でヒープに配置し、自己参照構造を避ける
@@ -153,6 +154,11 @@ pub struct EbpfRouter {
     /// ピン留めマップを再利用したかどうか
     #[allow(dead_code)]
     reused_pinned_map: bool,
+    /// ピン留めプログラムを再利用したかどうか
+    reused_pinned_prog: bool,
+    /// ピン留めプログラムの fd（再利用時に保持）
+    /// SO_ATTACH_REUSEPORT_EBPF で使用する
+    pinned_prog_fd: Option<OwnedFd>,
 }
 
 impl EbpfRouter {
@@ -161,9 +167,10 @@ impl EbpfRouter {
     /// # ピン留め動作
     ///
     /// `config.pin_path` が設定されている場合:
-    /// 1. `{pin_path}/socket_map` が存在するか確認
-    /// 2. 存在する場合: 既存のピン留めマップを再利用（graceful restart 対応）
-    /// 3. 存在しない場合: 新規マップを作成してピン留め
+    /// 1. `{pin_path}/quicport_select_socket` が存在するか確認
+    /// 2. 存在する場合: 既存のピン留めプログラムを再利用（graceful restart 対応）
+    /// 3. 存在しない場合: 新規プログラムをロードしてピン留め
+    /// 4. socket_map も同様にピン留め・再利用
     ///
     /// # Errors
     ///
@@ -174,6 +181,52 @@ impl EbpfRouter {
     pub fn load(config: EbpfRouterConfig) -> Result<Self> {
         info!("Loading eBPF SK_REUSEPORT router");
 
+        // ピン留め処理フラグ
+        let mut reused_pinned_map = false;
+        let mut reused_pinned_prog = false;
+        let mut pinned_prog_fd: Option<OwnedFd> = None;
+
+        // ピン留めパスが設定されている場合、まずプログラムの再利用を試みる
+        if let Some(ref pin_dir) = config.pin_path {
+            let prog_pin_path = pin_dir.join("quicport_select_socket");
+
+            if prog_pin_path.exists() {
+                // 既存のピン留めプログラムを再利用
+                info!(
+                    "Reusing existing pinned program at {:?}",
+                    prog_pin_path
+                );
+
+                // bpf_obj_get() でピン留めプログラムの fd を取得
+                let path_cstr = std::ffi::CString::new(prog_pin_path.to_string_lossy().as_bytes())
+                    .context("Invalid pin path")?;
+                let fd = unsafe { libc::bpf(libc::BPF_OBJ_GET, &libc::bpf_attr {
+                    pathname: path_cstr.as_ptr() as u64,
+                    ..std::mem::zeroed()
+                } as *const _ as *const libc::c_void, std::mem::size_of::<libc::bpf_attr>() as u32) };
+
+                if fd >= 0 {
+                    info!("Successfully reusing pinned program (fd={})", fd);
+                    // SAFETY: fd は有効な BPF プログラム fd
+                    pinned_prog_fd = Some(unsafe { OwnedFd::from_raw_fd(fd) });
+                    reused_pinned_prog = true;
+                } else {
+                    let err = std::io::Error::last_os_error();
+                    warn!(
+                        "Failed to reuse pinned program: {}. Will create new one.",
+                        err
+                    );
+                    // 破損したピン留めファイルを削除
+                    if let Err(remove_err) = std::fs::remove_file(&prog_pin_path) {
+                        warn!(
+                            "Failed to remove corrupted pin file {:?}: {}",
+                            prog_pin_path, remove_err
+                        );
+                    }
+                }
+            }
+        }
+
         // OpenObject を Box でヒープに配置し、安定したアドレスを確保
         // これにより skel がこのオブジェクトを参照できる
         let mut open_object: Box<MaybeUninit<OpenObject>> = Box::new(MaybeUninit::uninit());
@@ -183,9 +236,6 @@ impl EbpfRouter {
         let mut open_skel = skel_builder
             .open(&mut *open_object)
             .context("Failed to open eBPF skeleton")?;
-
-        // ピン留め処理フラグ
-        let mut reused_pinned_map = false;
 
         // ピン留めパスが設定されている場合、マップのピン留めを設定
         if let Some(ref pin_dir) = config.pin_path {
@@ -255,9 +305,27 @@ impl EbpfRouter {
         }
 
         // eBPF プログラムをカーネルにロード
+        // NOTE: ピン留めプログラムを再利用する場合でも、socket_map を参照するために
+        //       スケルトンをロードする必要がある
         let skel = open_skel
             .load()
             .context("Failed to load eBPF program into kernel")?;
+
+        // プログラムをピン留め（まだピン留めされていない場合）
+        if let Some(ref pin_dir) = config.pin_path {
+            if !reused_pinned_prog {
+                let prog_pin_path = pin_dir.join("quicport_select_socket");
+                Self::ensure_pin_directory_exists(pin_dir)?;
+
+                skel.progs
+                    .quicport_select_socket
+                    .pin(&prog_pin_path)
+                    .with_context(|| {
+                        format!("Failed to pin program at {:?}", prog_pin_path)
+                    })?;
+                info!("Pinned BPF program at {:?}", prog_pin_path);
+            }
+        }
 
         info!("eBPF SK_REUSEPORT router loaded successfully");
 
@@ -273,6 +341,8 @@ impl EbpfRouter {
             config,
             registered_server_ids: Vec::new(),
             reused_pinned_map,
+            reused_pinned_prog,
+            pinned_prog_fd,
         })
     }
 
@@ -299,27 +369,38 @@ impl EbpfRouter {
     ///
     /// # 重要
     ///
-    /// このメソッドは SO_REUSEPORT が有効なソケットに対して呼び出す必要があります。
-    /// 同じ reuseport グループ内のすべてのソケットが、アタッチ後にこのプログラムで
-    /// ルーティングされるようになります。
+    /// - このメソッドは SO_REUSEPORT が有効なソケットに対して呼び出す必要があります。
+    /// - ピン留めプログラムがある場合はそれを使用し、すべての DP が同じプログラムを共有します。
+    /// - SO_REUSEPORT グループでは、最初にアタッチされたプログラムがグループ全体で使用されます。
     ///
     /// # Arguments
     ///
     /// * `socket` - SO_REUSEPORT が有効な UDP ソケット
     pub fn attach_to_socket(&self, socket: &UdpSocket) -> Result<()> {
         let sock_fd = socket.as_raw_fd();
-        let prog = &self.skel.progs.quicport_select_socket;
-        let prog_fd = prog.as_fd().as_raw_fd();
+
+        // ピン留めプログラムの fd があればそれを使用、なければスケルトンのプログラムを使用
+        // これにより、すべての DP が同じプログラムインスタンスを共有する
+        let prog_fd = if let Some(ref pinned_fd) = self.pinned_prog_fd {
+            pinned_fd.as_raw_fd()
+        } else {
+            self.skel.progs.quicport_select_socket.as_fd().as_raw_fd()
+        };
 
         debug!(
-            "Attaching SK_REUSEPORT program (fd={}) to socket (fd={})",
-            prog_fd, sock_fd
+            "Attaching SK_REUSEPORT program (fd={}, reused={}) to socket (fd={})",
+            prog_fd, self.reused_pinned_prog, sock_fd
         );
 
         // SO_ATTACH_REUSEPORT_EBPF でソケットにアタッチ
         //
         // このソケットオプションは、BPF プログラムの fd を設定することで
         // reuseport グループ全体にプログラムをアタッチします。
+        //
+        // 注意: SO_REUSEPORT グループでは、最初にプログラムをアタッチしたソケットの
+        // プログラムがグループ全体で使用されます。後からアタッチしたプログラムは
+        // 既存のプログラムがある場合、置き換えられません（EBUSY が返されることがある）。
+        // ピン留めプログラムを使用することで、すべての DP が同じプログラムを共有します。
         let ret = unsafe {
             libc::setsockopt(
                 sock_fd,
@@ -332,13 +413,24 @@ impl EbpfRouter {
 
         if ret < 0 {
             let err = std::io::Error::last_os_error();
+            // EBUSY は既にプログラムがアタッチされている場合に発生する可能性がある
+            // ピン留めプログラムを使用している場合、これは正常な動作
+            if err.raw_os_error() == Some(libc::EBUSY) && self.reused_pinned_prog {
+                info!(
+                    "SK_REUSEPORT program already attached to group (reusing pinned program)"
+                );
+                return Ok(());
+            }
             return Err(anyhow::anyhow!(
                 "Failed to attach eBPF program to socket: {}",
                 err
             ));
         }
 
-        info!("SK_REUSEPORT program attached to socket");
+        info!(
+            "SK_REUSEPORT program attached to socket (reused_pinned={})",
+            self.reused_pinned_prog
+        );
         Ok(())
     }
 
@@ -455,12 +547,24 @@ impl Drop for EbpfRouter {
             }
         }
 
-        // 注意: QuicportReuseportSkel の Drop では:
-        // - BPF プログラムはカーネルから削除される
-        // - ピン留めされていないマップは削除される
-        // - ピン留めされているマップは BPF filesystem に残る（意図的）
+        // 注意: Drop 時の動作:
+        //
+        // 1. QuicportReuseportSkel の Drop:
+        //    - スケルトンがロードした BPF プログラムはカーネルから削除される
+        //    - ピン留めされていないマップは削除される
+        //    - ピン留めされているマップは BPF filesystem に残る（意図的）
+        //
+        // 2. pinned_prog_fd (OwnedFd) の Drop:
+        //    - fd のみがクローズされる
+        //    - ピン留めファイル (/sys/fs/bpf/quicport/quicport_select_socket) は残る
+        //    - 他のプロセスはこのピン留めファイルから再度 fd を取得可能
+        //
+        // 3. SO_REUSEPORT グループにアタッチされた BPF プログラム:
+        //    - ソケットグループが存在する限り、プログラムはカーネルに保持される
+        //    - 最後のソケットが閉じられるとプログラムも解放される
+        //    - ピン留めファイルは別途保持されるため、新しいプロセスが再利用可能
         info!(
-            "eBPF router dropped. Cleaned up {} server_id(s). Pinned map preserved for other processes.",
+            "eBPF router dropped. Cleaned up {} server_id(s). Pinned map/program preserved for other processes.",
             self.registered_server_ids.len()
         );
     }
