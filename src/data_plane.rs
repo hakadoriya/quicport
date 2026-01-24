@@ -36,8 +36,8 @@ use crate::protocol::{
     CloseReason, ControlMessage, ControlStream, Protocol, ProtocolError, ResponseStatus,
 };
 use crate::quic::{
-    authenticate_client_psk, authenticate_client_x25519, create_server_endpoint,
-    create_server_endpoint_for_ebpf, encode_base64_key, parse_base64_key,
+    authenticate_client_psk, authenticate_client_x25519, create_server_endpoint_for_ebpf,
+    encode_base64_key, parse_base64_key,
 };
 use crate::statistics::ServerStatistics;
 
@@ -521,8 +521,19 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
 
     info!("Registered with control plane, received auth policy");
 
-    // server_id を先に取得（後で QUIC エンドポイント作成時に使用）
-    let server_id = dp_config.server_id;
+    // server_id をランダム生成（Control Plane からの割り当ては使用しない）
+    // graceful restart 時に既存の Data Plane と server_id が衝突しないように、
+    // 各 Data Plane が独自にランダムな server_id を生成する。
+    // 0 は無効値として避け、1〜u32::MAX の範囲で生成。
+    // 衝突確率: u32 の範囲（約42億通り）で同時稼働 DP 数が 2-3 個なら、
+    // 衝突確率は約 2.3 × 10^-10 と極めて低い。
+    let server_id: u32 = loop {
+        let id = rand::random::<u32>();
+        if id != 0 {
+            break id;
+        }
+    };
+    info!("Generated random server_id={:#010x} for eBPF routing", server_id);
 
     // 認証ポリシーと設定を適用
     data_plane.set_auth_policy(auth_policy).await;
@@ -545,9 +556,11 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     #[cfg(target_os = "linux")]
     let _ebpf_router: Option<crate::platform::linux::EbpfRouter>;
 
-    let endpoint = if let Some(sid) = server_id {
+    // eBPF ルーティング用に常に server_id を使用
+    let endpoint = {
+        let sid = server_id;
         info!(
-            "Creating QUIC endpoint with server_id={} for eBPF routing",
+            "Creating QUIC endpoint with server_id={:#010x} for eBPF routing",
             sid
         );
 
@@ -617,13 +630,6 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
         }
 
         endpoint
-    } else {
-        // eBPF なしの場合
-        #[cfg(target_os = "linux")]
-        {
-            _ebpf_router = None;
-        }
-        create_server_endpoint(config.listen_addr, "quicport-dataplane")?
     };
     info!("Data plane QUIC listening on {}", config.listen_addr);
 
