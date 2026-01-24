@@ -19,9 +19,6 @@ on:
 permissions:
   contents: write
 
-env:
-  BIN_NAME: quicport
-
 jobs:
   rust-build:
     name: ${{ matrix.os_name }}-${{ matrix.arch }}
@@ -109,69 +106,20 @@ jobs:
             cargo install cargo-zigbuild --locked
           fi
 
-      - name: Build (unix)
-        if: matrix.kind == 'unix'
+      - name: Build and package (Linux)
+        if: startsWith(matrix.runner, 'ubuntu')
         shell: bash
-        run: |
-          set -Eeuo pipefail -x
-          if [[ "${{ matrix.runner }}" == ubuntu* ]]; then
-            cargo zigbuild --release --locked --target "${{ matrix.target }}"
-          else
-            cargo build --release --locked --target "${{ matrix.target }}"
-          fi
+        run: ./build/build-linux.sh "${{ matrix.target }}" "${{ matrix.os_name }}" "${{ matrix.arch }}"
 
-      - name: Build (windows, MSVC)
+      - name: Build and package (macOS)
+        if: startsWith(matrix.runner, 'macos')
+        shell: bash
+        run: ./build/build-darwin.sh "${{ matrix.target }}" "${{ matrix.os_name }}" "${{ matrix.arch }}"
+
+      - name: Build and package (Windows)
         if: matrix.kind == 'windows'
         shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          cargo build --release --locked --target "${{ matrix.target }}"
-
-      - name: Package (unix -> zip + sha256)
-        if: matrix.kind == 'unix'
-        shell: bash
-        run: |
-          set -Eeuo pipefail -x
-          TARGET="${{ matrix.target }}"
-          OS_NAME="${{ matrix.os_name }}"
-          ARCH="${{ matrix.arch }}"
-          OUT="out"
-          STAGE="stage/${TARGET}"
-
-          mkdir -p "${STAGE}" "${OUT}"
-          cp "target/${TARGET}/release/${BIN_NAME}" "${STAGE}/"
-
-          if [[ -f README.md ]]; then cp README.md "${STAGE}/"; fi
-          if [[ -f LICENSE ]]; then cp LICENSE "${STAGE}/"; fi
-
-          ARCHIVE="${BIN_NAME}_${OS_NAME}_${ARCH}.zip"
-          (cd "${STAGE}" && zip -r "../../${OUT}/${ARCHIVE}" .)
-
-          shasum -a 256 "${OUT}/${ARCHIVE}" > "${OUT}/${ARCHIVE}.sha256"
-
-      - name: Package (windows -> zip + sha256)
-        if: matrix.kind == 'windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $target  = "${{ matrix.target }}"
-          $osName  = "${{ matrix.os_name }}"
-          $arch    = "${{ matrix.arch }}"
-          $bin     = "${{ env.BIN_NAME }}.exe"
-
-          New-Item -ItemType Directory -Force -Path "stage\$target" | Out-Null
-          New-Item -ItemType Directory -Force -Path "out" | Out-Null
-
-          Copy-Item "target\$target\release\$bin" "stage\$target\$bin" -Force
-          if (Test-Path "README.md") { Copy-Item "README.md" "stage\$target\" -Force }
-          if (Test-Path "LICENSE")   { Copy-Item "LICENSE"   "stage\$target\" -Force }
-
-          $archive = "${{ env.BIN_NAME }}_$osName_$arch.zip"
-          Compress-Archive -Path "stage\$target\*" -DestinationPath "out\$archive" -Force
-
-          $hash = (Get-FileHash "out\$archive" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $archive" | Out-File -FilePath "out\$archive.sha256" -Encoding ascii
+        run: .\build\build-windows.ps1 -Target "${{ matrix.target }}" -OsName "${{ matrix.os_name }}" -Arch "${{ matrix.arch }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
