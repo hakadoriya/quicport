@@ -254,11 +254,14 @@ impl HttpIpcClient {
     /// - 初回呼び出し: DP 登録（auth_policy と config が返る）
     /// - 以降の呼び出し: 状態更新 + コマンド応答（auth_policy と config は None）
     ///
-    /// server_id の重複チェックも同時に行う
+    /// dp_id の重複チェックも同時に行う
     /// 重複時は 409 Conflict エラーが返る
+    ///
+    /// # Arguments
+    /// * `dp_id_u32` - Data Plane ID（eBPF ルーティング用 u32 値）
     pub async fn send_status(
         &mut self,
-        server_id: u32,
+        dp_id_u32: u32,
         pid: u32,
         listen_addr: &str,
         status: &DataPlaneStatus,
@@ -266,9 +269,10 @@ impl HttpIpcClient {
         ack_status: Option<&str>,
     ) -> anyhow::Result<SendStatusResponse> {
         let url = format!("{}/api/v1/dp/SendStatus", self.base_url);
-        // server_id を 16 進数文字列にフォーマット（eBPF デバッグとの一貫性のため）
+        // dp_id を 16 進数文字列にフォーマット（eBPF デバッグとの一貫性のため）
+        let dp_id_hex = format!("{:#06x}", dp_id_u32);
         let request = SendStatusRequest {
-            server_id: format!("{:#06x}", server_id),
+            dp_id: dp_id_hex.clone(),
             pid,
             listen_addr: listen_addr.to_string(),
             state: status.state,
@@ -281,8 +285,8 @@ impl HttpIpcClient {
         };
 
         debug!(
-            "SendStatus: url={}, server_id={:#06x}, state={:?}",
-            url, server_id, status.state
+            "SendStatus: url={}, dp_id={}, state={:?}",
+            url, dp_id_hex, status.state
         );
 
         let response = self
@@ -296,11 +300,11 @@ impl HttpIpcClient {
         let status_code = response.status();
         if !status_code.is_success() {
             let text = response.text().await.unwrap_or_default();
-            // 409 Conflict は server_id 重複を示す
+            // 409 Conflict は dp_id 重複を示す
             if status_code == reqwest::StatusCode::CONFLICT {
                 return Err(anyhow::anyhow!(
-                    "SERVER_ID_DUPLICATE: server_id={:#06x} is already in use",
-                    server_id
+                    "DP_ID_DUPLICATE: dp_id={} is already in use",
+                    dp_id_hex
                 ));
             }
             return Err(anyhow::anyhow!(
@@ -318,10 +322,7 @@ impl HttpIpcClient {
         // dp_id を保存（初回登録時）
         if self.dp_id.is_none() {
             self.dp_id = Some(resp.dp_id.clone());
-            info!(
-                "Registered with Control Plane as {} (server_id={:#06x})",
-                resp.dp_id, server_id
-            );
+            info!("Registered with Control Plane as dp_id={}", resp.dp_id);
         }
 
         Ok(resp)
@@ -503,7 +504,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                 match (resp.auth_policy, resp.config) {
                     (Some(auth_policy), Some(dp_config)) => {
                         info!(
-                            "Registered with control plane (server_id={:#06x})",
+                            "Registered with control plane (dp_id={:#06x})",
                             server_id
                         );
                         break (auth_policy, dp_config);
@@ -518,20 +519,20 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
             Err(e) => {
                 let err_str = e.to_string();
 
-                // server_id 重複エラー (409 Conflict)
-                if err_str.contains("SERVER_ID_DUPLICATE") {
+                // dp_id 重複エラー (409 Conflict)
+                if err_str.contains("DP_ID_DUPLICATE") {
                     server_id_retries += 1;
                     if server_id_retries >= MAX_SERVER_ID_RETRY {
                         return Err(anyhow::anyhow!(
-                            "Failed to find available server_id after {} attempts",
+                            "Failed to find available dp_id after {} attempts",
                             MAX_SERVER_ID_RETRY
                         ));
                     }
-                    // 別の server_id を生成してリトライ
+                    // 別の dp_id を生成してリトライ
                     let old_id = server_id;
                     server_id = (rand::random::<u32>() % (MAX_SOCKETS - 1)) + 1;
                     warn!(
-                        "server_id={:#06x} is already in use, retrying with {:#06x} (attempt {}/{})",
+                        "dp_id={:#06x} is already in use, retrying with {:#06x} (attempt {}/{})",
                         old_id, server_id, server_id_retries, MAX_SERVER_ID_RETRY
                     );
                     // dp_id をリセットして再試行
@@ -558,7 +559,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     };
 
     info!(
-        "Generated random server_id={:#06x} for eBPF routing",
+        "Generated random dp_id={:#06x} for eBPF routing",
         server_id
     );
 
@@ -574,11 +575,11 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     #[cfg(target_os = "linux")]
     let _ebpf_router: Option<crate::platform::linux::EbpfRouter>;
 
-    // eBPF ルーティング用に常に server_id を使用
+    // eBPF ルーティング用に常に dp_id を使用
     let endpoint = {
         let sid = server_id;
         info!(
-            "Creating QUIC endpoint with server_id={:#06x} for eBPF routing",
+            "Creating QUIC endpoint with dp_id={:#06x} for eBPF routing",
             sid
         );
 
@@ -607,13 +608,13 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                             // サーバーを登録
                             if let Err(e) = router.register_server(sid, &socket_for_ebpf) {
                                 warn!(
-                                    "Failed to register server_id={} in eBPF map: {}",
+                                    "Failed to register dp_id={:#06x} in eBPF map: {}",
                                     sid, e
                                 );
                                 None
                             } else {
                                 info!(
-                                    "eBPF SK_REUSEPORT routing enabled for server_id={}",
+                                    "eBPF SK_REUSEPORT routing enabled for dp_id={:#06x}",
                                     sid
                                 );
                                 // router を保持して run() 終了まで eBPF マップを維持

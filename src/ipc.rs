@@ -84,14 +84,14 @@ pub struct ConnectionInfo {
 /// 状態送信（登録・更新・コマンド応答すべて統合）
 /// 毎回全状態を冪等に送信することで、CP 再起動後も状態を復旧可能
 ///
-/// - 初回呼び出し: DP 登録（dp_id が割り当てられる）
+/// - 初回呼び出し: DP 登録
 /// - 以降の呼び出し: 状態更新 + コマンド応答
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendStatusRequest {
     // ========== DP 識別情報 ==========
-    /// server_id（eBPF ルーティング用、16 進数文字列 "0x0001" 形式）
+    /// Data Plane ID（eBPF ルーティング用、16 進数文字列 "0x0001" 形式）
     /// 重複時は 409 Conflict エラーが返る
-    pub server_id: String,
+    pub dp_id: String,
     /// データプレーンの PID
     pub pid: u32,
     /// QUIC リッスンアドレス
@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn test_serialize_send_status_request() {
         let req = SendStatusRequest {
-            server_id: "0x1234".to_string(),
+            dp_id: "0x1234".to_string(),
             pid: 12345,
             listen_addr: "0.0.0.0:39000".to_string(),
             state: DataPlaneState::Active,
