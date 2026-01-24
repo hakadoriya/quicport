@@ -303,17 +303,17 @@ async fn metrics(State(state): State<PrivateApiState>) -> impl IntoResponse {
 // HTTP IPC ハンドラー（DP 用 API）
 // =============================================================================
 
-/// 16 進数文字列を u32 にパース
+/// 16 進数文字列の dp_id を u32 にパース
 ///
 /// "0x3039" → 12345
 /// "0X3039" → 12345
 /// "3039"   → 12345 (0x プレフィックスは任意)
-fn parse_hex_server_id(s: &str) -> Result<u32, String> {
+fn parse_hex_dp_id(s: &str) -> Result<u32, String> {
     let s = s
         .strip_prefix("0x")
         .or_else(|| s.strip_prefix("0X"))
         .unwrap_or(s);
-    u32::from_str_radix(s, 16).map_err(|e| format!("Invalid server_id format: {}", e))
+    u32::from_str_radix(s, 16).map_err(|e| format!("Invalid dp_id format: {}", e))
 }
 
 /// POST /api/v1/dp/SendStatus
@@ -332,27 +332,27 @@ async fn send_status(
         .unwrap()
         .as_secs();
 
-    // 16 進数文字列をパース
-    let server_id = match parse_hex_server_id(&req.server_id) {
+    // 16 進数文字列をパースして u32 に変換（eBPF ルーティング用）
+    let dp_id_u32 = match parse_hex_dp_id(&req.dp_id) {
         Ok(id) => id,
         Err(msg) => {
-            warn!("SendStatus: invalid server_id format: {}", req.server_id);
+            warn!("SendStatus: invalid dp_id format: {}", req.dp_id);
             return (
                 StatusCode::BAD_REQUEST, // 400
                 Json(serde_json::json!(ErrorResponse {
-                    error: "INVALID_SERVER_ID".to_string(),
+                    error: "INVALID_DP_ID".to_string(),
                     message: msg,
                 })),
             );
         }
     };
 
-    // dp_id は server_id から生成（一意性を保証）
-    let dp_id = format!("dp_{:#06x}", server_id);
+    // dp_id を正規化（常に "0x..." 形式）
+    let dp_id = format!("{:#06x}", dp_id_u32);
 
     debug!(
-        "SendStatus: dp_id={}, server_id={:#06x}, state={:?}, ack_cmd_id={:?}",
-        dp_id, server_id, req.state, req.ack_cmd_id
+        "SendStatus: dp_id={}, state={:?}, ack_cmd_id={:?}",
+        dp_id, req.state, req.ack_cmd_id
     );
 
     // 既存の DP かどうかを確認
@@ -364,19 +364,16 @@ async fn send_status(
     if is_new_registration {
         // ========== 初回登録 ==========
 
-        // server_id 重複チェック
+        // dp_id 重複チェック
         {
             let active_ids = state.http_ipc.active_server_ids.read().await;
-            if active_ids.contains(&server_id) {
-                warn!(
-                    "SendStatus: server_id={:#06x} is already in use",
-                    server_id
-                );
+            if active_ids.contains(&dp_id_u32) {
+                warn!("SendStatus: dp_id={} is already in use", dp_id);
                 return (
                     StatusCode::CONFLICT, // 409
                     Json(serde_json::json!(ErrorResponse {
-                        error: "SERVER_ID_DUPLICATE".to_string(),
-                        message: format!("server_id {:#06x} is already in use", server_id),
+                        error: "DP_ID_DUPLICATE".to_string(),
+                        message: format!("dp_id {} is already in use", dp_id),
                     })),
                 );
             }
@@ -401,19 +398,19 @@ async fn send_status(
         // 設定を取得
         let config = state.http_ipc.dp_config.read().await.clone();
 
-        // server_id を使用中として登録
+        // dp_id を使用中として登録
         state
             .http_ipc
             .active_server_ids
             .write()
             .await
-            .insert(server_id);
+            .insert(dp_id_u32);
 
         // データプレーンを登録
         {
             let mut dataplanes = state.http_ipc.dataplanes.write().await;
             let mut dp = HttpDataPlane::new(dp_id.clone(), req.pid, req.listen_addr.clone());
-            dp.server_id = Some(server_id);
+            dp.server_id = Some(dp_id_u32);
             dp.state = req.state;
             dp.active_connections = req.active_connections;
             dp.bytes_sent = req.bytes_sent;
@@ -423,10 +420,7 @@ async fn send_status(
             dataplanes.insert(dp_id.clone(), dp);
         }
 
-        info!(
-            "Data plane registered: {} (server_id={:#06x})",
-            dp_id, server_id
-        );
+        info!("Data plane registered: dp_id={}", dp_id);
 
         (
             StatusCode::OK,
@@ -442,7 +436,7 @@ async fn send_status(
         let mut dataplanes = state.http_ipc.dataplanes.write().await;
         if let Some(dp) = dataplanes.get_mut(&dp_id) {
             // 全状態を更新（冪等）
-            dp.server_id = Some(server_id);
+            dp.server_id = Some(dp_id_u32);
             dp.pid = req.pid;
             dp.state = req.state;
             dp.active_connections = req.active_connections;
@@ -451,10 +445,10 @@ async fn send_status(
             dp.listen_addr = req.listen_addr.clone();
             dp.last_active = now;
 
-            // server_id を使用中として登録（CP 再起動後の復旧用）
+            // dp_id を使用中として登録（CP 再起動後の復旧用）
             {
                 let mut active_ids = state.http_ipc.active_server_ids.write().await;
-                active_ids.insert(server_id);
+                active_ids.insert(dp_id_u32);
             }
 
             // コマンド応答がある場合はログ出力
