@@ -20,6 +20,7 @@
 //! | `POST /api/v1/DrainDataPlane` | ドレイン | CLI/外部 |
 //! | `POST /api/v1/ShutdownDataPlane` | シャットダウン | CLI/外部 |
 //! | `POST /api/v1/GetConnections` | 接続一覧 | CLI/外部 |
+//! | `POST /api/v1/CheckServerId` | server_id 重複チェック | DP |
 //!
 //! ## API アクセス
 //!
@@ -35,7 +36,7 @@ use axum::{
     Json, Router,
 };
 use serde::Serialize;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -45,13 +46,14 @@ use tracing::{debug, info, warn};
 
 use crate::control_plane::ControlPlane;
 use crate::ipc::{
-    AckCommandRequest, AckCommandResponse, AuthPolicy, CommandWithId, ConnectionInfo,
-    ControlCommand, DataPlaneConfig, DataPlaneEvent, DataPlaneState, DataPlaneSummary,
-    DrainDataPlaneRequest, DrainDataPlaneResponse, ErrorResponse, GetConnectionsRequest,
-    GetConnectionsResponse, GetDataPlaneStatusRequest, GetDataPlaneStatusResponse,
-    ListDataPlanesRequest, ListDataPlanesResponse, PollCommandsRequest, PollCommandsResponse,
-    RegisterDataPlaneRequest, RegisterDataPlaneResponse, ReportEventRequest, ReportEventResponse,
-    ShutdownDataPlaneRequest, ShutdownDataPlaneResponse,
+    AckCommandRequest, AckCommandResponse, AuthPolicy, CheckServerIdRequest,
+    CheckServerIdResponse, CommandWithId, ConnectionInfo, ControlCommand, DataPlaneConfig,
+    DataPlaneEvent, DataPlaneState, DataPlaneSummary, DrainDataPlaneRequest,
+    DrainDataPlaneResponse, ErrorResponse, GetConnectionsRequest, GetConnectionsResponse,
+    GetDataPlaneStatusRequest, GetDataPlaneStatusResponse, ListDataPlanesRequest,
+    ListDataPlanesResponse, PollCommandsRequest, PollCommandsResponse, RegisterDataPlaneRequest,
+    RegisterDataPlaneResponse, ReportEventRequest, ReportEventResponse, ShutdownDataPlaneRequest,
+    ShutdownDataPlaneResponse,
 };
 use crate::statistics::ServerStatistics;
 
@@ -83,6 +85,8 @@ pub struct HttpDataPlane {
     pub connections: Vec<ConnectionInfo>,
     /// 最終アクティブ時刻
     pub last_active: u64,
+    /// server_id（eBPF ルーティング用）
+    pub server_id: Option<u32>,
 }
 
 impl HttpDataPlane {
@@ -104,6 +108,7 @@ impl HttpDataPlane {
             pending_commands: VecDeque::new(),
             connections: Vec::new(),
             last_active: now,
+            server_id: None,
         }
     }
 
@@ -145,6 +150,8 @@ pub struct HttpIpcState {
     pub auth_policy: RwLock<Option<AuthPolicy>>,
     /// データプレーン設定
     pub dp_config: RwLock<DataPlaneConfig>,
+    /// 使用中の server_id 一覧（eBPF ルーティング用）
+    pub active_server_ids: RwLock<HashSet<u32>>,
 }
 
 impl HttpIpcState {
@@ -156,6 +163,7 @@ impl HttpIpcState {
             command_notify: Notify::new(),
             auth_policy: RwLock::new(None),
             dp_config: RwLock::new(DataPlaneConfig::default()),
+            active_server_ids: RwLock::new(HashSet::new()),
         }
     }
 
@@ -478,13 +486,25 @@ async fn report_event(
     if let Some(dp) = dataplanes.get_mut(&req.dp_id) {
         // イベントに応じて状態を更新
         match &req.event {
-            DataPlaneEvent::Ready { pid, listen_addr } => {
+            DataPlaneEvent::Ready {
+                pid,
+                listen_addr,
+                server_id,
+            } => {
                 dp.pid = *pid;
                 dp.listen_addr = listen_addr.clone();
                 dp.state = DataPlaneState::Active;
+                dp.server_id = Some(*server_id);
+
+                // server_id を使用中として登録
+                {
+                    let mut active_ids = state.http_ipc.active_server_ids.write().await;
+                    active_ids.insert(*server_id);
+                }
+
                 info!(
-                    "Data plane {} is ready (pid={}, addr={})",
-                    req.dp_id, pid, listen_addr
+                    "Data plane {} is ready (pid={}, addr={}, server_id={:#06x})",
+                    req.dp_id, pid, listen_addr, server_id
                 );
             }
             DataPlaneEvent::Status(status) => {
@@ -674,6 +694,27 @@ async fn get_connections(
     }
 }
 
+/// POST /api/v1/CheckServerId
+///
+/// server_id が既に使用中かどうかを確認
+async fn check_server_id(
+    State(state): State<PrivateApiState>,
+    Json(req): Json<CheckServerIdRequest>,
+) -> impl IntoResponse {
+    let active_ids = state.http_ipc.active_server_ids.read().await;
+    let available = !active_ids.contains(&req.server_id);
+
+    debug!(
+        "CheckServerId: server_id={:#06x}, available={}",
+        req.server_id, available
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!(CheckServerIdResponse { available })),
+    )
+}
+
 // =============================================================================
 // サーバー起動
 // =============================================================================
@@ -734,6 +775,7 @@ pub async fn run_private_with_http_ipc(
         .route("/api/v1/DrainDataPlane", post(drain_data_plane))
         .route("/api/v1/ShutdownDataPlane", post(shutdown_data_plane))
         .route("/api/v1/GetConnections", post(get_connections))
+        .route("/api/v1/CheckServerId", post(check_server_id))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(listen).await?;

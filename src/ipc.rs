@@ -20,6 +20,7 @@
 //! | `POST /api/v1/DrainDataPlane` | ドレイン | CLI/外部 |
 //! | `POST /api/v1/ShutdownDataPlane` | シャットダウン | CLI/外部 |
 //! | `POST /api/v1/GetConnections` | 接続一覧 | CLI/外部 |
+//! | `POST /api/v1/CheckServerId` | server_id 重複チェック | DP |
 
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -69,6 +70,8 @@ pub enum DataPlaneEvent {
         pid: u32,
         /// リッスンアドレス
         listen_addr: String,
+        /// server_id（eBPF ルーティング用）
+        server_id: u32,
     },
 
     /// 状態レポート
@@ -319,6 +322,22 @@ pub struct GetConnectionsResponse {
     pub connections: Vec<ConnectionInfo>,
 }
 
+/// CheckServerId リクエスト (DP → CP)
+///
+/// server_id が既に使用中かどうかを確認
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckServerIdRequest {
+    /// 確認したい server_id
+    pub server_id: u32,
+}
+
+/// CheckServerId レスポンス (CP → DP)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckServerIdResponse {
+    /// 利用可能かどうか（true = 利用可能、false = 既に使用中）
+    pub available: bool,
+}
+
 /// HTTP IPC エラーレスポンス
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
@@ -476,6 +495,7 @@ mod tests {
         let event = DataPlaneEvent::Ready {
             pid: 12345,
             listen_addr: "0.0.0.0:39000".to_string(),
+            server_id: 0x1234,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("Ready"));
