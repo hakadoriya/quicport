@@ -9,18 +9,22 @@
 //!
 //! ### エンドポイント
 //!
-//! | メソッド | 説明 | 呼び出し元 |
-//! |----------|------|-----------|
-//! | `POST /api/v1/RegisterDataPlane` | DP 登録 | DP |
-//! | `POST /api/v1/PollCommands` | コマンドポーリング | DP |
-//! | `POST /api/v1/AckCommand` | コマンド応答 | DP |
-//! | `POST /api/v1/ReportEvent` | イベント報告 | DP |
-//! | `POST /api/v1/ListDataPlanes` | 全 DP 一覧 | CLI/外部 |
-//! | `POST /api/v1/GetDataPlaneStatus` | 特定 DP の詳細 | CLI/外部 |
-//! | `POST /api/v1/DrainDataPlane` | ドレイン | CLI/外部 |
-//! | `POST /api/v1/ShutdownDataPlane` | シャットダウン | CLI/外部 |
-//! | `POST /api/v1/GetConnections` | 接続一覧 | CLI/外部 |
-//! | `POST /api/v1/CheckServerId` | server_id 重複チェック | DP |
+//! #### DP 用 API (`/api/v1/dp/*`)
+//!
+//! | メソッド | 説明 | 方向 |
+//! |----------|------|------|
+//! | `POST /api/v1/dp/SendStatus` | 状態送信（登録・更新・応答すべて統合） | DP → CP |
+//! | `POST /api/v1/dp/ReceiveCommand` | コマンド受信（長ポーリング） | CP → DP |
+//!
+//! #### 管理用 API (`/api/v1/admin/*`)
+//!
+//! | メソッド | 説明 |
+//! |----------|------|
+//! | `POST /api/v1/admin/ListDataPlanes` | 全 DP 一覧 |
+//! | `POST /api/v1/admin/GetDataPlaneStatus` | 特定 DP の詳細 |
+//! | `POST /api/v1/admin/DrainDataPlane` | ドレイン |
+//! | `POST /api/v1/admin/ShutdownDataPlane` | シャットダウン |
+//! | `POST /api/v1/admin/GetConnections` | 接続一覧 |
 //!
 //! ## API アクセス
 //!
@@ -46,14 +50,12 @@ use tracing::{debug, info, warn};
 
 use crate::control_plane::ControlPlane;
 use crate::ipc::{
-    AckCommandRequest, AckCommandResponse, AuthPolicy, CheckServerIdRequest,
-    CheckServerIdResponse, CommandWithId, ConnectionInfo, ControlCommand, DataPlaneConfig,
-    DataPlaneEvent, DataPlaneState, DataPlaneSummary, DrainDataPlaneRequest,
-    DrainDataPlaneResponse, ErrorResponse, GetConnectionsRequest, GetConnectionsResponse,
-    GetDataPlaneStatusRequest, GetDataPlaneStatusResponse, ListDataPlanesRequest,
-    ListDataPlanesResponse, PollCommandsRequest, PollCommandsResponse, RegisterDataPlaneRequest,
-    RegisterDataPlaneResponse, ReportEventRequest, ReportEventResponse, ShutdownDataPlaneRequest,
-    ShutdownDataPlaneResponse,
+    AuthPolicy, CommandWithId, ConnectionInfo, ControlCommand, DataPlaneConfig, DataPlaneState,
+    DataPlaneSummary, DrainDataPlaneRequest, DrainDataPlaneResponse, ErrorResponse,
+    GetConnectionsRequest, GetConnectionsResponse, GetDataPlaneStatusRequest,
+    GetDataPlaneStatusResponse, ListDataPlanesRequest, ListDataPlanesResponse,
+    ReceiveCommandRequest, ReceiveCommandResponse, SendStatusRequest, SendStatusResponse,
+    ShutdownDataPlaneRequest, ShutdownDataPlaneResponse,
 };
 use crate::statistics::ServerStatistics;
 
@@ -298,72 +300,201 @@ async fn metrics(State(state): State<PrivateApiState>) -> impl IntoResponse {
 }
 
 // =============================================================================
-// HTTP IPC ハンドラー
+// HTTP IPC ハンドラー（DP 用 API）
 // =============================================================================
 
-/// POST /api/v1/RegisterDataPlane
+/// 16 進数文字列を u32 にパース
 ///
-/// データプレーンを登録し、認証ポリシーを返す
-async fn register_data_plane(
-    State(state): State<PrivateApiState>,
-    Json(req): Json<RegisterDataPlaneRequest>,
-) -> impl IntoResponse {
-    info!(
-        "RegisterDataPlane: pid={}, listen_addr={}",
-        req.pid, req.listen_addr
-    );
+/// "0x3039" → 12345
+/// "0X3039" → 12345
+/// "3039"   → 12345 (0x プレフィックスは任意)
+fn parse_hex_server_id(s: &str) -> Result<u32, String> {
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    u32::from_str_radix(s, 16).map_err(|e| format!("Invalid server_id format: {}", e))
+}
 
-    // 認証ポリシーを取得
-    let auth_policy = state.http_ipc.auth_policy.read().await;
-    let auth_policy = match auth_policy.as_ref() {
-        Some(p) => p.clone(),
-        None => {
-            warn!("No auth policy configured");
+/// POST /api/v1/dp/SendStatus
+///
+/// 状態送信（登録・更新・コマンド応答すべて統合）
+/// 毎回全状態を冪等に送信することで、CP 再起動後も状態を復旧可能
+///
+/// - 初回呼び出し: DP 登録（dp_id が割り当てられ、auth_policy と config が返る）
+/// - 以降の呼び出し: 状態更新のみ（auth_policy と config は None）
+async fn send_status(
+    State(state): State<PrivateApiState>,
+    Json(req): Json<SendStatusRequest>,
+) -> impl IntoResponse {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // 16 進数文字列をパース
+    let server_id = match parse_hex_server_id(&req.server_id) {
+        Ok(id) => id,
+        Err(msg) => {
+            warn!("SendStatus: invalid server_id format: {}", req.server_id);
             return (
-                StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::BAD_REQUEST, // 400
                 Json(serde_json::json!(ErrorResponse {
-                    error: "NO_AUTH_POLICY".to_string(),
-                    message: "Authentication policy not configured".to_string(),
+                    error: "INVALID_SERVER_ID".to_string(),
+                    message: msg,
                 })),
             );
         }
     };
 
-    // 設定を取得
-    // Note: server_id は Data Plane 側でランダム生成されるため、Control Plane では割り当てない
-    let config = state.http_ipc.dp_config.read().await.clone();
+    // dp_id は server_id から生成（一意性を保証）
+    let dp_id = format!("dp_{:#06x}", server_id);
 
-    // Data Plane ID を生成
-    let dp_id = format!("dp_{}", req.pid);
+    debug!(
+        "SendStatus: dp_id={}, server_id={:#06x}, state={:?}, ack_cmd_id={:?}",
+        dp_id, server_id, req.state, req.ack_cmd_id
+    );
 
-    // データプレーンを登録
-    {
+    // 既存の DP かどうかを確認
+    let is_new_registration = {
+        let dataplanes = state.http_ipc.dataplanes.read().await;
+        !dataplanes.contains_key(&dp_id)
+    };
+
+    if is_new_registration {
+        // ========== 初回登録 ==========
+
+        // server_id 重複チェック
+        {
+            let active_ids = state.http_ipc.active_server_ids.read().await;
+            if active_ids.contains(&server_id) {
+                warn!(
+                    "SendStatus: server_id={:#06x} is already in use",
+                    server_id
+                );
+                return (
+                    StatusCode::CONFLICT, // 409
+                    Json(serde_json::json!(ErrorResponse {
+                        error: "SERVER_ID_DUPLICATE".to_string(),
+                        message: format!("server_id {:#06x} is already in use", server_id),
+                    })),
+                );
+            }
+        }
+
+        // 認証ポリシーを取得
+        let auth_policy = state.http_ipc.auth_policy.read().await;
+        let auth_policy = match auth_policy.as_ref() {
+            Some(p) => p.clone(),
+            None => {
+                warn!("No auth policy configured");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!(ErrorResponse {
+                        error: "NO_AUTH_POLICY".to_string(),
+                        message: "Authentication policy not configured".to_string(),
+                    })),
+                );
+            }
+        };
+
+        // 設定を取得
+        let config = state.http_ipc.dp_config.read().await.clone();
+
+        // server_id を使用中として登録
+        state
+            .http_ipc
+            .active_server_ids
+            .write()
+            .await
+            .insert(server_id);
+
+        // データプレーンを登録
+        {
+            let mut dataplanes = state.http_ipc.dataplanes.write().await;
+            let mut dp = HttpDataPlane::new(dp_id.clone(), req.pid, req.listen_addr.clone());
+            dp.server_id = Some(server_id);
+            dp.state = req.state;
+            dp.active_connections = req.active_connections;
+            dp.bytes_sent = req.bytes_sent;
+            dp.bytes_received = req.bytes_received;
+            dp.started_at = req.started_at;
+            dp.last_active = now;
+            dataplanes.insert(dp_id.clone(), dp);
+        }
+
+        info!(
+            "Data plane registered: {} (server_id={:#06x})",
+            dp_id, server_id
+        );
+
+        (
+            StatusCode::OK,
+            Json(serde_json::json!(SendStatusResponse {
+                dp_id,
+                auth_policy: Some(auth_policy),
+                config: Some(config),
+            })),
+        )
+    } else {
+        // ========== 状態更新 ==========
+
         let mut dataplanes = state.http_ipc.dataplanes.write().await;
-        let dp = HttpDataPlane::new(dp_id.clone(), req.pid, req.listen_addr);
-        dataplanes.insert(dp_id.clone(), dp);
+        if let Some(dp) = dataplanes.get_mut(&dp_id) {
+            // 全状態を更新（冪等）
+            dp.server_id = Some(server_id);
+            dp.pid = req.pid;
+            dp.state = req.state;
+            dp.active_connections = req.active_connections;
+            dp.bytes_sent = req.bytes_sent;
+            dp.bytes_received = req.bytes_received;
+            dp.listen_addr = req.listen_addr.clone();
+            dp.last_active = now;
+
+            // server_id を使用中として登録（CP 再起動後の復旧用）
+            {
+                let mut active_ids = state.http_ipc.active_server_ids.write().await;
+                active_ids.insert(server_id);
+            }
+
+            // コマンド応答がある場合はログ出力
+            if let (Some(cmd_id), Some(ack_status)) = (&req.ack_cmd_id, &req.ack_status) {
+                debug!(
+                    "Command acknowledged: dp_id={}, cmd_id={}, status={}",
+                    dp_id, cmd_id, ack_status
+                );
+            }
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!(SendStatusResponse {
+                    dp_id,
+                    auth_policy: None,
+                    config: None,
+                })),
+            )
+        } else {
+            // DP が見つからない（通常は発生しない）
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!(ErrorResponse {
+                    error: "NOT_FOUND".to_string(),
+                    message: format!("Data plane not found: {}", dp_id),
+                })),
+            )
+        }
     }
-
-    info!("Data plane registered: {}", dp_id);
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!(RegisterDataPlaneResponse {
-            dp_id,
-            auth_policy,
-            config,
-        })),
-    )
 }
 
-/// POST /api/v1/PollCommands
+/// POST /api/v1/dp/ReceiveCommand
 ///
-/// 長ポーリングでコマンドを取得
-async fn poll_commands(
+/// コマンド受信（長ポーリング）
+async fn receive_command(
     State(state): State<PrivateApiState>,
-    Json(req): Json<PollCommandsRequest>,
+    Json(req): Json<ReceiveCommandRequest>,
 ) -> impl IntoResponse {
     debug!(
-        "PollCommands: dp_id={}, wait_timeout={}s",
+        "ReceiveCommand: dp_id={}, wait_timeout={}s",
         req.dp_id, req.wait_timeout_secs
     );
 
@@ -388,7 +519,7 @@ async fn poll_commands(
                 );
                 return (
                     StatusCode::OK,
-                    Json(serde_json::json!(PollCommandsResponse { commands })),
+                    Json(serde_json::json!(ReceiveCommandResponse { commands })),
                 );
             }
         } else {
@@ -423,137 +554,7 @@ async fn poll_commands(
         );
         (
             StatusCode::OK,
-            Json(serde_json::json!(PollCommandsResponse { commands })),
-        )
-    } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!(ErrorResponse {
-                error: "NOT_FOUND".to_string(),
-                message: format!("Data plane not found: {}", req.dp_id),
-            })),
-        )
-    }
-}
-
-/// POST /api/v1/AckCommand
-///
-/// コマンドの実行結果を受信
-async fn ack_command(
-    State(state): State<PrivateApiState>,
-    Json(req): Json<AckCommandRequest>,
-) -> impl IntoResponse {
-    debug!(
-        "AckCommand: dp_id={}, cmd_id={}, status={}",
-        req.dp_id, req.cmd_id, req.status
-    );
-
-    let mut dataplanes = state.http_ipc.dataplanes.write().await;
-    if let Some(dp) = dataplanes.get_mut(&req.dp_id) {
-        // ステータスを更新
-        if let Some(result) = req.result {
-            dp.state = result.state;
-            dp.active_connections = result.active_connections;
-            dp.bytes_sent = result.bytes_sent;
-            dp.bytes_received = result.bytes_received;
-        }
-
-        (
-            StatusCode::OK,
-            Json(serde_json::json!(AckCommandResponse { acknowledged: true })),
-        )
-    } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!(ErrorResponse {
-                error: "NOT_FOUND".to_string(),
-                message: format!("Data plane not found: {}", req.dp_id),
-            })),
-        )
-    }
-}
-
-/// POST /api/v1/ReportEvent
-///
-/// イベントを受信
-async fn report_event(
-    State(state): State<PrivateApiState>,
-    Json(req): Json<ReportEventRequest>,
-) -> impl IntoResponse {
-    debug!("ReportEvent: dp_id={}, event={:?}", req.dp_id, req.event);
-
-    let mut dataplanes = state.http_ipc.dataplanes.write().await;
-    if let Some(dp) = dataplanes.get_mut(&req.dp_id) {
-        // イベントに応じて状態を更新
-        match &req.event {
-            DataPlaneEvent::Ready {
-                pid,
-                listen_addr,
-                server_id,
-            } => {
-                dp.pid = *pid;
-                dp.listen_addr = listen_addr.clone();
-                dp.state = DataPlaneState::Active;
-                dp.server_id = Some(*server_id);
-
-                // server_id を使用中として登録
-                {
-                    let mut active_ids = state.http_ipc.active_server_ids.write().await;
-                    active_ids.insert(*server_id);
-                }
-
-                info!(
-                    "Data plane {} is ready (pid={}, addr={}, server_id={:#06x})",
-                    req.dp_id, pid, listen_addr, server_id
-                );
-            }
-            DataPlaneEvent::Status(status) => {
-                dp.state = status.state;
-                dp.active_connections = status.active_connections;
-                dp.bytes_sent = status.bytes_sent;
-                dp.bytes_received = status.bytes_received;
-            }
-            DataPlaneEvent::ConnectionOpened {
-                connection_id,
-                remote_addr,
-                protocol,
-            } => {
-                dp.active_connections += 1;
-                dp.connections.push(ConnectionInfo {
-                    connection_id: *connection_id,
-                    remote_addr: remote_addr.clone(),
-                    protocol: protocol.clone(),
-                });
-            }
-            DataPlaneEvent::ConnectionClosed {
-                connection_id,
-                bytes_sent,
-                bytes_received,
-            } => {
-                if dp.active_connections > 0 {
-                    dp.active_connections -= 1;
-                }
-                dp.bytes_sent += bytes_sent;
-                dp.bytes_received += bytes_received;
-                dp.connections.retain(|c| c.connection_id != *connection_id);
-            }
-            DataPlaneEvent::Drained => {
-                dp.state = DataPlaneState::Draining;
-                info!("Data plane {} has drained", req.dp_id);
-            }
-            DataPlaneEvent::Connections { connections } => {
-                dp.connections = connections.clone();
-            }
-            DataPlaneEvent::Error { code, message } => {
-                warn!("Data plane {} error: {} - {}", req.dp_id, code, message);
-            }
-        }
-
-        (
-            StatusCode::OK,
-            Json(serde_json::json!(ReportEventResponse {
-                acknowledged: true
-            })),
+            Json(serde_json::json!(ReceiveCommandResponse { commands })),
         )
     } else {
         (
@@ -694,26 +695,6 @@ async fn get_connections(
     }
 }
 
-/// POST /api/v1/CheckServerId
-///
-/// server_id が既に使用中かどうかを確認
-async fn check_server_id(
-    State(state): State<PrivateApiState>,
-    Json(req): Json<CheckServerIdRequest>,
-) -> impl IntoResponse {
-    let active_ids = state.http_ipc.active_server_ids.read().await;
-    let available = !active_ids.contains(&req.server_id);
-
-    debug!(
-        "CheckServerId: server_id={:#06x}, available={}",
-        req.server_id, available
-    );
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!(CheckServerIdResponse { available })),
-    )
-}
 
 // =============================================================================
 // サーバー起動
@@ -766,16 +747,21 @@ pub async fn run_private_with_http_ipc(
         .route("/healthcheck", get(healthcheck))
         .route("/metrics", get(metrics))
         // HTTP IPC API (v1)
-        .route("/api/v1/RegisterDataPlane", post(register_data_plane))
-        .route("/api/v1/PollCommands", post(poll_commands))
-        .route("/api/v1/AckCommand", post(ack_command))
-        .route("/api/v1/ReportEvent", post(report_event))
-        .route("/api/v1/ListDataPlanes", post(list_data_planes))
-        .route("/api/v1/GetDataPlaneStatus", post(get_data_plane_status))
-        .route("/api/v1/DrainDataPlane", post(drain_data_plane))
-        .route("/api/v1/ShutdownDataPlane", post(shutdown_data_plane))
-        .route("/api/v1/GetConnections", post(get_connections))
-        .route("/api/v1/CheckServerId", post(check_server_id))
+        // DP 用 API
+        .route("/api/v1/dp/SendStatus", post(send_status))
+        .route("/api/v1/dp/ReceiveCommand", post(receive_command))
+        // 管理用 API
+        .route("/api/v1/admin/ListDataPlanes", post(list_data_planes))
+        .route(
+            "/api/v1/admin/GetDataPlaneStatus",
+            post(get_data_plane_status),
+        )
+        .route("/api/v1/admin/DrainDataPlane", post(drain_data_plane))
+        .route(
+            "/api/v1/admin/ShutdownDataPlane",
+            post(shutdown_data_plane),
+        )
+        .route("/api/v1/admin/GetConnections", post(get_connections))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(listen).await?;

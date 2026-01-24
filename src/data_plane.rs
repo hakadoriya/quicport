@@ -28,10 +28,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn, Instrument};
 
 use crate::ipc::{
-    AckCommandRequest, AuthPolicy, CheckServerIdRequest, CheckServerIdResponse, CommandWithId,
-    ControlCommand, DataPlaneConfig, DataPlaneEvent, DataPlaneState, DataPlaneStatus,
-    PollCommandsRequest, PollCommandsResponse, RegisterDataPlaneRequest,
-    RegisterDataPlaneResponse, ReportEventRequest,
+    AuthPolicy, CommandWithId, ControlCommand, DataPlaneConfig, DataPlaneState, DataPlaneStatus,
+    ReceiveCommandRequest, ReceiveCommandResponse, SendStatusRequest, SendStatusResponse,
 };
 use crate::protocol::{
     CloseReason, ControlMessage, ControlStream, Protocol, ProtocolError, ResponseStatus,
@@ -251,19 +249,41 @@ impl HttpIpcClient {
         }
     }
 
-    /// Control Plane に登録して認証ポリシーを取得
-    pub async fn register(
+    /// 状態を送信（登録・更新・コマンド応答すべて統合）
+    ///
+    /// - 初回呼び出し: DP 登録（auth_policy と config が返る）
+    /// - 以降の呼び出し: 状態更新 + コマンド応答（auth_policy と config は None）
+    ///
+    /// server_id の重複チェックも同時に行う
+    /// 重複時は 409 Conflict エラーが返る
+    pub async fn send_status(
         &mut self,
+        server_id: u32,
         pid: u32,
         listen_addr: &str,
-    ) -> anyhow::Result<(AuthPolicy, DataPlaneConfig)> {
-        let url = format!("{}/api/v1/RegisterDataPlane", self.base_url);
-        let request = RegisterDataPlaneRequest {
+        status: &DataPlaneStatus,
+        ack_cmd_id: Option<&str>,
+        ack_status: Option<&str>,
+    ) -> anyhow::Result<SendStatusResponse> {
+        let url = format!("{}/api/v1/dp/SendStatus", self.base_url);
+        // server_id を 16 進数文字列にフォーマット（eBPF デバッグとの一貫性のため）
+        let request = SendStatusRequest {
+            server_id: format!("{:#06x}", server_id),
             pid,
             listen_addr: listen_addr.to_string(),
+            state: status.state,
+            active_connections: status.active_connections,
+            bytes_sent: status.bytes_sent,
+            bytes_received: status.bytes_received,
+            started_at: status.started_at,
+            ack_cmd_id: ack_cmd_id.map(|s| s.to_string()),
+            ack_status: ack_status.map(|s| s.to_string()),
         };
 
-        debug!("RegisterDataPlane: url={}, pid={}", url, pid);
+        debug!(
+            "SendStatus: url={}, server_id={:#06x}, state={:?}",
+            url, server_id, status.state
+        );
 
         let response = self
             .client
@@ -271,31 +291,44 @@ impl HttpIpcClient {
             .json(&request)
             .send()
             .await
-            .context("Failed to send RegisterDataPlane request")?;
+            .context("Failed to send SendStatus request")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
+        let status_code = response.status();
+        if !status_code.is_success() {
             let text = response.text().await.unwrap_or_default();
+            // 409 Conflict は server_id 重複を示す
+            if status_code == reqwest::StatusCode::CONFLICT {
+                return Err(anyhow::anyhow!(
+                    "SERVER_ID_DUPLICATE: server_id={:#06x} is already in use",
+                    server_id
+                ));
+            }
             return Err(anyhow::anyhow!(
-                "RegisterDataPlane failed: status={}, body={}",
-                status,
+                "SendStatus failed: status={}, body={}",
+                status_code,
                 text
             ));
         }
 
-        let resp: RegisterDataPlaneResponse = response
+        let resp: SendStatusResponse = response
             .json()
             .await
-            .context("Failed to parse RegisterDataPlane response")?;
+            .context("Failed to parse SendStatus response")?;
 
-        self.dp_id = Some(resp.dp_id.clone());
-        info!("Registered with Control Plane as {}", resp.dp_id);
+        // dp_id を保存（初回登録時）
+        if self.dp_id.is_none() {
+            self.dp_id = Some(resp.dp_id.clone());
+            info!(
+                "Registered with Control Plane as {} (server_id={:#06x})",
+                resp.dp_id, server_id
+            );
+        }
 
-        Ok((resp.auth_policy, resp.config))
+        Ok(resp)
     }
 
-    /// コマンドをポーリング（長ポーリング）
-    pub async fn poll_commands(
+    /// コマンドを受信（長ポーリング）
+    pub async fn receive_command(
         &self,
         wait_timeout_secs: u64,
     ) -> anyhow::Result<Vec<CommandWithId>> {
@@ -304,8 +337,8 @@ impl HttpIpcClient {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Not registered with Control Plane"))?;
 
-        let url = format!("{}/api/v1/PollCommands", self.base_url);
-        let request = PollCommandsRequest {
+        let url = format!("{}/api/v1/dp/ReceiveCommand", self.base_url);
+        let request = ReceiveCommandRequest {
             dp_id: dp_id.clone(),
             wait_timeout_secs,
         };
@@ -316,133 +349,34 @@ impl HttpIpcClient {
             .json(&request)
             .send()
             .await
-            .context("Failed to send PollCommands request")?;
+            .context("Failed to send ReceiveCommand request")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
+        let status_code = response.status();
+        if !status_code.is_success() {
             let text = response.text().await.unwrap_or_default();
             return Err(anyhow::anyhow!(
-                "PollCommands failed: status={}, body={}",
-                status,
+                "ReceiveCommand failed: status={}, body={}",
+                status_code,
                 text
             ));
         }
 
-        let resp: PollCommandsResponse = response
+        let resp: ReceiveCommandResponse = response
             .json()
             .await
-            .context("Failed to parse PollCommands response")?;
+            .context("Failed to parse ReceiveCommand response")?;
 
         Ok(resp.commands)
     }
 
-    /// コマンドの実行結果を報告
-    pub async fn ack_command(
-        &self,
-        cmd_id: &str,
-        status_str: &str,
-        result: Option<DataPlaneStatus>,
-    ) -> anyhow::Result<()> {
-        let dp_id = self
-            .dp_id
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not registered with Control Plane"))?;
-
-        let url = format!("{}/api/v1/AckCommand", self.base_url);
-        let request = AckCommandRequest {
-            dp_id: dp_id.clone(),
-            cmd_id: cmd_id.to_string(),
-            status: status_str.to_string(),
-            result,
-        };
-
-        let response = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to send AckCommand request")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "AckCommand failed: status={}, body={}",
-                status,
-                text
-            ));
-        }
-
-        Ok(())
+    /// dp_id が登録済みかどうか
+    pub fn is_registered(&self) -> bool {
+        self.dp_id.is_some()
     }
 
-    /// イベントを報告
-    pub async fn report_event(&self, event: DataPlaneEvent) -> anyhow::Result<()> {
-        let dp_id = self
-            .dp_id
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not registered with Control Plane"))?;
-
-        let url = format!("{}/api/v1/ReportEvent", self.base_url);
-        let request = ReportEventRequest {
-            dp_id: dp_id.clone(),
-            event,
-        };
-
-        let response = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to send ReportEvent request")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "ReportEvent failed: status={}, body={}",
-                status,
-                text
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// server_id が使用可能かどうかを確認
-    ///
-    /// Control Plane に問い合わせて、指定した server_id が既に使用中かどうかを確認する。
-    /// CP に接続できない場合はエラーを返す。
-    pub async fn check_server_id(&self, server_id: u32) -> anyhow::Result<bool> {
-        let url = format!("{}/api/v1/CheckServerId", self.base_url);
-        let request = CheckServerIdRequest { server_id };
-
-        let response = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to send CheckServerId request")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "CheckServerId failed: status={}, body={}",
-                status,
-                text
-            ));
-        }
-
-        let resp: CheckServerIdResponse = response
-            .json()
-            .await
-            .context("Failed to parse CheckServerId response")?;
-
-        Ok(resp.available)
+    /// dp_id をリセット（再登録用）
+    pub fn reset_registration(&mut self) {
+        self.dp_id = None;
     }
 }
 
@@ -525,40 +459,8 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     // HTTP IPC クライアントを作成
     let mut http_client = HttpIpcClient::new(cp_url);
 
-    // コントロールプレーンに登録（リトライ付き）
-    let (auth_policy, dp_config) = {
-        let mut retries = 0;
-        let max_retries = 30;
-        loop {
-            match http_client
-                .register(pid, &config.listen_addr.to_string())
-                .await
-            {
-                Ok(result) => break result,
-                Err(e) => {
-                    retries += 1;
-                    if retries > max_retries {
-                        return Err(anyhow::anyhow!(
-                            "Failed to register with control plane after {} attempts: {}",
-                            max_retries,
-                            e
-                        ));
-                    }
-                    debug!(
-                        "Retrying registration to control plane ({}/{}): {}",
-                        retries, max_retries, e
-                    );
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
-        }
-    };
-
-    info!("Registered with control plane, received auth policy");
-
     // server_id を 1 から MAX_SOCKETS-1 (65535) の範囲でランダム生成
-    // Control Plane に問い合わせて重複がないことを確認し、重複していたら再生成
-    // CP に接続できない場合は警告を出してランダム値をそのまま使用
+    // RegisterDataPlane で重複チェックも行い、重複時は 409 → 別の server_id で再試行
     //
     // 【制約】
     // - REUSEPORT_SOCKARRAY マップはキーが 0 から max_entries-1 の範囲でなければならない
@@ -566,48 +468,95 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     // - よって server_id は 1 から 65535 の範囲で生成（0 は無効値として避ける）
     const MAX_SOCKETS: u32 = 65536;
     const MAX_SERVER_ID_RETRY: u32 = 10;
+    const MAX_CP_CONNECT_RETRY: u32 = 30;
 
-    let server_id = {
-        let mut candidate = (rand::random::<u32>() % (MAX_SOCKETS - 1)) + 1;
-        let mut retries = 0;
+    let mut server_id = (rand::random::<u32>() % (MAX_SOCKETS - 1)) + 1;
+    let mut server_id_retries = 0;
+    let mut cp_connect_retries = 0;
 
-        loop {
-            match http_client.check_server_id(candidate).await {
-                Ok(true) => {
-                    // 利用可能
-                    debug!("server_id={:#06x} is available", candidate);
-                    break candidate;
-                }
-                Ok(false) => {
-                    // 重複している
-                    warn!(
-                        "server_id={:#06x} is already in use, generating new one (attempt {}/{})",
-                        candidate,
-                        retries + 1,
-                        MAX_SERVER_ID_RETRY
-                    );
-                    retries += 1;
-                    if retries >= MAX_SERVER_ID_RETRY {
-                        warn!(
-                            "Failed to find available server_id after {} attempts, using last candidate {:#06x}",
-                            MAX_SERVER_ID_RETRY, candidate
+    // コントロールプレーンに登録（server_id 重複時はリトライ）
+    // SendStatus で初回登録を行い、auth_policy と config を取得
+    let (auth_policy, dp_config) = loop {
+        // 初期状態を作成
+        let initial_status = DataPlaneStatus {
+            state: DataPlaneState::Starting,
+            pid,
+            active_connections: 0,
+            bytes_sent: 0,
+            bytes_received: 0,
+            started_at: data_plane.started_at,
+        };
+
+        match http_client
+            .send_status(
+                server_id,
+                pid,
+                &config.listen_addr.to_string(),
+                &initial_status,
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(resp) => {
+                // 初回登録時は auth_policy と config が返る
+                match (resp.auth_policy, resp.config) {
+                    (Some(auth_policy), Some(dp_config)) => {
+                        info!(
+                            "Registered with control plane (server_id={:#06x})",
+                            server_id
                         );
-                        break candidate;
+                        break (auth_policy, dp_config);
                     }
-                    candidate = (rand::random::<u32>() % (MAX_SOCKETS - 1)) + 1;
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "SendStatus response missing auth_policy or config on initial registration"
+                        ));
+                    }
                 }
-                Err(e) => {
-                    // CP に接続できない場合は警告を出して続行
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+
+                // server_id 重複エラー (409 Conflict)
+                if err_str.contains("SERVER_ID_DUPLICATE") {
+                    server_id_retries += 1;
+                    if server_id_retries >= MAX_SERVER_ID_RETRY {
+                        return Err(anyhow::anyhow!(
+                            "Failed to find available server_id after {} attempts",
+                            MAX_SERVER_ID_RETRY
+                        ));
+                    }
+                    // 別の server_id を生成してリトライ
+                    let old_id = server_id;
+                    server_id = (rand::random::<u32>() % (MAX_SOCKETS - 1)) + 1;
                     warn!(
-                        "Failed to check server_id with Control Plane: {}. \
-                         Using unchecked server_id={:#06x}",
-                        e, candidate
+                        "server_id={:#06x} is already in use, retrying with {:#06x} (attempt {}/{})",
+                        old_id, server_id, server_id_retries, MAX_SERVER_ID_RETRY
                     );
-                    break candidate;
+                    // dp_id をリセットして再試行
+                    http_client.reset_registration();
+                    continue;
                 }
+
+                // CP 接続エラー
+                cp_connect_retries += 1;
+                if cp_connect_retries > MAX_CP_CONNECT_RETRY {
+                    return Err(anyhow::anyhow!(
+                        "Failed to register with control plane after {} attempts: {}",
+                        MAX_CP_CONNECT_RETRY,
+                        e
+                    ));
+                }
+                debug!(
+                    "Retrying registration to control plane ({}/{}): {}",
+                    cp_connect_retries, MAX_CP_CONNECT_RETRY, e
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
     };
+
     info!(
         "Generated random server_id={:#06x} for eBPF routing",
         server_id
@@ -616,16 +565,6 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     // 認証ポリシーと設定を適用
     data_plane.set_auth_policy(auth_policy).await;
     data_plane.set_config(dp_config).await;
-
-    // Ready イベントを送信（server_id を含めて CP に登録）
-    let event = DataPlaneEvent::Ready {
-        pid,
-        listen_addr: config.listen_addr.to_string(),
-        server_id,
-    };
-    if let Err(e) = http_client.report_event(event).await {
-        warn!("Failed to report Ready event: {}", e);
-    }
 
     // QUIC エンドポイントを作成
     // server_id が設定されている場合は eBPF ルーティング対応の CID Generator を使用
@@ -720,56 +659,149 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     let _drain_rx = data_plane.subscribe_drain();
     let drain_timeout = data_plane.get_config().await.drain_timeout;
 
-    // HTTP IPC でコマンドをポーリングするタスク
-    let dp_for_poll = data_plane.clone();
+    // HTTP IPC タスク
+    // - 状態送信タスク: 5 秒間隔で SendStatus を呼び出し、状態を同期
+    // - コマンド受信タスク: ReceiveCommand で長ポーリング
+    let dp_for_ipc = data_plane.clone();
     let http_client = std::sync::Arc::new(tokio::sync::Mutex::new(http_client));
-    let http_client_for_poll = http_client.clone();
-    let config_for_poll = config.clone();
+    let http_client_for_status = http_client.clone();
+    let http_client_for_cmd = http_client.clone();
+    let config_for_status = config.clone();
+    let server_id_for_ipc = server_id;
+
+    // 状態送信タスク（5 秒間隔で全状態を送信 + コマンド応答）
+    let dp_for_status = dp_for_ipc.clone();
+    let config_for_status_task = config_for_status.clone();
+    let pending_acks: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let pending_acks_for_status = pending_acks.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+
+            // 現在の状態を取得
+            let status = match dp_for_status.get_status().await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("Failed to get status: {}", e);
+                    continue;
+                }
+            };
+
+            // 保留中のコマンド応答を取得
+            let ack = {
+                let mut acks = pending_acks_for_status.lock().await;
+                acks.pop()
+            };
+
+            let (ack_cmd_id, ack_status_str) = match &ack {
+                Some((cmd_id, status_str)) => (Some(cmd_id.as_str()), Some(status_str.as_str())),
+                None => (None, None),
+            };
+
+            let mut client = http_client_for_status.lock().await;
+            match client
+                .send_status(
+                    server_id_for_ipc,
+                    dp_for_status.pid,
+                    &config_for_status_task.listen_addr.to_string(),
+                    &status,
+                    ack_cmd_id,
+                    ack_status_str,
+                )
+                .await
+            {
+                Ok(resp) => {
+                    // auth_policy や config が更新された場合は適用
+                    if let Some(auth_policy) = resp.auth_policy {
+                        dp_for_status.set_auth_policy(auth_policy).await;
+                        info!("Authentication policy updated via SendStatus");
+                    }
+                    if let Some(dp_config) = resp.config {
+                        dp_for_status.set_config(dp_config).await;
+                        info!("Configuration updated via SendStatus");
+                    }
+                }
+                Err(e) => {
+                    let err_str = e.to_string();
+
+                    // NOT_FOUND (404) の場合は再登録を試みる
+                    if err_str.contains("NOT_FOUND") || err_str.contains("status=404") {
+                        let current_state = dp_for_status.get_state().await;
+                        warn!(
+                            "Registration lost (state={:?}), attempting re-registration...",
+                            current_state
+                        );
+                        client.reset_registration();
+                        match client
+                            .send_status(
+                                server_id_for_ipc,
+                                dp_for_status.pid,
+                                &config_for_status_task.listen_addr.to_string(),
+                                &status,
+                                None,
+                                None,
+                            )
+                            .await
+                        {
+                            Ok(resp) => {
+                                info!(
+                                    "Re-registered with control plane (maintaining state={:?})",
+                                    current_state
+                                );
+                                if let Some(auth_policy) = resp.auth_policy {
+                                    dp_for_status.set_auth_policy(auth_policy).await;
+                                }
+                                if let Some(dp_config) = resp.config {
+                                    dp_for_status.set_config(dp_config).await;
+                                }
+                            }
+                            Err(re) => {
+                                warn!("Re-registration failed: {}", re);
+                            }
+                        }
+                    } else if err_str.contains("connect") || err_str.contains("Connection refused") {
+                        debug!("Connection error sending status: {}", e);
+                    } else {
+                        debug!("SendStatus error: {}", e);
+                    }
+                }
+            }
+        }
+    }.instrument(tracing::Span::current()));
+
+    // コマンド受信タスク（長ポーリング）
+    let dp_for_cmd = dp_for_ipc.clone();
+    let pending_acks_for_cmd = pending_acks.clone();
     tokio::spawn(async move {
         loop {
+            // 登録されるまで待機
+            {
+                let client = http_client_for_cmd.lock().await;
+                if !client.is_registered() {
+                    drop(client);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            }
+
             let commands = {
-                let mut client = http_client_for_poll.lock().await;
-                match client.poll_commands(30).await {
+                let client = http_client_for_cmd.lock().await;
+                match client.receive_command(30).await {
                     Ok(cmds) => cmds,
                     Err(e) => {
                         let err_str = e.to_string();
 
-                        // NOT_FOUND (404) の場合は再登録を試みる
-                        // control-plane が再起動した場合、古い dp_id は認識されず 404 が返る
+                        // NOT_FOUND (404) の場合は待機（状態送信タスクが再登録する）
                         if err_str.contains("NOT_FOUND") || err_str.contains("status=404") {
-                            // 再登録前に現在の状態を保存（DRAINING 状態を維持するため）
-                            let current_state = dp_for_poll.get_state().await;
-                            warn!("Registration lost (state={:?}), attempting re-registration...", current_state);
-                            match client.register(dp_for_poll.pid, &config_for_poll.listen_addr.to_string()).await {
-                                Ok((auth_policy, dp_config)) => {
-                                    info!("Re-registered with control plane (maintaining state={:?})", current_state);
-                                    dp_for_poll.set_auth_policy(auth_policy).await;
-                                    dp_for_poll.set_config(dp_config).await;
-                                    // 元の状態を維持（DRAINING 中の data-plane が ACTIVE に戻らないようにする）
-                                    // Ready イベントではなく現在の状態を報告
-                                    if let Ok(status) = dp_for_poll.get_status().await {
-                                        let event = DataPlaneEvent::Status(status);
-                                        if let Err(e) = client.report_event(event).await {
-                                            warn!("Failed to report status after re-registration: {}", e);
-                                        }
-                                    }
-                                    continue; // 再度 poll を試行
-                                }
-                                Err(re) => {
-                                    warn!("Re-registration failed: {}, retrying in 5s", re);
-                                    tokio::time::sleep(Duration::from_secs(5)).await;
-                                    continue;
-                                }
-                            }
-                        }
-
-                        // 接続エラーの場合はバックオフ付きでリトライ
-                        if err_str.contains("connect") || err_str.contains("Connection refused") {
-                            warn!("Connection error polling commands: {}, retrying in 1s", e);
+                            debug!("DP not found, waiting for re-registration...");
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        } else if err_str.contains("connect") || err_str.contains("Connection refused") {
+                            debug!("Connection error receiving commands: {}", e);
                             tokio::time::sleep(Duration::from_secs(1)).await;
                         } else {
-                            debug!("PollCommands error: {}, retrying in 5s", e);
-                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            debug!("ReceiveCommand error: {}, retrying in 1s", e);
+                            tokio::time::sleep(Duration::from_secs(1)).await;
                         }
                         continue;
                     }
@@ -778,22 +810,17 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
 
             for cmd in commands {
                 debug!("Received command: id={}, {:?}", cmd.id, cmd.command);
-                let response = process_ipc_command(&dp_for_poll, cmd.command.clone()).await;
+                process_ipc_command(&dp_for_cmd, cmd.command.clone()).await;
 
-                // コマンドの実行結果を報告
-                let result = match &response {
-                    DataPlaneEvent::Status(status) => Some(status.clone()),
-                    _ => None,
-                };
-
-                let client = http_client_for_poll.lock().await;
-                if let Err(e) = client.ack_command(&cmd.id, "completed", result).await {
-                    warn!("Failed to ack command {}: {}", cmd.id, e);
+                // コマンド応答を保留リストに追加（次回の SendStatus で送信）
+                {
+                    let mut acks = pending_acks_for_cmd.lock().await;
+                    acks.push((cmd.id.clone(), "completed".to_string()));
                 }
 
                 // Shutdown コマンドの場合はループを抜ける
                 if matches!(cmd.command, ControlCommand::Shutdown) {
-                    info!("Shutdown command received, exiting poll loop");
+                    info!("Shutdown command received, exiting command receive loop");
                     return;
                 }
             }
@@ -887,84 +914,42 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
 }
 
 /// IPC コマンドを処理
-async fn process_ipc_command(data_plane: &DataPlane, cmd: ControlCommand) -> DataPlaneEvent {
+///
+/// コマンドを実行し、必要な副作用（状態変更など）を適用する。
+/// 結果は次回の SendStatus で送信されるため、戻り値は不要。
+async fn process_ipc_command(data_plane: &DataPlane, cmd: ControlCommand) {
     match cmd {
         ControlCommand::SetAuthPolicy(policy) => {
             data_plane.set_auth_policy(policy).await;
             info!("Authentication policy updated");
-            DataPlaneEvent::Status(data_plane.get_status().await.unwrap_or_else(|_| {
-                DataPlaneStatus {
-                    state: DataPlaneState::Active,
-                    pid: data_plane.pid,
-                    active_connections: 0,
-                    bytes_sent: 0,
-                    bytes_received: 0,
-                    started_at: data_plane.started_at,
-                }
-            }))
         }
 
         ControlCommand::SetConfig(config) => {
             data_plane.set_config(config).await;
             info!("Configuration updated");
-            DataPlaneEvent::Status(data_plane.get_status().await.unwrap_or_else(|_| {
-                DataPlaneStatus {
-                    state: DataPlaneState::Active,
-                    pid: data_plane.pid,
-                    active_connections: 0,
-                    bytes_sent: 0,
-                    bytes_received: 0,
-                    started_at: data_plane.started_at,
-                }
-            }))
         }
 
         ControlCommand::Drain => {
             data_plane.drain().await;
             info!("Data plane entering DRAINING state");
-            DataPlaneEvent::Status(data_plane.get_status().await.unwrap_or_else(|_| {
-                DataPlaneStatus {
-                    state: DataPlaneState::Draining,
-                    pid: data_plane.pid,
-                    active_connections: 0,
-                    bytes_sent: 0,
-                    bytes_received: 0,
-                    started_at: data_plane.started_at,
-                }
-            }))
         }
 
         ControlCommand::Shutdown => {
             info!("Data plane shutting down");
             data_plane.shutdown();
-            DataPlaneEvent::Status(data_plane.get_status().await.unwrap_or_else(|_| {
-                DataPlaneStatus {
-                    state: DataPlaneState::Terminated,
-                    pid: data_plane.pid,
-                    active_connections: 0,
-                    bytes_sent: 0,
-                    bytes_received: 0,
-                    started_at: data_plane.started_at,
-                }
-            }))
         }
 
         ControlCommand::GetStatus => {
-            DataPlaneEvent::Status(data_plane.get_status().await.unwrap_or_else(|_| {
-                DataPlaneStatus {
-                    state: DataPlaneState::Active,
-                    pid: data_plane.pid,
-                    active_connections: 0,
-                    bytes_sent: 0,
-                    bytes_received: 0,
-                    started_at: data_plane.started_at,
-                }
-            }))
+            // 状態は次回の SendStatus で自動的に送信される
+            debug!("GetStatus command received (status will be sent via SendStatus)");
         }
 
-        ControlCommand::GetConnections => DataPlaneEvent::Connections {
-            connections: data_plane.get_connections().await,
-        },
+        ControlCommand::GetConnections => {
+            // GetConnections の結果は現状では SendStatus で送信されないため、
+            // 将来的に対応が必要な場合は SendStatusRequest に connections フィールドを追加する
+            let connections = data_plane.get_connections().await;
+            debug!("GetConnections command received: {} connections", connections.len());
+        }
     }
 }
 
