@@ -521,19 +521,19 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
 
     info!("Registered with control plane, received auth policy");
 
-    // server_id をランダム生成（Control Plane からの割り当ては使用しない）
-    // graceful restart 時に既存の Data Plane と server_id が衝突しないように、
-    // 各 Data Plane が独自にランダムな server_id を生成する。
-    // 0 は無効値として避け、1〜u32::MAX の範囲で生成。
-    // 衝突確率: u32 の範囲（約42億通り）で同時稼働 DP 数が 2-3 個なら、
-    // 衝突確率は約 2.3 × 10^-10 と極めて低い。
-    let server_id: u32 = loop {
-        let id = rand::random::<u32>();
-        if id != 0 {
-            break id;
-        }
-    };
-    info!("Generated random server_id={:#010x} for eBPF routing", server_id);
+    // server_id を 1 から MAX_SOCKETS-1 (65535) の範囲でランダム生成
+    //
+    // 【制約】
+    // - REUSEPORT_SOCKARRAY マップはキーが 0 から max_entries-1 の範囲でなければならない
+    // - platform/linux/bpf/quicport_reuseport.h で MAX_SOCKETS = 65536 と定義
+    // - よって server_id は 1 から 65535 の範囲で生成（0 は無効値として避ける）
+    //
+    // 【衝突確率】
+    // - 65535 通りの値空間で同時稼働 DP 数が 2-3 個の場合、
+    //   衝突確率は約 0.0015-0.0046% と極めて低い
+    const MAX_SOCKETS: u32 = 65536;
+    let server_id: u32 = (rand::random::<u32>() % (MAX_SOCKETS - 1)) + 1;
+    info!("Generated random server_id={:#06x} for eBPF routing", server_id);
 
     // 認証ポリシーと設定を適用
     data_plane.set_auth_policy(auth_policy).await;
@@ -560,7 +560,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     let endpoint = {
         let sid = server_id;
         info!(
-            "Creating QUIC endpoint with server_id={:#010x} for eBPF routing",
+            "Creating QUIC endpoint with server_id={:#06x} for eBPF routing",
             sid
         );
 
