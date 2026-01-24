@@ -37,7 +37,7 @@ use axum::{
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Notify, RwLock};
@@ -139,8 +139,6 @@ pub struct HttpIpcState {
     pub dataplanes: RwLock<HashMap<String, HttpDataPlane>>,
     /// コマンド ID カウンター
     command_id_counter: AtomicU64,
-    /// server_id カウンター（eBPF ルーティング用）
-    server_id_counter: AtomicU32,
     /// 新コマンド通知（長ポーリング用）
     pub command_notify: Notify,
     /// 認証ポリシー
@@ -155,7 +153,6 @@ impl HttpIpcState {
         Self {
             dataplanes: RwLock::new(HashMap::new()),
             command_id_counter: AtomicU64::new(1),
-            server_id_counter: AtomicU32::new(1),
             command_notify: Notify::new(),
             auth_policy: RwLock::new(None),
             dp_config: RwLock::new(DataPlaneConfig::default()),
@@ -166,15 +163,6 @@ impl HttpIpcState {
     pub fn next_command_id(&self) -> String {
         let id = self.command_id_counter.fetch_add(1, Ordering::SeqCst);
         format!("cmd_{}", id)
-    }
-
-    /// 次の server_id を生成（eBPF ルーティング用）
-    ///
-    /// server_id は QUIC Connection ID の先頭 4 バイトに埋め込まれ、
-    /// eBPF プログラムがパケットを正しい Data Plane プロセスに
-    /// ルーティングするために使用されます。
-    pub fn next_server_id(&self) -> u32 {
-        self.server_id_counter.fetch_add(1, Ordering::SeqCst)
     }
 
     /// データプレーンにコマンドを送信
@@ -333,15 +321,9 @@ async fn register_data_plane(
         }
     };
 
-    // 設定を取得し、server_id を割り当て
-    let mut config = state.http_ipc.dp_config.read().await.clone();
-    let server_id = state.http_ipc.next_server_id();
-    config.server_id = Some(server_id);
-
-    info!(
-        "Assigned server_id={} to data plane (pid={})",
-        server_id, req.pid
-    );
+    // 設定を取得
+    // Note: server_id は Data Plane 側でランダム生成されるため、Control Plane では割り当てない
+    let config = state.http_ipc.dp_config.read().await.clone();
 
     // Data Plane ID を生成
     let dp_id = format!("dp_{}", req.pid);
