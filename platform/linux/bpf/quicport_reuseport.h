@@ -10,13 +10,17 @@
 #define __QUICPORT_REUSEPORT_H__
 
 /*
- * Maximum number of Data Plane processes (sockets) supported
+ * Maximum number of server_id values that can be registered in socket_map
  *
- * This limits the number of concurrent server_id values that can be
- * registered for routing. During graceful restart, typically only
- * 2 processes (old and new) are active simultaneously.
+ * REUSEPORT_SOCKARRAY requires keys to be in the range [0, max_entries-1].
+ * We use 65536 (16-bit range) to provide sufficient randomization space
+ * for server_id collision avoidance during graceful restart.
+ *
+ * Memory impact: REUSEPORT_SOCKARRAY is sparse, so actual memory usage
+ * is proportional to the number of registered entries (typically 1-3),
+ * not the max_entries value.
  */
-#define MAX_SOCKETS 256
+#define MAX_SOCKETS 65536
 
 /*
  * QUIC Connection ID (CID) Configuration
