@@ -9,18 +9,22 @@
 //!
 //! ### エンドポイント
 //!
-//! | メソッド | 説明 | 呼び出し元 |
-//! |----------|------|-----------|
-//! | `POST /api/v1/RegisterDataPlane` | DP 登録、認証ポリシー取得 | DP |
-//! | `POST /api/v1/PollCommands` | コマンドポーリング（長ポーリング） | DP |
-//! | `POST /api/v1/AckCommand` | コマンド応答 | DP |
-//! | `POST /api/v1/ReportEvent` | イベント報告 | DP |
-//! | `POST /api/v1/ListDataPlanes` | 全 DP 一覧 | CLI/外部 |
-//! | `POST /api/v1/GetDataPlaneStatus` | 特定 DP の詳細 | CLI/外部 |
-//! | `POST /api/v1/DrainDataPlane` | ドレイン | CLI/外部 |
-//! | `POST /api/v1/ShutdownDataPlane` | シャットダウン | CLI/外部 |
-//! | `POST /api/v1/GetConnections` | 接続一覧 | CLI/外部 |
-//! | `POST /api/v1/CheckServerId` | server_id 重複チェック | DP |
+//! #### DP 用 API (`/api/v1/dp/*`)
+//!
+//! | メソッド | 説明 | 方向 |
+//! |----------|------|------|
+//! | `POST /api/v1/dp/SendStatus` | 状態送信（登録・更新・応答すべて統合） | DP → CP |
+//! | `POST /api/v1/dp/ReceiveCommand` | コマンド受信（長ポーリング） | CP → DP |
+//!
+//! #### 管理用 API (`/api/v1/admin/*`)
+//!
+//! | メソッド | 説明 |
+//! |----------|------|
+//! | `POST /api/v1/admin/ListDataPlanes` | 全 DP 一覧 |
+//! | `POST /api/v1/admin/GetDataPlaneStatus` | 特定 DP の詳細 |
+//! | `POST /api/v1/admin/DrainDataPlane` | ドレイン |
+//! | `POST /api/v1/admin/ShutdownDataPlane` | シャットダウン |
+//! | `POST /api/v1/admin/GetConnections` | 接続一覧 |
 
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -60,61 +64,6 @@ pub enum ControlCommand {
     GetConnections,
 }
 
-/// データプレーン → コントロールプレーン イベント/レスポンス
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum DataPlaneEvent {
-    /// 初期化完了、接続受付可能
-    Ready {
-        /// データプレーンの PID
-        pid: u32,
-        /// リッスンアドレス
-        listen_addr: String,
-        /// server_id（eBPF ルーティング用）
-        server_id: u32,
-    },
-
-    /// 状態レポート
-    Status(DataPlaneStatus),
-
-    /// 新規接続確立
-    ConnectionOpened {
-        /// 接続 ID
-        connection_id: u32,
-        /// リモートアドレス
-        remote_addr: String,
-        /// プロトコル (TCP/UDP)
-        protocol: String,
-    },
-
-    /// 接続終了
-    ConnectionClosed {
-        /// 接続 ID
-        connection_id: u32,
-        /// 送信バイト数
-        bytes_sent: u64,
-        /// 受信バイト数
-        bytes_received: u64,
-    },
-
-    /// 全接続終了、終了準備完了
-    Drained,
-
-    /// 接続一覧の応答
-    Connections {
-        /// 接続一覧
-        connections: Vec<ConnectionInfo>,
-    },
-
-    /// エラー応答
-    Error {
-        /// エラーコード
-        code: String,
-        /// エラーメッセージ
-        message: String,
-    },
-}
-
 /// 接続情報
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionInfo {
@@ -127,44 +76,74 @@ pub struct ConnectionInfo {
 }
 
 // =============================================================================
-// HTTP IPC リクエスト/レスポンス型
+// HTTP IPC リクエスト/レスポンス型（DP 用 API）
 // =============================================================================
 
-/// RegisterDataPlane リクエスト (DP → CP)
+/// SendStatus リクエスト (DP → CP)
 ///
-/// データプレーンが起動時にコントロールプレーンに登録
+/// 状態送信（登録・更新・コマンド応答すべて統合）
+/// 毎回全状態を冪等に送信することで、CP 再起動後も状態を復旧可能
+///
+/// - 初回呼び出し: DP 登録（dp_id が割り当てられる）
+/// - 以降の呼び出し: 状態更新 + コマンド応答
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegisterDataPlaneRequest {
+pub struct SendStatusRequest {
+    // ========== DP 識別情報 ==========
+    /// server_id（eBPF ルーティング用、16 進数文字列 "0x0001" 形式）
+    /// 重複時は 409 Conflict エラーが返る
+    pub server_id: String,
     /// データプレーンの PID
     pub pid: u32,
     /// QUIC リッスンアドレス
     pub listen_addr: String,
+
+    // ========== 状態情報 ==========
+    /// 現在の状態
+    pub state: DataPlaneState,
+    /// アクティブ接続数
+    pub active_connections: u32,
+    /// 総送信バイト数
+    pub bytes_sent: u64,
+    /// 総受信バイト数
+    pub bytes_received: u64,
+    /// 起動時刻（UNIX タイムスタンプ）
+    pub started_at: u64,
+
+    // ========== コマンド応答（オプション） ==========
+    /// 応答するコマンド ID（None の場合は状態更新のみ）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ack_cmd_id: Option<String>,
+    /// コマンド実行ステータス（"completed", "failed" など）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ack_status: Option<String>,
 }
 
-/// RegisterDataPlane レスポンス (CP → DP)
+/// SendStatus レスポンス (CP → DP)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegisterDataPlaneResponse {
-    /// 割り当てられた Data Plane ID
+pub struct SendStatusResponse {
+    /// Data Plane ID（server_id から生成、初回登録時に割り当て）
     pub dp_id: String,
-    /// 認証ポリシー
-    pub auth_policy: AuthPolicy,
-    /// データプレーン設定
-    pub config: DataPlaneConfig,
+    /// 認証ポリシー（初回登録時または更新時のみ Some）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_policy: Option<AuthPolicy>,
+    /// データプレーン設定（初回登録時または更新時のみ Some）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<DataPlaneConfig>,
 }
 
-/// PollCommands リクエスト (DP → CP)
+/// ReceiveCommand リクエスト (DP → CP)
 ///
-/// 長ポーリングでコマンドを取得
+/// コマンド受信（長ポーリング）
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PollCommandsRequest {
+pub struct ReceiveCommandRequest {
     /// Data Plane ID
     pub dp_id: String,
     /// 待機タイムアウト（秒）
-    #[serde(default = "default_poll_timeout")]
+    #[serde(default = "default_receive_timeout")]
     pub wait_timeout_secs: u64,
 }
 
-fn default_poll_timeout() -> u64 {
+fn default_receive_timeout() -> u64 {
     30
 }
 
@@ -178,52 +157,11 @@ pub struct CommandWithId {
     pub command: ControlCommand,
 }
 
-/// PollCommands レスポンス (CP → DP)
+/// ReceiveCommand レスポンス (CP → DP)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PollCommandsResponse {
+pub struct ReceiveCommandResponse {
     /// 保留中のコマンド
     pub commands: Vec<CommandWithId>,
-}
-
-/// AckCommand リクエスト (DP → CP)
-///
-/// コマンドの実行結果を報告
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AckCommandRequest {
-    /// Data Plane ID
-    pub dp_id: String,
-    /// コマンド ID
-    pub cmd_id: String,
-    /// 実行ステータス
-    pub status: String,
-    /// 実行結果（オプション）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<DataPlaneStatus>,
-}
-
-/// AckCommand レスポンス (CP → DP)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AckCommandResponse {
-    /// 確認済みフラグ
-    pub acknowledged: bool,
-}
-
-/// ReportEvent リクエスト (DP → CP)
-///
-/// イベントを報告
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReportEventRequest {
-    /// Data Plane ID
-    pub dp_id: String,
-    /// イベント
-    pub event: DataPlaneEvent,
-}
-
-/// ReportEvent レスポンス (CP → DP)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReportEventResponse {
-    /// 確認済みフラグ
-    pub acknowledged: bool,
 }
 
 /// ListDataPlanes リクエスト (CLI/外部 → CP)
@@ -320,22 +258,6 @@ pub struct GetConnectionsRequest {
 pub struct GetConnectionsResponse {
     /// 接続一覧
     pub connections: Vec<ConnectionInfo>,
-}
-
-/// CheckServerId リクエスト (DP → CP)
-///
-/// server_id が既に使用中かどうかを確認
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CheckServerIdRequest {
-    /// 確認したい server_id
-    pub server_id: u32,
-}
-
-/// CheckServerId レスポンス (CP → DP)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CheckServerIdResponse {
-    /// 利用可能かどうか（true = 利用可能、false = 既に使用中）
-    pub available: bool,
 }
 
 /// HTTP IPC エラーレスポンス
@@ -491,15 +413,23 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_dataplane_event() {
-        let event = DataPlaneEvent::Ready {
+    fn test_serialize_send_status_request() {
+        let req = SendStatusRequest {
+            server_id: "0x1234".to_string(),
             pid: 12345,
             listen_addr: "0.0.0.0:39000".to_string(),
-            server_id: 0x1234,
+            state: DataPlaneState::Active,
+            active_connections: 10,
+            bytes_sent: 1000,
+            bytes_received: 2000,
+            started_at: 1700000000,
+            ack_cmd_id: None,
+            ack_status: None,
         };
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains("Ready"));
-        assert!(json.contains("12345"));
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("0x1234"));
+        assert!(json.contains("12345")); // pid
+        assert!(json.contains("Active"));
     }
 
     #[test]
