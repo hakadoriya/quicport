@@ -90,6 +90,7 @@ use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use libbpf_rs::libbpf_sys;
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 use libbpf_rs::{MapCore, MapFlags, OpenObject};
 use tracing::{debug, info, warn};
@@ -198,12 +199,10 @@ impl EbpfRouter {
                 );
 
                 // bpf_obj_get() でピン留めプログラムの fd を取得
+                // libbpf_sys::bpf_obj_get() は BPF_OBJ_GET syscall のラッパー
                 let path_cstr = std::ffi::CString::new(prog_pin_path.to_string_lossy().as_bytes())
                     .context("Invalid pin path")?;
-                let fd = unsafe { libc::bpf(libc::BPF_OBJ_GET, &libc::bpf_attr {
-                    pathname: path_cstr.as_ptr() as u64,
-                    ..std::mem::zeroed()
-                } as *const _ as *const libc::c_void, std::mem::size_of::<libc::bpf_attr>() as u32) };
+                let fd = unsafe { libbpf_sys::bpf_obj_get(path_cstr.as_ptr()) };
 
                 if fd >= 0 {
                     info!("Successfully reusing pinned program (fd={})", fd);
@@ -307,7 +306,7 @@ impl EbpfRouter {
         // eBPF プログラムをカーネルにロード
         // NOTE: ピン留めプログラムを再利用する場合でも、socket_map を参照するために
         //       スケルトンをロードする必要がある
-        let skel = open_skel
+        let mut skel = open_skel
             .load()
             .context("Failed to load eBPF program into kernel")?;
 
