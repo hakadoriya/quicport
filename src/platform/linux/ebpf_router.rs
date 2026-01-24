@@ -23,6 +23,8 @@
 //!                     │  │              ▼                    │  │
 //!                     │  │  ┌─────────────────────────────┐  │  │
 //!                     │  │  │   REUSEPORT_SOCKARRAY       │  │  │
+//!                     │  │  │   (pinned at /sys/fs/bpf/   │  │  │
+//!                     │  │  │    quicport/socket_map)     │  │  │
 //!                     │  │  │                             │  │  │
 //!                     │  │  │  key=1 → Socket (Old DP)    │  │  │
 //!                     │  │  │  key=2 → Socket (New DP)    │  │  │
@@ -39,17 +41,36 @@
 //!             └─────────────┘                       └─────────────┘
 //! ```
 //!
+//! # マップピン留め（Graceful Restart 対応）
+//!
+//! `socket_map` は BPF filesystem にピン留めされ、複数の Data Plane プロセス間で
+//! 共有されます。これにより graceful restart 時に既存の QUIC 接続が維持されます。
+//!
+//! ```text
+//! /sys/fs/bpf/quicport/socket_map  ← ピン留めされたマップ
+//!      │
+//!      ├── key=1 → 旧 DP のソケット（draining 中）
+//!      └── key=2 → 新 DP のソケット（新規接続受付中）
+//! ```
+//!
+//! ## ピン留めの動作
+//!
+//! 1. 最初の DP 起動時: 新規マップを作成してピン留め
+//! 2. graceful restart 時: 既存のピン留めマップを再利用
+//! 3. DP 終了時: 自分が登録した server_id のみ削除、マップは保持
+//!
 //! # 必要な権限
 //!
 //! - `CAP_BPF`: eBPF プログラムのロード
 //! - `CAP_NET_ADMIN`: ソケットへのアタッチ
+//! - `/sys/fs/bpf` への書き込み権限（ピン留め用）
 //!
 //! # 使用方法
 //!
 //! ```ignore
-//! use quicport::platform::linux::EbpfRouter;
+//! use quicport::platform::linux::{EbpfRouter, EbpfRouterConfig};
 //!
-//! // ルーターをロード
+//! // ルーターをロード（デフォルトでピン留め有効）
 //! let mut router = EbpfRouter::load(EbpfRouterConfig::default())?;
 //!
 //! // ソケットにアタッチ
@@ -57,6 +78,9 @@
 //!
 //! // サーバーを登録
 //! router.register_server(server_id, &udp_socket)?;
+//!
+//! // router がドロップされると、登録した server_id のみ削除される
+//! // マップ自体はピン留めされているため、他プロセスが使用可能
 //! ```
 
 use std::mem::MaybeUninit;
@@ -67,7 +91,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 use libbpf_rs::{MapCore, MapFlags, OpenObject};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 // libbpf-cargo が生成するスケルトン
 // build.rs で OUT_DIR に quicport_reuseport.skel.rs として生成される
@@ -80,13 +104,27 @@ use skel::*;
 /// eBPF ルーター設定
 #[derive(Debug, Clone)]
 pub struct EbpfRouterConfig {
-    /// BPF マップのピン留めディレクトリ (将来の拡張用)
+    /// BPF マップのピン留めディレクトリ
+    ///
+    /// `Some(path)` の場合:
+    /// - `{path}/socket_map` にマップをピン留め
+    /// - 既存のピン留めマップがあれば再利用（graceful restart 対応）
+    ///
+    /// `None` の場合:
+    /// - ピン留めを行わない
+    /// - プロセス終了時にマップは自動的に削除される
+    ///
+    /// デフォルト: `Some("/sys/fs/bpf/quicport")`
     pub pin_path: Option<PathBuf>,
 }
 
 impl Default for EbpfRouterConfig {
     fn default() -> Self {
-        Self { pin_path: None }
+        Self {
+            // デフォルトでピン留めを有効化
+            // graceful restart 時に既存の socket_map を複数プロセス間で共有するために使用
+            pin_path: Some(PathBuf::from("/sys/fs/bpf/quicport")),
+        }
     }
 }
 
@@ -110,16 +148,29 @@ pub struct EbpfRouter {
     /// 設定
     #[allow(dead_code)]
     config: EbpfRouterConfig,
+    /// このプロセスが登録した server_id のリスト（Drop 時にクリーンアップ用）
+    registered_server_ids: Vec<u32>,
+    /// ピン留めマップを再利用したかどうか
+    #[allow(dead_code)]
+    reused_pinned_map: bool,
 }
 
 impl EbpfRouter {
     /// eBPF ルーターをロード
+    ///
+    /// # ピン留め動作
+    ///
+    /// `config.pin_path` が設定されている場合:
+    /// 1. `{pin_path}/socket_map` が存在するか確認
+    /// 2. 存在する場合: 既存のピン留めマップを再利用（graceful restart 対応）
+    /// 3. 存在しない場合: 新規マップを作成してピン留め
     ///
     /// # Errors
     ///
     /// - 権限不足（CAP_BPF, CAP_NET_ADMIN が必要）
     /// - eBPF プログラムのロードに失敗
     /// - カーネルバージョンが古い（Linux 4.19+ 推奨）
+    /// - ピン留めパスへのアクセスに失敗
     pub fn load(config: EbpfRouterConfig) -> Result<Self> {
         info!("Loading eBPF SK_REUSEPORT router");
 
@@ -129,9 +180,79 @@ impl EbpfRouter {
 
         // スケルトンをオープン
         let skel_builder = QuicportReuseportSkelBuilder::default();
-        let open_skel = skel_builder
+        let mut open_skel = skel_builder
             .open(&mut *open_object)
             .context("Failed to open eBPF skeleton")?;
+
+        // ピン留め処理フラグ
+        let mut reused_pinned_map = false;
+
+        // ピン留めパスが設定されている場合、マップのピン留めを設定
+        if let Some(ref pin_dir) = config.pin_path {
+            let socket_map_pin_path = pin_dir.join("socket_map");
+
+            if socket_map_pin_path.exists() {
+                // 既存のピン留めマップを再利用
+                info!(
+                    "Reusing existing pinned socket_map at {:?}",
+                    socket_map_pin_path
+                );
+
+                // reuse_pinned_map() は OpenMapMut::reuse_pinned_map() を使用
+                // ピン留めファイルが存在する場合、そのマップを再利用する
+                match open_skel.maps.socket_map.reuse_pinned_map(&socket_map_pin_path) {
+                    Ok(()) => {
+                        info!("Successfully reusing pinned socket_map");
+                        reused_pinned_map = true;
+                    }
+                    Err(e) => {
+                        // 再利用に失敗した場合（マップ属性の不一致など）
+                        // 古いピン留めファイルを削除して新規作成
+                        warn!(
+                            "Failed to reuse pinned socket_map: {}. Recreating...",
+                            e
+                        );
+                        if let Err(remove_err) = std::fs::remove_file(&socket_map_pin_path) {
+                            warn!(
+                                "Failed to remove corrupted pin file {:?}: {}",
+                                socket_map_pin_path, remove_err
+                            );
+                        }
+
+                        // ディレクトリが存在することを確認して新規ピン留め設定
+                        Self::ensure_pin_directory_exists(pin_dir)?;
+                        open_skel
+                            .maps
+                            .socket_map
+                            .set_pin_path(&socket_map_pin_path)
+                            .with_context(|| {
+                                format!(
+                                    "Failed to set pin path for socket_map: {:?}",
+                                    socket_map_pin_path
+                                )
+                            })?;
+                    }
+                }
+            } else {
+                // ピン留めファイルが存在しない場合、新規作成
+                info!("Creating new pinned socket_map at {:?}", socket_map_pin_path);
+
+                // ピン留めディレクトリを作成
+                Self::ensure_pin_directory_exists(pin_dir)?;
+
+                // set_pin_path() でロード時に自動的にピン留め
+                open_skel
+                    .maps
+                    .socket_map
+                    .set_pin_path(&socket_map_pin_path)
+                    .with_context(|| {
+                        format!(
+                            "Failed to set pin path for socket_map: {:?}",
+                            socket_map_pin_path
+                        )
+                    })?;
+            }
+        }
 
         // eBPF プログラムをカーネルにロード
         let skel = open_skel
@@ -150,7 +271,25 @@ impl EbpfRouter {
             skel,
             _open_object: open_object,
             config,
+            registered_server_ids: Vec::new(),
+            reused_pinned_map,
         })
+    }
+
+    /// ピン留めディレクトリが存在することを確認し、なければ作成
+    fn ensure_pin_directory_exists(pin_dir: &std::path::Path) -> Result<()> {
+        if !pin_dir.exists() {
+            std::fs::create_dir_all(pin_dir).with_context(|| {
+                format!(
+                    "Failed to create BPF pin directory {:?}. \
+                     Ensure /sys/fs/bpf is mounted (bpffs) and you have permission. \
+                     Try: sudo mount -t bpf none /sys/fs/bpf",
+                    pin_dir
+                )
+            })?;
+            debug!("Created BPF pin directory: {:?}", pin_dir);
+        }
+        Ok(())
     }
 
     /// eBPF プログラムをソケットにアタッチ
@@ -245,6 +384,9 @@ impl EbpfRouter {
                 format!("Failed to register server_id={} in socket_map", server_id)
             })?;
 
+        // 登録した server_id を追跡（Drop 時のクリーンアップ用）
+        self.registered_server_ids.push(server_id);
+
         info!(
             "Registered server_id={} in REUSEPORT_SOCKARRAY",
             server_id
@@ -288,8 +430,39 @@ impl EbpfRouter {
 impl Drop for EbpfRouter {
     fn drop(&mut self) {
         info!("Dropping eBPF SK_REUSEPORT router");
-        // QuicportReuseportSkel の Drop でプログラムとマップが
-        // 自動的にクリーンアップされます。
+
+        // 自分が登録した server_id のエントリのみを削除
+        // マップ自体は削除しない（他のプロセスが使用中の可能性があるため）
+        //
+        // ピン留めマップを使用している場合:
+        // - 他の Data Plane プロセスが同じマップを共有している可能性がある
+        // - 自分が登録した server_id のみ削除することで、他プロセスの接続には影響しない
+        // - マップがピン留めされているため、プロセス終了後もマップは BPF filesystem に残る
+        for server_id in &self.registered_server_ids {
+            let key = server_id.to_ne_bytes();
+            match self.skel.maps.socket_map.delete(&key) {
+                Ok(()) => {
+                    debug!("Deleted server_id={} from socket_map", server_id);
+                }
+                Err(e) => {
+                    // エントリが既に存在しない場合もエラーになる可能性があるので、
+                    // デバッグログにとどめる
+                    debug!(
+                        "Failed to delete server_id={} from socket_map: {}",
+                        server_id, e
+                    );
+                }
+            }
+        }
+
+        // 注意: QuicportReuseportSkel の Drop では:
+        // - BPF プログラムはカーネルから削除される
+        // - ピン留めされていないマップは削除される
+        // - ピン留めされているマップは BPF filesystem に残る（意図的）
+        info!(
+            "eBPF router dropped. Cleaned up {} server_id(s). Pinned map preserved for other processes.",
+            self.registered_server_ids.len()
+        );
     }
 }
 
@@ -328,6 +501,17 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = EbpfRouterConfig::default();
+        // デフォルトではピン留めが有効
+        assert!(config.pin_path.is_some());
+        assert_eq!(
+            config.pin_path.as_ref().unwrap(),
+            &PathBuf::from("/sys/fs/bpf/quicport")
+        );
+    }
+
+    #[test]
+    fn test_config_without_pinning() {
+        let config = EbpfRouterConfig { pin_path: None };
         assert!(config.pin_path.is_none());
     }
 
