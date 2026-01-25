@@ -557,6 +557,123 @@ fn create_udp_socket_with_reuseport(addr: SocketAddr) -> std::io::Result<std::ne
     Ok(socket.into())
 }
 
+/// SO_REUSEPORT 付きの未バインド UDP ソケットを作成（eBPF 統合用）
+///
+/// この関数は `bind()` を呼ばずにソケットを作成します。
+/// eBPF プログラムは `bind()` の前にアタッチする必要があるため、
+/// 以下の順序で操作を行います:
+///
+/// ```text
+/// ┌─────────────────────────────────────────────────────────────────┐
+/// │ 1. create_unbound_udp_socket()                                  │
+/// │    - socket(AF_INET, SOCK_DGRAM, UDP)                          │
+/// │    - setsockopt(SO_REUSEADDR)                                  │
+/// │    - setsockopt(SO_REUSEPORT)                                  │
+/// │    - 未バインド状態を維持                                        │
+/// ├─────────────────────────────────────────────────────────────────┤
+/// │ 2. attach_to_socket()  ← bind() の前！                          │
+/// │    - setsockopt(SO_ATTACH_REUSEPORT_EBPF)                      │
+/// │    - ソケットに BPF プログラムを関連付け                         │
+/// ├─────────────────────────────────────────────────────────────────┤
+/// │ 3. bind_udp_socket()                                            │
+/// │    - bind(sockfd, addr)                                         │
+/// │    - reuseport グループ作成/参加（BPF 付き）                     │
+/// └─────────────────────────────────────────────────────────────────┘
+/// ```
+///
+/// # Arguments
+///
+/// * `addr` - バインド先のアドレス（IPv4/IPv6 判定に使用）
+///
+/// # Returns
+///
+/// SO_REUSEPORT が設定された未バインドの UDP ソケット
+pub fn create_unbound_udp_socket(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+
+    let socket = Socket::new(domain, Type::DGRAM, Some(SockProtocol::UDP))?;
+    socket.set_reuse_address(true)?;
+
+    // SO_REUSEPORT を設定（グレースフルリスタート用）
+    #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = socket.as_raw_fd();
+        unsafe {
+            let optval: libc::c_int = 1;
+            let ret = libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_REUSEPORT,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            if ret != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+
+    // 注意: bind() は呼ばない！
+    // eBPF SO_ATTACH_REUSEPORT_EBPF は bind() の前にアタッチする必要がある
+    socket.set_nonblocking(true)?;
+
+    Ok(socket.into())
+}
+
+/// 未バインドの UDP ソケットをバインドする
+///
+/// `create_unbound_udp_socket()` で作成したソケットをバインドします。
+/// eBPF プログラムは `bind()` の前にアタッチする必要があるため、
+/// この関数は eBPF アタッチ後に呼び出してください。
+///
+/// # Arguments
+///
+/// * `socket` - 未バインドの UDP ソケット
+/// * `addr` - バインド先のアドレス
+///
+/// # Returns
+///
+/// 成功時は `Ok(())`、失敗時は `Err` を返します。
+/// Unix 用の実装: libc::bind を直接呼び出す
+#[cfg(unix)]
+pub fn bind_udp_socket(socket: &std::net::UdpSocket, addr: SocketAddr) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    let fd = socket.as_raw_fd();
+    let sockaddr: socket2::SockAddr = addr.into();
+
+    let ret = unsafe { libc::bind(fd, sockaddr.as_ptr() as *const _, sockaddr.len()) };
+
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Windows 用の実装: socket2 クレートの bind メソッドを使用
+#[cfg(windows)]
+pub fn bind_udp_socket(socket: &std::net::UdpSocket, addr: SocketAddr) -> std::io::Result<()> {
+    use socket2::Socket;
+    use std::os::windows::io::{AsRawSocket, FromRawSocket};
+
+    let raw_socket = socket.as_raw_socket();
+    // SAFETY: raw_socket は有効な UdpSocket から取得したハンドル
+    let socket2_socket = unsafe { Socket::from_raw_socket(raw_socket) };
+    let sockaddr: socket2::SockAddr = addr.into();
+
+    let result = socket2_socket.bind(&sockaddr);
+
+    // socket2::Socket が Drop されてもソケットをクローズしないように、所有権を放棄
+    std::mem::forget(socket2_socket);
+
+    result
+}
+
 /// サーバー用の QUIC エンドポイントを作成
 ///
 /// 証明書は ~/.config/quicport/ に永続化される
@@ -681,15 +798,42 @@ pub fn create_server_endpoint_with_cid(
     Ok(endpoint)
 }
 
-/// QUIC サーバー用の UDP ソケットを作成（eBPF 統合用）
+/// QUIC サーバー用の UDP ソケットを作成（バインド済み）
 ///
-/// この関数は SO_REUSEPORT 付きの UDP ソケットを作成します。
-/// eBPF プログラムをアタッチするためにソケットと Endpoint の作成を分離しています。
+/// この関数は SO_REUSEPORT 付きの UDP ソケットを作成し、バインドします。
 ///
-/// # 重要
+/// # 非推奨（eBPF 使用時）
 ///
-/// SO_ATTACH_REUSEPORT_EBPF は Quinn の Endpoint にソケットを渡す **前に** 呼ぶ必要があります。
-/// そのため、この関数でソケットを作成し、eBPF をアタッチしてから `create_server_endpoint_with_socket()` を呼びます。
+/// **eBPF SK_REUSEPORT と併用する場合は、この関数を使わないでください。**
+///
+/// eBPF プログラムは `bind()` の **前に** アタッチする必要があります。
+/// この関数は内部で `bind()` を呼ぶため、eBPF との統合には適していません。
+///
+/// ## eBPF 統合時の推奨パターン
+///
+/// ```ignore
+/// // 1. 未バインドソケットを作成（bind なし）
+/// let socket = create_unbound_udp_socket(bind_addr)?;
+///
+/// // 2. eBPF ルーターをロード・アタッチ（bind 前！）
+/// #[cfg(target_os = "linux")]
+/// {
+///     let router = EbpfRouter::load(EbpfRouterConfig::default())?;
+///     router.attach_to_socket(&socket)?;  // bind 前にアタッチ
+/// }
+///
+/// // 3. ソケットをバインド
+/// bind_udp_socket(&socket, bind_addr)?;
+///
+/// // 4. Endpoint を作成
+/// let endpoint = create_server_endpoint_with_socket(socket, psk, server_id)?;
+///
+/// // 5. サーバーを登録
+/// #[cfg(target_os = "linux")]
+/// {
+///     router.register_server(server_id, &socket_for_register)?;
+/// }
+/// ```
 ///
 /// # Arguments
 ///
@@ -697,33 +841,7 @@ pub fn create_server_endpoint_with_cid(
 ///
 /// # Returns
 ///
-/// SO_REUSEPORT が設定された UDP ソケット
-///
-/// # eBPF 統合の流れ
-///
-/// ```ignore
-/// // 1. ソケットを作成
-/// let socket = create_quic_server_socket(bind_addr)?;
-///
-/// // 2. eBPF ルーターをロード・アタッチ（Quinn に渡す前に！）
-/// #[cfg(target_os = "linux")]
-/// {
-///     let router = EbpfRouter::load(EbpfRouterConfig::default())?;
-///     router.attach_to_socket(&socket)?;  // 元のソケットにアタッチ
-/// }
-///
-/// // 3. マップ登録用にソケットをクローン
-/// let socket_for_register = socket.try_clone()?;
-///
-/// // 4. Endpoint を作成（元のソケットを渡す）
-/// let endpoint = create_server_endpoint_with_socket(socket, psk, server_id)?;
-///
-/// // 5. サーバーを登録（クローンしたソケットを使用）
-/// #[cfg(target_os = "linux")]
-/// {
-///     router.register_server(server_id, &socket_for_register)?;
-/// }
-/// ```
+/// SO_REUSEPORT が設定されたバインド済み UDP ソケット
 pub fn create_quic_server_socket(bind_addr: SocketAddr) -> Result<std::net::UdpSocket> {
     create_udp_socket_with_reuseport(bind_addr)
         .context("Failed to create UDP socket with SO_REUSEPORT")
@@ -731,17 +849,29 @@ pub fn create_quic_server_socket(bind_addr: SocketAddr) -> Result<std::net::UdpS
 
 /// 既存のソケットを使用して QUIC サーバーエンドポイントを作成
 ///
-/// この関数は `create_quic_server_socket()` で作成したソケットを受け取り、
-/// QUIC エンドポイントを作成します。
+/// この関数はバインド済みの UDP ソケットを受け取り、QUIC エンドポイントを作成します。
 ///
-/// # 重要
+/// # eBPF 統合の推奨パターン
 ///
-/// eBPF プログラムのアタッチは、この関数を呼ぶ **前に** 行う必要があります。
-/// 詳細は `create_quic_server_socket()` のドキュメントを参照。
+/// eBPF SK_REUSEPORT を使用する場合は、以下の順序で操作を行ってください:
+///
+/// ```ignore
+/// // 1. 未バインドソケットを作成
+/// let socket = create_unbound_udp_socket(bind_addr)?;
+///
+/// // 2. eBPF アタッチ（bind 前！）
+/// router.attach_to_socket(&socket)?;
+///
+/// // 3. ソケットをバインド
+/// bind_udp_socket(&socket, bind_addr)?;
+///
+/// // 4. この関数を呼んで Endpoint を作成
+/// let endpoint = create_server_endpoint_with_socket(socket, psk, server_id)?;
+/// ```
 ///
 /// # Arguments
 ///
-/// * `socket` - SO_REUSEPORT が設定された UDP ソケット
+/// * `socket` - SO_REUSEPORT が設定されたバインド済み UDP ソケット
 /// * `_psk` - 認証用 PSK（将来のために保持）
 /// * `server_id` - eBPF ルーティング用の server_id
 pub fn create_server_endpoint_with_socket(
