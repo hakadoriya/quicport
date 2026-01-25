@@ -388,20 +388,28 @@ impl EbpfRouter {
     pub fn attach_to_socket(&self, socket: &UdpSocket) -> Result<()> {
         let sock_fd = socket.as_raw_fd();
 
-        // スケルトンのプログラムを使用してアタッチ
+        // ピン留めプログラムが存在する場合はそれを使用
         //
-        // 注意: ピン留めプログラムの fd を使用するのではなく、スケルトンのプログラムを使用する。
-        // 理由:
-        // 1. スケルトンのプログラムはピン留め socket_map を正しく参照している
-        //    (load() 時に reuse_pinned_map() で設定済み)
-        // 2. SO_REUSEPORT グループでは、最初にアタッチされたプログラムがグループ全体で使用される
-        // 3. すべての DP が同じ socket_map を共有しているので、ルーティングは正しく機能する
+        // 【重要】SO_REUSEPORT グループでは、最初にアタッチされた BPF プログラムが
+        // グループ全体で使用されます。後からアタッチしようとしても、setsockopt は
+        // 成功しますが、実際にはアクティブになりません。
         //
-        // pinned_prog_fd は参照カウント維持のために保持するが、アタッチには使用しない。
-        let prog_fd = self.skel.progs.quicport_select_socket.as_fd().as_raw_fd();
+        // したがって、すべての DP が同じピン留めプログラムを使用することで、
+        // どの DP が最初にアタッチしても同じプログラムがアクティブになります。
+        // これにより、graceful restart 時のパケットルーティングが正しく機能します。
+        //
+        // ピン留めプログラムを再利用した場合:
+        //   - pinned_prog_fd を使用（元のプログラムと同一）
+        // 新規作成の場合:
+        //   - スケルトンのプログラムを使用（これがピン留めされる）
+        let prog_fd = if let Some(ref pinned_fd) = self.pinned_prog_fd {
+            pinned_fd.as_raw_fd()
+        } else {
+            self.skel.progs.quicport_select_socket.as_fd().as_raw_fd()
+        };
 
         debug!(
-            "Attaching SK_REUSEPORT program (fd={}, reused={}) to socket (fd={})",
+            "Attaching SK_REUSEPORT program (fd={}, reused_pinned={}) to socket (fd={})",
             prog_fd, self.reused_pinned_prog, sock_fd
         );
 
@@ -470,8 +478,8 @@ impl EbpfRouter {
         }
 
         info!(
-            "SK_REUSEPORT program attached to socket (reused_pinned={})",
-            self.reused_pinned_prog
+            "SK_REUSEPORT program attached to socket (prog_fd={}, reused_pinned={})",
+            prog_fd, self.reused_pinned_prog
         );
         Ok(())
     }
