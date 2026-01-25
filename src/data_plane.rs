@@ -35,8 +35,9 @@ use crate::protocol::{
     CloseReason, ControlMessage, ControlStream, Protocol, ProtocolError, ResponseStatus,
 };
 use crate::quic::{
-    authenticate_client_psk, authenticate_client_x25519, create_quic_server_socket,
-    create_server_endpoint_with_socket, encode_base64_key, parse_base64_key,
+    authenticate_client_psk, authenticate_client_x25519, bind_udp_socket,
+    create_server_endpoint_with_socket, create_unbound_udp_socket, encode_base64_key,
+    parse_base64_key,
 };
 use crate::statistics::ServerStatistics;
 
@@ -590,12 +591,34 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
             sid
         );
 
-        // 1. ソケットを作成
-        let socket = create_quic_server_socket(config.listen_addr)?;
+        // ========================================================================
+        // eBPF SK_REUSEPORT の正しいアタッチ順序
+        //
+        // 重要: SO_ATTACH_REUSEPORT_EBPF は bind() の **前に** 呼び出す必要がある
+        //
+        // 処理フロー:
+        // 1. create_unbound_udp_socket() - 未バインドソケット作成
+        // 2. attach_to_socket()          - eBPF アタッチ（bind 前！）
+        // 3. bind_udp_socket()           - ソケットをバインド
+        // 4. create_server_endpoint_with_socket() - Endpoint 作成
+        //
+        // カーネルの動作:
+        // - bind() 後に SO_ATTACH_REUSEPORT_EBPF を呼んでも、一部のカーネルでは
+        //   既存の reuseport グループにプログラムが適用されない
+        // - bind() 前にアタッチすると、bind() 時に reuseport グループが
+        //   eBPF プログラム付きで作成される
+        // ========================================================================
+
+        // 1. 未バインドソケットを作成（bind なし）
+        let socket = create_unbound_udp_socket(config.listen_addr)
+            .context("Failed to create unbound UDP socket with SO_REUSEPORT")?;
 
         // Linux 時は eBPF ルーターをロードしてアタッチ
         #[cfg(target_os = "linux")]
         let mut socket_for_register: Option<std::net::UdpSocket> = None;
+
+        #[cfg(target_os = "linux")]
+        let mut ebpf_attached = false;
 
         #[cfg(target_os = "linux")]
         {
@@ -604,8 +627,8 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
             if is_ebpf_available() {
                 match EbpfRouter::load(EbpfRouterConfig::default()) {
                     Ok(router) => {
-                        // 2. eBPF プログラムをアタッチ（Quinn に渡す前に！）
-                        //    これが重要: SO_ATTACH_REUSEPORT_EBPF は Endpoint::new() の前に呼ぶ
+                        // 2. eBPF プログラムをアタッチ（bind 前！これが重要！）
+                        //    SO_ATTACH_REUSEPORT_EBPF は bind() の前に呼ぶ必要がある
                         if let Err(e) = router.attach_to_socket(&socket) {
                             warn!(
                                 "Failed to attach eBPF SK_REUSEPORT program: {}. \
@@ -614,15 +637,16 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                                 e
                             );
                         } else {
-                            // 3. ソケットをクローン（マップ登録用）
-                            //    注意: register_server() は Endpoint::new() の後でも OK
-                            //          マップ登録はパケット受信前であれば問題ない
+                            // ソケットをクローン（マップ登録用）
+                            // 注意: register_server() は bind() 後でも OK
+                            //       マップ登録はパケット受信前であれば問題ない
                             match socket.try_clone() {
                                 Ok(cloned) => {
                                     socket_for_register = Some(cloned);
                                     _ebpf_router = Some(router);
+                                    ebpf_attached = true;
                                     info!(
-                                        "eBPF SK_REUSEPORT program attached for dp_id={:#06x}",
+                                        "eBPF SK_REUSEPORT program attached (before bind) for dp_id={:#06x}",
                                         sid
                                     );
                                 }
@@ -649,7 +673,20 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
             }
         }
 
-        // 4. Endpoint を作成（元のソケットを渡す）
+        // 3. ソケットをバインド
+        //    eBPF アタッチ後にバインドすることで、reuseport グループが
+        //    eBPF プログラム付きで作成される
+        bind_udp_socket(&socket, config.listen_addr)
+            .context("Failed to bind UDP socket")?;
+
+        #[cfg(target_os = "linux")]
+        if ebpf_attached {
+            info!(
+                "Socket bound after eBPF attach - SK_REUSEPORT routing should be active"
+            );
+        }
+
+        // 4. Endpoint を作成（バインド済みソケットを渡す）
         let endpoint =
             create_server_endpoint_with_socket(socket, "quicport-dataplane", sid)?;
 
