@@ -515,6 +515,11 @@ fn get_or_create_server_cert() -> Result<(Vec<CertificateDer<'static>>, PrivateK
 /// SO_REUSEADDR + SO_REUSEPORT 付きで UDP ソケットを作成（グレースフルリスタート用）
 ///
 /// これにより複数の data-plane プロセスが同じポートで LISTEN 可能
+///
+/// # 公開 API
+///
+/// この関数は `create_quic_server_socket()` を通じて公開され、
+/// eBPF アタッチのためにソケットと Endpoint の作成を分離するために使用されます。
 fn create_udp_socket_with_reuseport(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
     let domain = if addr.is_ipv4() {
         Domain::IPV4
@@ -676,38 +681,74 @@ pub fn create_server_endpoint_with_cid(
     Ok(endpoint)
 }
 
-/// サーバー用の QUIC エンドポイントを作成（eBPF 統合用）
+/// QUIC サーバー用の UDP ソケットを作成（eBPF 統合用）
 ///
-/// この関数は eBPF ルーターの統合に必要な UDP ソケットへの参照も返します。
-/// eBPF SK_REUSEPORT プログラムをアタッチするために使用します。
+/// この関数は SO_REUSEPORT 付きの UDP ソケットを作成します。
+/// eBPF プログラムをアタッチするためにソケットと Endpoint の作成を分離しています。
+///
+/// # 重要
+///
+/// SO_ATTACH_REUSEPORT_EBPF は Quinn の Endpoint にソケットを渡す **前に** 呼ぶ必要があります。
+/// そのため、この関数でソケットを作成し、eBPF をアタッチしてから `create_server_endpoint_with_socket()` を呼びます。
 ///
 /// # Arguments
 ///
 /// * `bind_addr` - バインドするアドレス
-/// * `_psk` - 認証用 PSK（将来のために保持）
-/// * `server_id` - eBPF ルーティング用の server_id
 ///
 /// # Returns
 ///
-/// (Endpoint, UdpSocket) - QUIC エンドポイントと eBPF アタッチ用のソケットクローン
+/// SO_REUSEPORT が設定された UDP ソケット
 ///
 /// # eBPF 統合の流れ
 ///
 /// ```ignore
-/// let (endpoint, socket) = create_server_endpoint_for_ebpf(addr, psk, server_id)?;
+/// // 1. ソケットを作成
+/// let socket = create_quic_server_socket(bind_addr)?;
 ///
+/// // 2. eBPF ルーターをロード・アタッチ（Quinn に渡す前に！）
 /// #[cfg(target_os = "linux")]
 /// {
 ///     let router = EbpfRouter::load(EbpfRouterConfig::default())?;
-///     router.attach_to_socket(&socket)?;
-///     router.register_server(server_id, &socket)?;
+///     router.attach_to_socket(&socket)?;  // 元のソケットにアタッチ
+/// }
+///
+/// // 3. マップ登録用にソケットをクローン
+/// let socket_for_register = socket.try_clone()?;
+///
+/// // 4. Endpoint を作成（元のソケットを渡す）
+/// let endpoint = create_server_endpoint_with_socket(socket, psk, server_id)?;
+///
+/// // 5. サーバーを登録（クローンしたソケットを使用）
+/// #[cfg(target_os = "linux")]
+/// {
+///     router.register_server(server_id, &socket_for_register)?;
 /// }
 /// ```
-pub fn create_server_endpoint_for_ebpf(
-    bind_addr: SocketAddr,
+pub fn create_quic_server_socket(bind_addr: SocketAddr) -> Result<std::net::UdpSocket> {
+    create_udp_socket_with_reuseport(bind_addr)
+        .context("Failed to create UDP socket with SO_REUSEPORT")
+}
+
+/// 既存のソケットを使用して QUIC サーバーエンドポイントを作成
+///
+/// この関数は `create_quic_server_socket()` で作成したソケットを受け取り、
+/// QUIC エンドポイントを作成します。
+///
+/// # 重要
+///
+/// eBPF プログラムのアタッチは、この関数を呼ぶ **前に** 行う必要があります。
+/// 詳細は `create_quic_server_socket()` のドキュメントを参照。
+///
+/// # Arguments
+///
+/// * `socket` - SO_REUSEPORT が設定された UDP ソケット
+/// * `_psk` - 認証用 PSK（将来のために保持）
+/// * `server_id` - eBPF ルーティング用の server_id
+pub fn create_server_endpoint_with_socket(
+    socket: std::net::UdpSocket,
     _psk: &str,
     server_id: u32,
-) -> Result<(Endpoint, std::net::UdpSocket)> {
+) -> Result<Endpoint> {
     use crate::cid_generator::RoutableCidGenerator;
 
     let (certs, key) = get_or_create_server_cert()?;
@@ -732,16 +773,6 @@ pub fn create_server_endpoint_for_ebpf(
     ));
     server_config.transport_config(Arc::new(transport_config));
 
-    // SO_REUSEPORT を設定した UDP ソケットを作成
-    let udp_socket = create_udp_socket_with_reuseport(bind_addr)
-        .context("Failed to create UDP socket with SO_REUSEPORT")?;
-
-    // eBPF アタッチ用にソケットをクローン
-    // try_clone() は新しい fd を作成するが、同じ reuseport グループに属する
-    let socket_for_ebpf = udp_socket
-        .try_clone()
-        .context("Failed to clone UDP socket for eBPF")?;
-
     // カスタムソケットから Endpoint を作成
     let runtime =
         quinn::default_runtime().ok_or_else(|| anyhow::anyhow!("No async runtime found"))?;
@@ -750,7 +781,7 @@ pub fn create_server_endpoint_for_ebpf(
     let mut endpoint_config = quinn::EndpointConfig::default();
     endpoint_config.cid_generator(move || Box::new(RoutableCidGenerator::new(server_id)));
 
-    let endpoint = Endpoint::new(endpoint_config, Some(server_config), udp_socket, runtime)
+    let endpoint = Endpoint::new(endpoint_config, Some(server_config), socket, runtime)
         .context("Failed to create server endpoint with custom CID generator")?;
 
     tracing::info!(
@@ -758,7 +789,7 @@ pub fn create_server_endpoint_for_ebpf(
         server_id
     );
 
-    Ok((endpoint, socket_for_ebpf))
+    Ok(endpoint)
 }
 
 /// クライアント用の QUIC エンドポイントを作成

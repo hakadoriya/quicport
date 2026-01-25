@@ -35,8 +35,8 @@ use crate::protocol::{
     CloseReason, ControlMessage, ControlStream, Protocol, ProtocolError, ResponseStatus,
 };
 use crate::quic::{
-    authenticate_client_psk, authenticate_client_x25519, create_server_endpoint_for_ebpf,
-    encode_base64_key, parse_base64_key,
+    authenticate_client_psk, authenticate_client_x25519, create_quic_server_socket,
+    create_server_endpoint_with_socket, encode_base64_key, parse_base64_key,
 };
 use crate::statistics::ServerStatistics;
 
@@ -569,11 +569,18 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
 
     // QUIC エンドポイントを作成
     // server_id が設定されている場合は eBPF ルーティング対応の CID Generator を使用
+    //
+    // 【重要】eBPF 統合の正しい順序:
+    // 1. ソケットを作成
+    // 2. eBPF プログラムをアタッチ（Quinn に渡す前に！）
+    // 3. ソケットをクローン（マップ登録用）
+    // 4. Endpoint を作成（元のソケットを渡す）
+    // 5. マップにサーバーを登録
 
     // eBPF ルーターを保持する変数（Linux のみ）
     // run() 関数終了まで保持され、その間 eBPF マップが有効
     #[cfg(target_os = "linux")]
-    let _ebpf_router: Option<crate::platform::linux::EbpfRouter>;
+    let mut _ebpf_router: Option<crate::platform::linux::EbpfRouter> = None;
 
     // eBPF ルーティング用に常に dp_id を使用
     let endpoint = {
@@ -583,42 +590,45 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
             sid
         );
 
-        // eBPF 統合用: ソケットも取得
-        let (endpoint, socket_for_ebpf) =
-            create_server_endpoint_for_ebpf(config.listen_addr, "quicport-dataplane", sid)?;
+        // 1. ソケットを作成
+        let socket = create_quic_server_socket(config.listen_addr)?;
 
         // Linux 時は eBPF ルーターをロードしてアタッチ
+        #[cfg(target_os = "linux")]
+        let mut socket_for_register: Option<std::net::UdpSocket> = None;
+
         #[cfg(target_os = "linux")]
         {
             use crate::platform::linux::{EbpfRouter, EbpfRouterConfig, is_ebpf_available};
 
-            _ebpf_router = if is_ebpf_available() {
+            if is_ebpf_available() {
                 match EbpfRouter::load(EbpfRouterConfig::default()) {
-                    Ok(mut router) => {
-                        // ソケットにプログラムをアタッチ
-                        if let Err(e) = router.attach_to_socket(&socket_for_ebpf) {
+                    Ok(router) => {
+                        // 2. eBPF プログラムをアタッチ（Quinn に渡す前に！）
+                        //    これが重要: SO_ATTACH_REUSEPORT_EBPF は Endpoint::new() の前に呼ぶ
+                        if let Err(e) = router.attach_to_socket(&socket) {
                             warn!(
                                 "Failed to attach eBPF SK_REUSEPORT program: {}. \
                                  Falling back to kernel default SO_REUSEPORT behavior. \
                                  This may cause connection resets during graceful restart.",
                                 e
                             );
-                            None
                         } else {
-                            // サーバーを登録
-                            if let Err(e) = router.register_server(sid, &socket_for_ebpf) {
-                                warn!(
-                                    "Failed to register dp_id={:#06x} in eBPF map: {}",
-                                    sid, e
-                                );
-                                None
-                            } else {
-                                info!(
-                                    "eBPF SK_REUSEPORT routing enabled for dp_id={:#06x}",
-                                    sid
-                                );
-                                // router を保持して run() 終了まで eBPF マップを維持
-                                Some(router)
+                            // 3. ソケットをクローン（マップ登録用）
+                            //    注意: register_server() は Endpoint::new() の後でも OK
+                            //          マップ登録はパケット受信前であれば問題ない
+                            match socket.try_clone() {
+                                Ok(cloned) => {
+                                    socket_for_register = Some(cloned);
+                                    _ebpf_router = Some(router);
+                                    info!(
+                                        "eBPF SK_REUSEPORT program attached for dp_id={:#06x}",
+                                        sid
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!("Failed to clone socket for eBPF registration: {}", e);
+                                }
                             }
                         }
                     }
@@ -629,7 +639,6 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                              This may cause connection resets during graceful restart.",
                             e
                         );
-                        None
                     }
                 }
             } else {
@@ -637,14 +646,36 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                     "eBPF not available on this system. \
                      Using kernel default SO_REUSEPORT behavior."
                 );
-                None
-            };
+            }
+        }
+
+        // 4. Endpoint を作成（元のソケットを渡す）
+        let endpoint =
+            create_server_endpoint_with_socket(socket, "quicport-dataplane", sid)?;
+
+        // 5. マップにサーバーを登録
+        #[cfg(target_os = "linux")]
+        {
+            if let (Some(ref mut router), Some(ref sock)) =
+                (&mut _ebpf_router, &socket_for_register)
+            {
+                if let Err(e) = router.register_server(sid, sock) {
+                    warn!(
+                        "Failed to register dp_id={:#06x} in eBPF map: {}",
+                        sid, e
+                    );
+                } else {
+                    info!(
+                        "eBPF SK_REUSEPORT routing enabled for dp_id={:#06x}",
+                        sid
+                    );
+                }
+            }
         }
 
         // 非 Linux 時
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = socket_for_ebpf; // unused variable warning 抑制
             debug!("eBPF routing not available (non-Linux platform)");
         }
 
