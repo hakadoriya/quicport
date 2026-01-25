@@ -388,13 +388,17 @@ impl EbpfRouter {
     pub fn attach_to_socket(&self, socket: &UdpSocket) -> Result<()> {
         let sock_fd = socket.as_raw_fd();
 
-        // ピン留めプログラムの fd があればそれを使用、なければスケルトンのプログラムを使用
-        // これにより、すべての DP が同じプログラムインスタンスを共有する
-        let prog_fd = if let Some(ref pinned_fd) = self.pinned_prog_fd {
-            pinned_fd.as_raw_fd()
-        } else {
-            self.skel.progs.quicport_select_socket.as_fd().as_raw_fd()
-        };
+        // スケルトンのプログラムを使用してアタッチ
+        //
+        // 注意: ピン留めプログラムの fd を使用するのではなく、スケルトンのプログラムを使用する。
+        // 理由:
+        // 1. スケルトンのプログラムはピン留め socket_map を正しく参照している
+        //    (load() 時に reuse_pinned_map() で設定済み)
+        // 2. SO_REUSEPORT グループでは、最初にアタッチされたプログラムがグループ全体で使用される
+        // 3. すべての DP が同じ socket_map を共有しているので、ルーティングは正しく機能する
+        //
+        // pinned_prog_fd は参照カウント維持のために保持するが、アタッチには使用しない。
+        let prog_fd = self.skel.progs.quicport_select_socket.as_fd().as_raw_fd();
 
         debug!(
             "Attaching SK_REUSEPORT program (fd={}, reused={}) to socket (fd={})",
@@ -423,10 +427,12 @@ impl EbpfRouter {
         if ret < 0 {
             let err = std::io::Error::last_os_error();
             // EBUSY は既にプログラムがアタッチされている場合に発生する可能性がある
-            // ピン留めプログラムを使用している場合、これは正常な動作
-            if err.raw_os_error() == Some(libc::EBUSY) && self.reused_pinned_prog {
+            // SO_REUSEPORT グループでは最初にアタッチされたプログラムが使用されるため、
+            // 2番目以降の DP がアタッチしようとすると EBUSY が返される場合がある
+            // すべての DP が同じ socket_map を共有しているので、これは正常な動作
+            if err.raw_os_error() == Some(libc::EBUSY) {
                 info!(
-                    "SK_REUSEPORT program already attached to group (reusing pinned program)"
+                    "SK_REUSEPORT program already attached to group (using existing program)"
                 );
                 return Ok(());
             }
