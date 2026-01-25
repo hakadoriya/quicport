@@ -615,9 +615,6 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
 
         // Linux 時は eBPF ルーターをロードしてアタッチ
         #[cfg(target_os = "linux")]
-        let mut socket_for_register: Option<std::net::UdpSocket> = None;
-
-        #[cfg(target_os = "linux")]
         let mut ebpf_attached = false;
 
         #[cfg(target_os = "linux")]
@@ -637,23 +634,12 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                                 e
                             );
                         } else {
-                            // ソケットをクローン（マップ登録用）
-                            // 注意: register_server() は bind() 後でも OK
-                            //       マップ登録はパケット受信前であれば問題ない
-                            match socket.try_clone() {
-                                Ok(cloned) => {
-                                    socket_for_register = Some(cloned);
-                                    _ebpf_router = Some(router);
-                                    ebpf_attached = true;
-                                    info!(
-                                        "eBPF SK_REUSEPORT program attached (before bind) for dp_id={:#06x}",
-                                        sid
-                                    );
-                                }
-                                Err(e) => {
-                                    warn!("Failed to clone socket for eBPF registration: {}", e);
-                                }
-                            }
+                            _ebpf_router = Some(router);
+                            ebpf_attached = true;
+                            info!(
+                                "eBPF SK_REUSEPORT program attached (before bind) for dp_id={:#06x}",
+                                sid
+                            );
                         }
                     }
                     Err(e) => {
@@ -686,17 +672,13 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
             );
         }
 
-        // 4. Endpoint を作成（バインド済みソケットを渡す）
-        let endpoint =
-            create_server_endpoint_with_socket(socket, "quicport-dataplane", sid)?;
-
-        // 5. マップにサーバーを登録
+        // 4. マップにサーバーを登録（Endpoint 作成前！bind 済みの元のソケットで！）
+        //    重要: try_clone() は使わない。bind 済みの元のソケット fd を登録する。
+        //    REUSEPORT_SOCKARRAY には bind 済みのソケット fd を登録する必要がある。
         #[cfg(target_os = "linux")]
         {
-            if let (Some(ref mut router), Some(ref sock)) =
-                (&mut _ebpf_router, &socket_for_register)
-            {
-                if let Err(e) = router.register_server(sid, sock) {
+            if let Some(ref mut router) = _ebpf_router {
+                if let Err(e) = router.register_server(sid, &socket) {
                     warn!(
                         "Failed to register dp_id={:#06x} in eBPF map: {}",
                         sid, e
@@ -715,6 +697,10 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
         {
             debug!("eBPF routing not available (non-Linux platform)");
         }
+
+        // 5. Endpoint を作成（バインド済みソケットの所有権を渡す）
+        let endpoint =
+            create_server_endpoint_with_socket(socket, "quicport-dataplane", sid)?;
 
         endpoint
     };
