@@ -190,6 +190,7 @@ impl EbpfRouter {
         // ピン留めパスが設定されている場合、まずプログラムの再利用を試みる
         if let Some(ref pin_dir) = config.pin_path {
             let prog_pin_path = pin_dir.join("quicport_select_socket");
+            debug!("Checking for pinned program at {:?}", prog_pin_path);
 
             if prog_pin_path.exists() {
                 // 既存のピン留めプログラムを再利用
@@ -223,6 +224,8 @@ impl EbpfRouter {
                         );
                     }
                 }
+            } else {
+                debug!("No pinned program found at {:?}", prog_pin_path);
             }
         }
 
@@ -312,10 +315,15 @@ impl EbpfRouter {
 
         // プログラムをピン留め（まだピン留めされていない場合）
         if let Some(ref pin_dir) = config.pin_path {
+            debug!(
+                "Program pinning check: reused_pinned_prog={}",
+                reused_pinned_prog
+            );
             if !reused_pinned_prog {
                 let prog_pin_path = pin_dir.join("quicport_select_socket");
                 Self::ensure_pin_directory_exists(pin_dir)?;
 
+                debug!("Pinning BPF program to {:?}", prog_pin_path);
                 skel.progs
                     .quicport_select_socket
                     .pin(&prog_pin_path)
@@ -323,6 +331,8 @@ impl EbpfRouter {
                         format!("Failed to pin program at {:?}", prog_pin_path)
                     })?;
                 info!("Pinned BPF program at {:?}", prog_pin_path);
+            } else {
+                debug!("Skipping program pinning (already reused pinned program)");
             }
         }
 
