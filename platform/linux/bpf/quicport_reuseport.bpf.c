@@ -161,6 +161,27 @@ int quicport_select_socket(struct sk_reuseport_md *ctx)
     __u32 server_id;
     long ret;
 
+    /*
+     * DEBUG: Dump first bytes of ctx->data to verify what it points to
+     *
+     * Expected values:
+     * - If UDP payload (QUIC): 0xc0+ (Long Header) or 0x40+ (Short Header)
+     * - If IP header: 0x45 (IPv4) or 0x60 (IPv6)
+     */
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+
+    if (data + 8 <= data_end) {
+        __u8 *bytes = (__u8 *)data;
+        bpf_printk("quicport: data[0-3]=%02x %02x %02x %02x\n",
+                   bytes[0], bytes[1], bytes[2], bytes[3]);
+        bpf_printk("quicport: data[4-7]=%02x %02x %02x %02x\n",
+                   bytes[4], bytes[5], bytes[6], bytes[7]);
+        bpf_printk("quicport: data_len=%u\n", ctx->len);
+    } else {
+        bpf_printk("quicport: data too short, len=%u\n", ctx->len);
+    }
+
     /* Extract server_id from QUIC CID */
     if (extract_server_id(ctx, &server_id) < 0) {
         /*
