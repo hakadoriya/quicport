@@ -437,9 +437,36 @@ impl EbpfRouter {
                 return Ok(());
             }
             return Err(anyhow::anyhow!(
-                "Failed to attach eBPF program to socket: {}",
-                err
+                "Failed to attach eBPF program to socket: {} (errno={})",
+                err,
+                err.raw_os_error().unwrap_or(-1)
             ));
+        }
+
+        // アタッチ成功後、getsockopt で確認
+        let mut attached_fd: libc::c_int = 0;
+        let mut optlen: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let check_ret = unsafe {
+            libc::getsockopt(
+                sock_fd,
+                libc::SOL_SOCKET,
+                libc::SO_ATTACH_REUSEPORT_EBPF,
+                &mut attached_fd as *mut _ as *mut libc::c_void,
+                &mut optlen,
+            )
+        };
+        if check_ret < 0 {
+            let err = std::io::Error::last_os_error();
+            debug!(
+                "getsockopt(SO_ATTACH_REUSEPORT_EBPF) failed: {} (errno={})",
+                err,
+                err.raw_os_error().unwrap_or(-1)
+            );
+        } else {
+            debug!(
+                "getsockopt(SO_ATTACH_REUSEPORT_EBPF) returned fd={}",
+                attached_fd
+            );
         }
 
         info!(
