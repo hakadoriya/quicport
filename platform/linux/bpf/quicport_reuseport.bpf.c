@@ -162,6 +162,19 @@ int quicport_select_socket(struct sk_reuseport_md *ctx)
     long ret;
 
     /*
+     * DEBUG: 無条件でログを出力
+     *
+     * このログが trace_pipe に出力されない場合、プログラムがソケットに
+     * アタッチされていない可能性が高い。
+     *
+     * 確認方法:
+     *   echo 1 | sudo tee /sys/kernel/debug/tracing/events/bpf_trace/bpf_trace_printk/enable
+     *   sudo cat /sys/kernel/debug/tracing/trace_pipe | grep quicport
+     */
+    bpf_printk("quicport: ========== ENTRY ==========\n");
+    bpf_printk("quicport: sk_reuseport program invoked, ctx=%p\n", ctx);
+
+    /*
      * DEBUG: Dump first bytes of ctx->data to verify what it points to
      *
      * Expected values:
@@ -171,15 +184,48 @@ int quicport_select_socket(struct sk_reuseport_md *ctx)
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
 
+    /*
+     * DEBUG: ctx の詳細情報を出力
+     *
+     * sk_reuseport_md の主要フィールド:
+     * - len: パケット全体の長さ
+     * - eth_protocol: Ethernet プロトコル (ETH_P_IP=0x0800, ETH_P_IPV6=0x86DD)
+     * - ip_protocol: IP プロトコル (IPPROTO_UDP=17)
+     * - data/data_end: パケットデータへのポインタ
+     *
+     * 注意: SK_REUSEPORT では ctx->data は **UDP ペイロード** の先頭を指す
+     * (IP/UDP ヘッダはスキップ済み)
+     */
+    bpf_printk("quicport: ctx->len=%u, eth_proto=0x%04x, ip_proto=%u\n",
+               ctx->len, ctx->eth_protocol, ctx->ip_protocol);
+
     if (data + 8 <= data_end) {
         __u8 *bytes = (__u8 *)data;
         bpf_printk("quicport: data[0-3]=%02x %02x %02x %02x\n",
                    bytes[0], bytes[1], bytes[2], bytes[3]);
         bpf_printk("quicport: data[4-7]=%02x %02x %02x %02x\n",
                    bytes[4], bytes[5], bytes[6], bytes[7]);
-        bpf_printk("quicport: data_len=%u\n", ctx->len);
+        /*
+         * data[0] の解釈:
+         * - 0xc0-0xff: QUIC Long Header (Initial, Handshake, 0-RTT, Retry)
+         * - 0x40-0x7f: QUIC Short Header (1-RTT)
+         * - 0x45: IPv4 header (もし IP ヘッダが含まれている場合)
+         * - 0x60: IPv6 header (もし IP ヘッダが含まれている場合)
+         */
+        if ((bytes[0] & 0x80) == 0x80) {
+            bpf_printk("quicport: detected QUIC Long Header\n");
+        } else if ((bytes[0] & 0x40) == 0x40) {
+            bpf_printk("quicport: detected QUIC Short Header\n");
+        } else if ((bytes[0] >> 4) == 4) {
+            bpf_printk("quicport: WARNING: data points to IPv4 header, not UDP payload!\n");
+        } else if ((bytes[0] >> 4) == 6) {
+            bpf_printk("quicport: WARNING: data points to IPv6 header, not UDP payload!\n");
+        } else {
+            bpf_printk("quicport: unknown packet format, first_byte=0x%02x\n", bytes[0]);
+        }
     } else {
-        bpf_printk("quicport: data too short, len=%u\n", ctx->len);
+        bpf_printk("quicport: data too short for analysis, data_end-data=%ld\n",
+                   (long)(data_end - data));
     }
 
     /* Extract server_id from QUIC CID */
