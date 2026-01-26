@@ -66,7 +66,7 @@ jobs:
 
       - name: Restore Cargo cache
         id: cache-cargo-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -79,7 +79,7 @@ jobs:
 
       - name: Restore build cache
         id: cache-target-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: target/
           key: target-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs', '**/*.c', '**/*.h') }}
@@ -129,7 +129,7 @@ jobs:
 
       - name: Save Cargo cache
         if: steps.cache-cargo-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -140,7 +140,7 @@ jobs:
 
       - name: Save build cache
         if: steps.cache-target-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: target/
           key: ${{ steps.cache-target-restore.outputs.cache-primary-key }}
