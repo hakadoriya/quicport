@@ -82,7 +82,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: target/
-          key: target-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
+          key: target-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs', '**/*.c', '**/*.h') }}
           restore-keys: |
             target-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}-
             target-${{ matrix.runner }}-${{ matrix.target }}-
