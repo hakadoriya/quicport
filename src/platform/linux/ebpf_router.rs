@@ -434,24 +434,43 @@ impl EbpfRouter {
 
         if ret < 0 {
             let err = std::io::Error::last_os_error();
+            let errno = err.raw_os_error().unwrap_or(-1);
             // EBUSY は既にプログラムがアタッチされている場合に発生する可能性がある
             // SO_REUSEPORT グループでは最初にアタッチされたプログラムが使用されるため、
             // 2番目以降の DP がアタッチしようとすると EBUSY が返される場合がある
             // すべての DP が同じ socket_map を共有しているので、これは正常な動作
-            if err.raw_os_error() == Some(libc::EBUSY) {
+            if errno == libc::EBUSY {
                 info!(
-                    "SK_REUSEPORT program already attached to group (using existing program)"
+                    "SK_REUSEPORT program already attached to group (EBUSY). \
+                     Using existing program. prog_fd={}, sock_fd={}, reused_pinned={}",
+                    prog_fd, sock_fd, self.reused_pinned_prog
                 );
                 return Ok(());
             }
             return Err(anyhow::anyhow!(
-                "Failed to attach eBPF program to socket: {} (errno={})",
+                "setsockopt(SO_ATTACH_REUSEPORT_EBPF) failed: {} (errno={}). \
+                 prog_fd={}, sock_fd={}, reused_pinned={}",
                 err,
-                err.raw_os_error().unwrap_or(-1)
+                errno,
+                prog_fd,
+                sock_fd,
+                self.reused_pinned_prog
             ));
         }
 
-        // アタッチ成功後、getsockopt で確認
+        // setsockopt() 成功 - 詳細をログ出力
+        info!(
+            "setsockopt(SO_ATTACH_REUSEPORT_EBPF) succeeded: prog_fd={}, sock_fd={}, reused_pinned={}",
+            prog_fd, sock_fd, self.reused_pinned_prog
+        );
+
+        // アタッチ成功後、getsockopt で確認を試みる
+        //
+        // 【重要】getsockopt(SO_ATTACH_REUSEPORT_EBPF) は Linux カーネルでサポートされていない
+        // ENOPROTOOPT (errno=92) が返されるのは正常な動作であり、アタッチ失敗を意味しない
+        // setsockopt() は「設定専用」のオプションであり、getsockopt() では取得できない
+        //
+        // 参考: https://elixir.bootlin.com/linux/latest/source/net/core/sock.c
         let mut attached_fd: libc::c_int = 0;
         let mut optlen: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
         let check_ret = unsafe {
@@ -465,14 +484,21 @@ impl EbpfRouter {
         };
         if check_ret < 0 {
             let err = std::io::Error::last_os_error();
-            debug!(
-                "getsockopt(SO_ATTACH_REUSEPORT_EBPF) failed: {} (errno={})",
-                err,
-                err.raw_os_error().unwrap_or(-1)
-            );
+            let errno = err.raw_os_error().unwrap_or(-1);
+            // ENOPROTOOPT (92) は正常 - getsockopt はこのオプションをサポートしていない
+            if errno == libc::ENOPROTOOPT {
+                debug!(
+                    "getsockopt(SO_ATTACH_REUSEPORT_EBPF) returned ENOPROTOOPT (expected - not supported for get)"
+                );
+            } else {
+                warn!(
+                    "getsockopt(SO_ATTACH_REUSEPORT_EBPF) failed with unexpected error: {} (errno={})",
+                    err, errno
+                );
+            }
         } else {
-            debug!(
-                "getsockopt(SO_ATTACH_REUSEPORT_EBPF) returned fd={}",
+            info!(
+                "getsockopt(SO_ATTACH_REUSEPORT_EBPF) succeeded: attached_fd={}",
                 attached_fd
             );
         }
@@ -502,9 +528,11 @@ impl EbpfRouter {
     pub fn register_server(&mut self, server_id: u32, socket: &UdpSocket) -> Result<()> {
         let sock_fd = socket.as_raw_fd();
 
-        debug!(
-            "Registering server_id={} with socket fd={}",
-            server_id, sock_fd
+        // ソケットの状態を確認（デバッグ用）
+        let local_addr = socket.local_addr();
+        info!(
+            "Registering server_id={} with socket fd={}, local_addr={:?}",
+            server_id, sock_fd, local_addr
         );
 
         // REUSEPORT_SOCKARRAY マップにソケットを登録
@@ -512,6 +540,11 @@ impl EbpfRouter {
         // マップの型は:
         //   key: u32 (server_id)
         //   value: socket (カーネルが fd から参照を取得)
+        //
+        // 【重要】REUSEPORT_SOCKARRAY は特殊なマップで:
+        // - 値として socket fd を渡すと、カーネルが実際のソケット参照を格納
+        // - ソケットは **bind 済み** かつ **SO_REUSEPORT が有効** である必要がある
+        // - bind されていないソケットを登録すると EINVAL が返される
         //
         // libbpf-rs では、update() に fd をバイト配列として渡すと、
         // カーネルが適切にソケット参照を設定します。
@@ -523,15 +556,19 @@ impl EbpfRouter {
             .socket_map
             .update(&key, &value, MapFlags::ANY)
             .with_context(|| {
-                format!("Failed to register server_id={} in socket_map", server_id)
+                format!(
+                    "Failed to register server_id={} in socket_map. sock_fd={}, local_addr={:?}. \
+                     Ensure socket is bound with SO_REUSEPORT enabled.",
+                    server_id, sock_fd, local_addr
+                )
             })?;
 
         // 登録した server_id を追跡（Drop 時のクリーンアップ用）
         self.registered_server_ids.push(server_id);
 
         info!(
-            "Registered server_id={} in REUSEPORT_SOCKARRAY",
-            server_id
+            "Registered server_id={} in REUSEPORT_SOCKARRAY: sock_fd={}, local_addr={:?}",
+            server_id, sock_fd, local_addr
         );
         Ok(())
     }
