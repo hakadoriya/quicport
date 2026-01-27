@@ -57,6 +57,35 @@ fn build_ebpf() {
         return;
     }
 
+    // eBPF デバッグモードの判定
+    //
+    // 以下の条件でデバッグが有効化される:
+    // 1. 環境変数 QUICPORT_BPF_DEBUG=1 が設定されている
+    // 2. Rust のデバッグビルド (cargo build without --release)
+    //
+    // 使用例: QUICPORT_BPF_DEBUG=1 cargo build --release
+    let enable_bpf_debug = env::var("QUICPORT_BPF_DEBUG").is_ok();
+
+    #[cfg(debug_assertions)]
+    let enable_bpf_debug = true;
+
+    // clang 引数を構築
+    let mut clang_args: Vec<&str> = vec![
+        // インクルードパスを設定
+        "-I",
+        bpf_dir.to_str().unwrap(),
+        // 最適化レベル
+        "-O2",
+    ];
+
+    if enable_bpf_debug {
+        clang_args.push("-DDEBUG");
+        println!("cargo:warning=eBPF DEBUG mode enabled (bpf_printk active)");
+    }
+
+    // 環境変数の変更を監視
+    println!("cargo:rerun-if-env-changed=QUICPORT_BPF_DEBUG");
+
     // SkeletonBuilder で BPF プログラムをビルド
     //
     // libbpf-cargo は内部で clang を呼び出し:
@@ -65,16 +94,7 @@ fn build_ebpf() {
     // 3. Rust スケルトンコードを生成
     let result = SkeletonBuilder::new()
         .source(&bpf_source)
-        .clang_args([
-            // インクルードパスを設定
-            "-I",
-            bpf_dir.to_str().unwrap(),
-            // 最適化レベル
-            "-O2",
-            // デバッグビルド時はデバッグプリントを有効化
-            #[cfg(debug_assertions)]
-            "-DDEBUG",
-        ])
+        .clang_args(clang_args)
         .obj(&obj_output)
         .build_and_generate(&skel_output);
 
