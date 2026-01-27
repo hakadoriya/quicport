@@ -32,6 +32,11 @@ case "$TARGET" in
   *) echo "Error: Unknown Linux target: $TARGET" >&2; exit 1 ;;
 esac
 
+# require: cargo install cargo-zigbuild --locked                          # Install zigbuild
+# require: sudo apt-get install -qqy autoconf automake libtool pkg-config # Required for building
+# require: sudo apt-get install -qqy gawk flex bison                      # Required for building libbpf-sys
+# require: sudo apt-get install -qqy clang llvm                           # Required for building eBPF program
+
 # ビルド
 LogshExec cargo zigbuild --release --locked --target "${TARGET}.${GLIBC_VERSION}"
 
