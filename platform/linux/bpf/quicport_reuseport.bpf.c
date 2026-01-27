@@ -201,10 +201,11 @@ int quicport_select_socket(struct sk_reuseport_md *ctx)
 
     if (data + 8 <= data_end) {
         __u8 *bytes = (__u8 *)data;
-        bpf_printk("quicport: data[0-3]=%02x %02x %02x %02x\n",
-                   bytes[0], bytes[1], bytes[2], bytes[3]);
-        bpf_printk("quicport: data[4-7]=%02x %02x %02x %02x\n",
-                   bytes[4], bytes[5], bytes[6], bytes[7]);
+        /* bpf_trace_printk は最大 3 引数なので分割 */
+        bpf_printk("quicport: data[0-2]=%02x %02x %02x\n",
+                   bytes[0], bytes[1], bytes[2]);
+        bpf_printk("quicport: data[3-5]=%02x %02x %02x\n",
+                   bytes[3], bytes[4], bytes[5]);
         /*
          * data[0] の解釈:
          * - 0xc0-0xff: QUIC Long Header (Initial, Handshake, 0-RTT, Retry)
