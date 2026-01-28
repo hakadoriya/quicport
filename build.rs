@@ -59,15 +59,9 @@ fn build_ebpf() {
 
     // eBPF デバッグモードの判定
     //
-    // 以下の条件でデバッグが有効化される:
-    // 1. 環境変数 QUICPORT_BPF_DEBUG=1 が設定されている
-    // 2. Rust のデバッグビルド (cargo build without --release)
-    //
-    // 使用例: QUICPORT_BPF_DEBUG=1 cargo build --release
-    let enable_bpf_debug = env::var("QUICPORT_BPF_DEBUG").is_ok();
-
-    #[cfg(debug_assertions)]
-    let enable_bpf_debug = true;
+    // debug ビルド (cargo build) → bpf_printk 有効
+    // release ビルド (cargo build --release) → bpf_printk 無効
+    let enable_bpf_debug = cfg!(debug_assertions);
 
     // clang 引数を構築
     let mut clang_args: Vec<&str> = vec![
@@ -82,9 +76,6 @@ fn build_ebpf() {
         clang_args.push("-DDEBUG");
         println!("cargo:warning=eBPF DEBUG mode enabled (bpf_printk active)");
     }
-
-    // 環境変数の変更を監視
-    println!("cargo:rerun-if-env-changed=QUICPORT_BPF_DEBUG");
 
     // SkeletonBuilder で BPF プログラムをビルド
     //

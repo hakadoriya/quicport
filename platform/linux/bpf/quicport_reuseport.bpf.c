@@ -216,7 +216,7 @@ extract_server_id(struct sk_reuseport_md *ctx, __u32 *server_id)
     if (data + 6 <= data_end) {
         __u8 *dbg_bytes = (__u8 *)data;
         __u16 dbg_udp_len = ((__u16)dbg_bytes[4] << 8) | dbg_bytes[5];
-        bpf_printk("quicport: UDP len field=%u, ctx->len=%u\\n",
+        bpf_printk("quicport: UDP len field=%u, ctx->len=%u\n",
                    (unsigned int)dbg_udp_len, ctx->len);
     }
 
@@ -224,14 +224,14 @@ extract_server_id(struct sk_reuseport_md *ctx, __u32 *server_id)
         /* Skip UDP header (8 bytes) to get to QUIC payload */
         data = data + UDP_HEADER_LEN;
 
-        bpf_printk("quicport: skipping UDP header (8 bytes)\\n");
+        bpf_printk("quicport: skipping UDP header (8 bytes)\n");
 
         /* Verify we still have data after skipping */
         if (data + 1 > data_end) {
             return -1;
         }
     } else {
-        bpf_printk("quicport: NOT UDP header, treating as QUIC directly\\n");
+        bpf_printk("quicport: NOT UDP header, treating as QUIC directly\n");
     }
 
     return extract_server_id_from_quic(data, data_end, server_id);
@@ -318,8 +318,7 @@ int quicport_select_socket(struct sk_reuseport_md *ctx)
             bpf_printk("quicport: unknown packet format, first_byte=0x%02x\n", bytes[0]);
         }
     } else {
-        bpf_printk("quicport: data too short for analysis, data_end-data=%ld\n",
-                   (long)(data_end - data));
+        bpf_printk("quicport: data too short for analysis, data_end-data=%ld\n", (long)(data_end - data));
     }
 
     /* Extract server_id from QUIC CID */
