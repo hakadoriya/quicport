@@ -54,21 +54,48 @@ struct {
 } socket_map SEC(".maps");
 
 /*
+ * Check if data points to UDP header instead of UDP payload
+ *
+ * SK_REUSEPORT の ctx->data は、カーネルバージョンによって:
+ * - UDP ペイロード（QUIC データ）を指す場合
+ * - UDP ヘッダーを指す場合
+ * がある。
+ *
+ * QUIC パケットでは、最初のバイトの bit 6 (0x40, "fixed bit") が
+ * 必ず 1 に設定されている。これを使って判断する。
+ *
+ * @param first_byte: データの最初のバイト
+ * @return: 1 if likely UDP header, 0 if likely QUIC data
+ */
+static __always_inline int
+is_udp_header(__u8 first_byte)
+{
+    /*
+     * QUIC パケットの "fixed bit" (bit 6) は必ず 1
+     * - Long Header:  0b1100xxxx (0xc0-0xff) - form=1, fixed=1
+     * - Short Header: 0b01xxxxxx (0x40-0x7f) - form=0, fixed=1
+     *
+     * UDP ヘッダーの最初のバイト（ソースポートの上位バイト）は
+     * 任意の値を取るため、bit 6 が 0 の場合は UDP ヘッダーの可能性が高い
+     */
+    return (first_byte & 0x40) == 0;
+}
+
+/*
  * Extract server_id from packet data
  *
  * This function reads the QUIC header and extracts the server_id
  * (first 4 bytes of Destination Connection ID).
  *
- * @param ctx: sk_reuseport_md context
+ * @param data: Pointer to QUIC packet data (after UDP header if needed)
+ * @param data_end: Pointer to end of packet data
  * @param server_id: Output pointer for server_id (in native byte order)
  *
  * @return: 0 on success, negative on error
  */
 static __always_inline int
-extract_server_id(struct sk_reuseport_md *ctx, __u32 *server_id)
+extract_server_id_from_quic(void *data, void *data_end, __u32 *server_id)
 {
-    void *data = (void *)(long)ctx->data;
-    void *data_end = (void *)(long)ctx->data_end;
     __u8 flags;
     __u32 cid_offset;
 
@@ -142,6 +169,56 @@ extract_server_id(struct sk_reuseport_md *ctx, __u32 *server_id)
                  ((__u32)cid[3]);
 
     return 0;
+}
+
+/*
+ * Extract server_id from sk_reuseport_md context
+ *
+ * This function handles the case where ctx->data may point to either:
+ * - UDP payload (QUIC data) - most common case
+ * - UDP header - happens on some kernel versions
+ *
+ * @param ctx: sk_reuseport_md context
+ * @param server_id: Output pointer for server_id
+ *
+ * @return: 0 on success, negative on error
+ */
+static __always_inline int
+extract_server_id(struct sk_reuseport_md *ctx, __u32 *server_id)
+{
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+
+    /* Need at least 1 byte to check header type */
+    if (data + 1 > data_end) {
+        return -1;
+    }
+
+    __u8 first_byte = *(__u8 *)data;
+
+    /*
+     * Check if data points to UDP header instead of QUIC payload
+     *
+     * QUIC packets always have the "fixed bit" (bit 6) set to 1:
+     * - Long Header:  0xc0-0xff (form=1, fixed=1)
+     * - Short Header: 0x40-0x7f (form=0, fixed=1)
+     *
+     * UDP header's first byte (source port high byte) can be any value,
+     * but if bit 6 is 0, it's likely UDP header, not QUIC.
+     */
+    if (is_udp_header(first_byte)) {
+        /* Skip UDP header (8 bytes) to get to QUIC payload */
+        data = data + UDP_HEADER_LEN;
+
+        bpf_printk("quicport: skipping UDP header (8 bytes)\\n");
+
+        /* Verify we still have data after skipping */
+        if (data + 1 > data_end) {
+            return -1;
+        }
+    }
+
+    return extract_server_id_from_quic(data, data_end, server_id);
 }
 
 /*

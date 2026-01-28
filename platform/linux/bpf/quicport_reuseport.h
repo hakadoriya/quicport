@@ -79,4 +79,20 @@
 #define QUIC_MIN_SHORT_HEADER_LEN  (1 + QUICPORT_CID_LEN)  /* 9 bytes */
 #define QUIC_MIN_LONG_HEADER_LEN   (6 + QUICPORT_CID_LEN)  /* 14 bytes */
 
+/*
+ * UDP Header size
+ *
+ * SK_REUSEPORT の ctx->data は UDP ヘッダーを指している場合がある。
+ * その場合、QUIC データにアクセスするには UDP ヘッダーをスキップする必要がある。
+ *
+ * UDP Header format:
+ *   +------------------+------------------+
+ *   | Source Port (2B) | Dest Port (2B)   |
+ *   +------------------+------------------+
+ *   | Length (2B)      | Checksum (2B)    |
+ *   +------------------+------------------+
+ *    0                 2                 4                 6                 8
+ */
+#define UDP_HEADER_LEN 8
+
 #endif /* __QUICPORT_REUSEPORT_H__ */
