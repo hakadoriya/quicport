@@ -211,6 +211,15 @@ extract_server_id(struct sk_reuseport_md *ctx, __u32 *server_id)
      * UDP length フィールド（オフセット 4-5）と ctx->len を比較して判断する。
      * 一致すれば UDP ヘッダーを指しているので、8 バイトスキップする。
      */
+
+    /* Debug: show UDP length field and ctx->len for comparison */
+    if (data + 6 <= data_end) {
+        __u8 *dbg_bytes = (__u8 *)data;
+        __u16 dbg_udp_len = ((__u16)dbg_bytes[4] << 8) | dbg_bytes[5];
+        bpf_printk("quicport: UDP len field=%u, ctx->len=%u\\n",
+                   (unsigned int)dbg_udp_len, ctx->len);
+    }
+
     if (is_udp_header(data, data_end, ctx->len)) {
         /* Skip UDP header (8 bytes) to get to QUIC payload */
         data = data + UDP_HEADER_LEN;
@@ -221,6 +230,8 @@ extract_server_id(struct sk_reuseport_md *ctx, __u32 *server_id)
         if (data + 1 > data_end) {
             return -1;
         }
+    } else {
+        bpf_printk("quicport: NOT UDP header, treating as QUIC directly\\n");
     }
 
     return extract_server_id_from_quic(data, data_end, server_id);
