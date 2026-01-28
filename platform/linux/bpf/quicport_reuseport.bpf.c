@@ -61,24 +61,40 @@ struct {
  * - UDP ヘッダーを指す場合
  * がある。
  *
- * QUIC パケットでは、最初のバイトの bit 6 (0x40, "fixed bit") が
- * 必ず 1 に設定されている。これを使って判断する。
+ * UDP ヘッダーの length フィールド（オフセット 4-5）と ctx->len を比較して判断する。
+ * UDP length = ヘッダー(8バイト) + ペイロードの長さ
+ * ctx->len が UDP length と一致する場合、ctx->data は UDP ヘッダーを指している。
  *
- * @param first_byte: データの最初のバイト
- * @return: 1 if likely UDP header, 0 if likely QUIC data
+ * UDP Header format:
+ *   +------------------+------------------+
+ *   | Source Port (2B) | Dest Port (2B)   |
+ *   +------------------+------------------+
+ *   | Length (2B)      | Checksum (2B)    |
+ *   +------------------+------------------+
+ *    0                 2                 4                 6                 8
+ *
+ * @param data: データの先頭ポインタ
+ * @param data_end: データの終端ポインタ
+ * @param ctx_len: ctx->len の値
+ * @return: 1 if UDP header, 0 if QUIC data
  */
 static __always_inline int
-is_udp_header(__u8 first_byte)
+is_udp_header(void *data, void *data_end, __u32 ctx_len)
 {
+    /* Need at least 6 bytes to read UDP length field */
+    if (data + 6 > data_end) {
+        return 0;
+    }
+
+    __u8 *bytes = (__u8 *)data;
+
     /*
-     * QUIC パケットの "fixed bit" (bit 6) は必ず 1
-     * - Long Header:  0b1100xxxx (0xc0-0xff) - form=1, fixed=1
-     * - Short Header: 0b01xxxxxx (0x40-0x7f) - form=0, fixed=1
-     *
-     * UDP ヘッダーの最初のバイト（ソースポートの上位バイト）は
-     * 任意の値を取るため、bit 6 が 0 の場合は UDP ヘッダーの可能性が高い
+     * UDP length is at offset 4-5 (big endian)
+     * If UDP length matches ctx->len, this is UDP header
      */
-    return (first_byte & 0x40) == 0;
+    __u16 udp_len = ((__u16)bytes[4] << 8) | bytes[5];
+
+    return udp_len == ctx_len;
 }
 
 /*
@@ -189,24 +205,13 @@ extract_server_id(struct sk_reuseport_md *ctx, __u32 *server_id)
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
 
-    /* Need at least 1 byte to check header type */
-    if (data + 1 > data_end) {
-        return -1;
-    }
-
-    __u8 first_byte = *(__u8 *)data;
-
     /*
      * Check if data points to UDP header instead of QUIC payload
      *
-     * QUIC packets always have the "fixed bit" (bit 6) set to 1:
-     * - Long Header:  0xc0-0xff (form=1, fixed=1)
-     * - Short Header: 0x40-0x7f (form=0, fixed=1)
-     *
-     * UDP header's first byte (source port high byte) can be any value,
-     * but if bit 6 is 0, it's likely UDP header, not QUIC.
+     * UDP length フィールド（オフセット 4-5）と ctx->len を比較して判断する。
+     * 一致すれば UDP ヘッダーを指しているので、8 バイトスキップする。
      */
-    if (is_udp_header(first_byte)) {
+    if (is_udp_header(data, data_end, ctx->len)) {
         /* Skip UDP header (8 bytes) to get to QUIC payload */
         data = data + UDP_HEADER_LEN;
 
