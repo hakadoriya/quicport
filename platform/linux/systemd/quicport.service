@@ -8,8 +8,13 @@ Wants=network-online.target
 Type=exec
 # NOTE: systemd-run --scope を使用するため root で実行
 # data-plane を別 cgroup に起動するには root 権限が必要
+# Create a group and user for the service
+# $ sudo groupadd --system quicport
+# $ sudo useradd --system --gid quicport --shell /usr/sbin/nologin --create-home --home-dir /var/lib/quicport --comment "quicport service user" quicport
+User=quicport
+Group=quicport
 
-# NOTE: eBPF ルーティング用の capabilities (--features ebpf でビルド時に必要)
+# NOTE: eBPF ルーティング用の capabilities
 # - CAP_BPF: eBPF プログラムのロード
 # - CAP_NET_ADMIN: ソケットへのプログラムアタッチ
 # - CAP_SYS_ADMIN: BPF マップのピン留め (/sys/fs/bpf/)
