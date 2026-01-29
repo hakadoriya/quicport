@@ -559,21 +559,15 @@ STARTING --> ACTIVE --> DRAINING --> TERMINATED
 │                                                                     │
 │  Data Plane                       Control Plane                     │
 │       │                               │                             │
-│       │ ──POST /RegisterDataPlane───> │ (起動時)                    │
+│       │ ──POST /dp/SendStatus───────> │ (初回=登録 / 以降=状態更新) │
 │       │ <─── { dp_id, auth_policy } ─ │                             │
 │       │                               │                             │
-│       │ ──POST /PollCommands────────> │ (長ポーリング)              │
+│       │ ──POST /dp/ReceiveCommand───> │ (長ポーリング)              │
 │       │ <─── { commands: [...] } ──── │                             │
 │       │                               │                             │
-│       │ ──POST /AckCommand──────────> │ (コマンド応答)              │
-│       │ <─── { acknowledged } ──────  │                             │
-│       │                               │                             │
-│       │ ──POST /ReportEvent─────────> │ (接続イベント)              │
-│       │ <─── { acknowledged } ──────  │                             │
-│                                                                     │
 │  CLI / 外部                                                         │
 │       │                               │                             │
-│       │ ──POST /DrainDataPlane──────> │ (管理操作)                  │
+│       │ ──POST /admin/DrainDataPlane> │ (管理操作)                  │
 │       │ <─── { status: draining } ─── │                             │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -600,32 +594,32 @@ data-plane は control-plane が再起動した場合、自動的に新しい co
 ```
 data-plane                    旧 control-plane              新 control-plane
      |                              |                              |
-     |-- PollCommands ------------->|                              |
+     |-- ReceiveCommand ---------->|                              |
      |                              |                              |
      |                              X (cp 終了)                    |
      |                              |                              |
-     |-- PollCommands ----------->  X (接続エラー)                 |
+     |-- ReceiveCommand -------->  X (接続エラー)                 |
      |                              |                              |
      |   (リトライ)                  |                              |
      |                              |                              |
      |                              |                      新 cp 起動
      |                              |                              |
-     |-- PollCommands -------------X---------------------->|       |
+     |-- ReceiveCommand ----------X---------------------->|       |
      |   (404 NOT_FOUND)            |                      |       |
      |                              |                      |       |
-     |-- RegisterDataPlane ------------------------------>|       |
+     |-- SendStatus (初回登録) ------------------------------>|    |
      |<-- { dp_id, auth_policy } --------------------------       |
      |                              |                              |
-     |-- ReportEvent (Status) ---------------------------------->|
+     |-- SendStatus (状態更新) ---------------------------------->|
      |   (現在の状態を報告)           |                              |
      |                              |                              |
-     |-- PollCommands (継続) ---------------------------------->|
+     |-- ReceiveCommand (継続) ---------------------------------->|
      |                              |                              |
 ```
 
 **動作詳細:**
 
-1. data-plane は PollCommands で control-plane からコマンドを取得
+1. data-plane は ReceiveCommand で control-plane からコマンドを取得
 2. control-plane が終了すると、接続エラーまたは 404 NOT_FOUND が返る
 3. 404 NOT_FOUND を検出した場合、data-plane は自動的に再登録を試行
 4. 再登録成功後、現在の状態（ACTIVE または DRAINING）を Status イベントで報告
@@ -1417,16 +1411,30 @@ quicport_auth_x25519_failed_total 2
 コントロールプレーンとデータプレーン間の通信に使用する HTTP IPC エンドポイントです。
 すべてのエンドポイントは POST メソッドを使用する RPC ライクな設計です。
 
-#### POST /api/v1/RegisterDataPlane
+#### DP 用 API
 
-データプレーンの登録と認証ポリシーの取得。
+##### POST /api/v1/dp/SendStatus
+
+状態送信（登録・更新・コマンド応答すべて統合）。
+毎回全状態を冪等に送信することで、CP 再起動後も状態を復旧可能。
+
+- 初回呼び出し: DP 登録（auth_policy と config がレスポンスに含まれる）
+- 以降の呼び出し: 状態更新 + コマンド応答
 
 **リクエスト:**
 
 ```json
 {
+  "dp_id": "0x3039",
   "pid": 12345,
-  "listen_addr": "0.0.0.0:39000"
+  "listen_addr": "0.0.0.0:39000",
+  "state": "ACTIVE",
+  "active_connections": 5,
+  "bytes_sent": 1024,
+  "bytes_received": 2048,
+  "started_at": 1234567890,
+  "ack_cmd_id": "cmd_001",
+  "ack_status": "completed"
 }
 ```
 
@@ -1434,27 +1442,28 @@ quicport_auth_x25519_failed_total 2
 
 ```json
 {
-  "dp_id": "dp_12345",
+  "dp_id": "0x3039",
   "auth_policy": {
     "type": "psk",
     "psk": "secret"
   },
   "config": {
+    "listen_addr": "0.0.0.0:39000",
     "drain_timeout": 0,
     "idle_connection_timeout": 300
   }
 }
 ```
 
-#### POST /api/v1/PollCommands
+##### POST /api/v1/dp/ReceiveCommand
 
-コマンドの長ポーリング取得（30 秒タイムアウト）。
+コマンドの長ポーリング取得（デフォルト 30 秒タイムアウト）。
 
 **リクエスト:**
 
 ```json
 {
-  "dp_id": "dp_12345",
+  "dp_id": "0x3039",
   "wait_timeout_secs": 30
 }
 ```
@@ -1466,74 +1475,20 @@ quicport_auth_x25519_failed_total 2
   "commands": [
     {
       "id": "cmd_001",
-      "command": {
-        "type": "Drain"
-      }
+      "type": "Drain"
     },
     {
       "id": "cmd_002",
-      "command": {
-        "type": "SetConfig",
-        "drain_timeout": 60
-      }
+      "type": "SetConfig",
+      "drain_timeout": 60
     }
   ]
 }
 ```
 
-#### POST /api/v1/AckCommand
+#### 管理用 API
 
-コマンド実行結果の応答。
-
-**リクエスト:**
-
-```json
-{
-  "dp_id": "dp_12345",
-  "cmd_id": "cmd_001",
-  "status": "completed",
-  "result": {
-    "state": "DRAINING",
-    "active_connections": 5
-  }
-}
-```
-
-**レスポンス:**
-
-```json
-{
-  "acknowledged": true
-}
-```
-
-#### POST /api/v1/ReportEvent
-
-接続イベントの報告。
-
-**リクエスト:**
-
-```json
-{
-  "dp_id": "dp_12345",
-  "event": {
-    "type": "ConnectionClosed",
-    "connection_id": 42,
-    "bytes_sent": 1024,
-    "bytes_received": 2048
-  }
-}
-```
-
-**レスポンス:**
-
-```json
-{
-  "acknowledged": true
-}
-```
-
-#### POST /api/v1/ListDataPlanes
+##### POST /api/v1/admin/ListDataPlanes
 
 全データプレーンの一覧を取得。
 
@@ -1549,7 +1504,7 @@ quicport_auth_x25519_failed_total 2
 {
   "dataplanes": [
     {
-      "dp_id": "dp_12345",
+      "dp_id": "0x3039",
       "pid": 12345,
       "state": "ACTIVE",
       "active_connections": 5,
@@ -1560,7 +1515,7 @@ quicport_auth_x25519_failed_total 2
 }
 ```
 
-#### POST /api/v1/GetDataPlaneStatus
+##### POST /api/v1/admin/GetDataPlaneStatus
 
 特定データプレーンの詳細状態を取得。
 
@@ -1568,7 +1523,7 @@ quicport_auth_x25519_failed_total 2
 
 ```json
 {
-  "dp_id": "dp_12345"
+  "dp_id": "0x3039"
 }
 ```
 
@@ -1576,7 +1531,7 @@ quicport_auth_x25519_failed_total 2
 
 ```json
 {
-  "dp_id": "dp_12345",
+  "dp_id": "0x3039",
   "pid": 12345,
   "state": "ACTIVE",
   "active_connections": 5,
@@ -1586,7 +1541,7 @@ quicport_auth_x25519_failed_total 2
 }
 ```
 
-#### POST /api/v1/DrainDataPlane
+##### POST /api/v1/admin/DrainDataPlane
 
 データプレーンをドレイン状態に移行。
 
@@ -1594,7 +1549,7 @@ quicport_auth_x25519_failed_total 2
 
 ```json
 {
-  "dp_id": "dp_12345"
+  "dp_id": "0x3039"
 }
 ```
 
@@ -1606,7 +1561,7 @@ quicport_auth_x25519_failed_total 2
 }
 ```
 
-#### POST /api/v1/ShutdownDataPlane
+##### POST /api/v1/admin/ShutdownDataPlane
 
 データプレーンをシャットダウン。
 
@@ -1614,7 +1569,7 @@ quicport_auth_x25519_failed_total 2
 
 ```json
 {
-  "dp_id": "dp_12345"
+  "dp_id": "0x3039"
 }
 ```
 
@@ -1626,7 +1581,7 @@ quicport_auth_x25519_failed_total 2
 }
 ```
 
-#### POST /api/v1/GetConnections
+##### POST /api/v1/admin/GetConnections
 
 特定データプレーンの接続一覧を取得。
 
@@ -1634,7 +1589,7 @@ quicport_auth_x25519_failed_total 2
 
 ```json
 {
-  "dp_id": "dp_12345"
+  "dp_id": "0x3039"
 }
 ```
 
@@ -1658,24 +1613,24 @@ quicport_auth_x25519_failed_total 2
 
 ```bash
 # データプレーン一覧確認
-curl -X POST http://127.0.0.1:39000/api/v1/ListDataPlanes \
+curl -X POST http://127.0.0.1:39000/api/v1/admin/ListDataPlanes \
   -H "Content-Type: application/json" \
   -d '{}'
 
 # 特定データプレーンの状態確認
-curl -X POST http://127.0.0.1:39000/api/v1/GetDataPlaneStatus \
+curl -X POST http://127.0.0.1:39000/api/v1/admin/GetDataPlaneStatus \
   -H "Content-Type: application/json" \
-  -d '{"dp_id": "dp_12345"}'
+  -d '{"dp_id": "0x3039"}'
 
 # データプレーンをドレイン
-curl -X POST http://127.0.0.1:39000/api/v1/DrainDataPlane \
+curl -X POST http://127.0.0.1:39000/api/v1/admin/DrainDataPlane \
   -H "Content-Type: application/json" \
-  -d '{"dp_id": "dp_12345"}'
+  -d '{"dp_id": "0x3039"}'
 
 # 接続一覧
-curl -X POST http://127.0.0.1:39000/api/v1/GetConnections \
+curl -X POST http://127.0.0.1:39000/api/v1/admin/GetConnections \
   -H "Content-Type: application/json" \
-  -d '{"dp_id": "dp_12345"}'
+  -d '{"dp_id": "0x3039"}'
 ```
 
 ## 技術スタック
