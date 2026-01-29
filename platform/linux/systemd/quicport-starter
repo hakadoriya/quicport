@@ -40,8 +40,8 @@ LogshExecJSON() { LogshInfoJSON "$ $(_logshCmd "$@")" && "$@"; }
 
 # Configuration (overridable by environment variables)
 QUICPORT_BIN="${QUICPORT_BIN:-quicport}"
-QUICPORT_LISTEN_ADDR="${QUICPORT_LISTEN_ADDR:-0.0.0.0:39000}"
-QUICPORT_CP_ADDR="${QUICPORT_CP_ADDR:-127.0.0.1:39000}"
+QUICPORT_DP_ADDR="${QUICPORT_DP_ADDR:-0.0.0.0:39000}"
+QUICPORT_CP_ADDR="${QUICPORT_CP_ADDR:-localhost:39000}"
 # HTTP IPC URL (derived from CP_ADDR, can be overridden)
 QUICPORT_CP_URL="${QUICPORT_CP_URL:-http://${QUICPORT_CP_ADDR}}"
 QUICPORT_LOG_DIR="${QUICPORT_LOG_DIR:-/var/log/quicport}"
@@ -79,7 +79,7 @@ fi
 
 LogshInfoJSON "[${PROGRAM_NAME}] Starting data-plane in separate cgroup..."
 LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_BIN=${QUICPORT_BIN}"
-LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_LISTEN_ADDR=${QUICPORT_LISTEN_ADDR}"
+LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_DP_ADDR=${QUICPORT_DP_ADDR}"
 LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_CP_URL=${QUICPORT_CP_URL}"
 
 ## data-plane is started in a separate cgroup by systemd-run
@@ -96,7 +96,7 @@ LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_CP_URL=${QUICPORT_CP_URL}"
 #  "${QUICPORT_BIN}" \
 #  --log-format json \
 #  data-plane \
-#  --listen "${QUICPORT_LISTEN_ADDR}" \
+#  --listen "${QUICPORT_DP_ADDR}" \
 #  --control-plane-url "${QUICPORT_CP_URL}" \
 #  &
 #
@@ -113,5 +113,6 @@ LogshExecJSON exec "${QUICPORT_BIN}" \
   --log-format json \
   control-plane \
   --control-plane-addr "${QUICPORT_CP_ADDR}" \
+  --data-plane-addr "${QUICPORT_DP_ADDR}" \
   --no-auto-dataplane \
   "${QUICPORT_AUTH_ARGS[@]}"

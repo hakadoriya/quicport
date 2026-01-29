@@ -40,10 +40,11 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     let listen: SocketAddr = "0.0.0.0:39000".parse()?;
+//!     let cp_addr: SocketAddr = "localhost:39000".parse()?;
+//!     let dp_addr: SocketAddr = "0.0.0.0:39000".parse()?;
 //!     let auth_policy = AuthPolicy::Psk { psk: "secret".to_string() };
 //!     let statistics = Arc::new(ServerStatistics::new());
-//!     control_plane::run_with_api(listen, auth_policy, statistics, None, false).await
+//!     control_plane::run_with_api(cp_addr, dp_addr, auth_policy, statistics, None, false).await
 //! }
 //! ```
 //!

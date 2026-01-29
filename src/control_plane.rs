@@ -25,8 +25,10 @@ use crate::statistics::ServerStatistics;
 
 /// コントロールプレーン
 pub struct ControlPlane {
-    /// QUIC リッスンアドレス
-    listen_addr: SocketAddr,
+    /// コントロールプレーン HTTP IPC アドレス
+    cp_addr: SocketAddr,
+    /// データプレーン QUIC リッスンアドレス
+    dp_listen_addr: SocketAddr,
     /// 認証ポリシー
     auth_policy: AuthPolicy,
     /// データプレーン設定
@@ -44,7 +46,8 @@ pub struct ControlPlane {
 impl ControlPlane {
     /// 新しいコントロールプレーンを作成
     pub fn new(
-        listen_addr: SocketAddr,
+        cp_addr: SocketAddr,
+        dp_listen_addr: SocketAddr,
         auth_policy: AuthPolicy,
         statistics: Arc<ServerStatistics>,
         http_ipc: Arc<HttpIpcState>,
@@ -53,12 +56,13 @@ impl ControlPlane {
             std::env::current_exe().context("Failed to get current executable path")?;
 
         let dp_config = DataPlaneConfig {
-            listen_addr,
+            listen_addr: dp_listen_addr,
             ..Default::default()
         };
 
         Ok(Arc::new(Self {
-            listen_addr,
+            cp_addr,
+            dp_listen_addr,
             auth_policy,
             dp_config,
             statistics,
@@ -102,13 +106,13 @@ impl ControlPlane {
             let mut cmd = Command::new(&self.executable_path);
             cmd.arg("data-plane")
                 .arg("--listen")
-                .arg(self.listen_addr.to_string())
+                .arg(self.dp_listen_addr.to_string())
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::inherit());
 
             // HTTP IPC: --control-plane-url を使用
-            let cp_url = format!("http://127.0.0.1:{}", self.listen_addr.port());
+            let cp_url = format!("http://127.0.0.1:{}", self.cp_addr.port());
             cmd.arg("--control-plane-url").arg(&cp_url);
             info!("Data plane will connect to control plane at {}", cp_url);
 
@@ -352,7 +356,8 @@ pub struct ApiConfig {
 
 /// コントロールプレーンを起動（API サーバー付き、HTTP IPC モード）
 pub async fn run_with_api(
-    listen_addr: SocketAddr,
+    cp_addr: SocketAddr,
+    dp_listen_addr: SocketAddr,
     auth_policy: AuthPolicy,
     statistics: Arc<ServerStatistics>,
     api_config: Option<ApiConfig>,
@@ -365,7 +370,7 @@ pub async fn run_with_api(
     *http_ipc.auth_policy.write().await = Some(auth_policy.clone());
     {
         let mut config = http_ipc.dp_config.write().await;
-        config.listen_addr = listen_addr;
+        config.listen_addr = dp_listen_addr;
     }
 
     // Private API がない場合は HTTP IPC を使用できないため、
@@ -382,12 +387,13 @@ pub async fn run_with_api(
         // Private API がない場合は内部的に HTTP IPC サーバーを起動
         Some(SocketAddr::new(
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            listen_addr.port(),
+            cp_addr.port(),
         ))
     };
 
     let control_plane = ControlPlane::new(
-        listen_addr,
+        cp_addr,
+        dp_listen_addr,
         auth_policy,
         statistics.clone(),
         http_ipc.clone(),

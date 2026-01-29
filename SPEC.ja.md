@@ -48,20 +48,21 @@
 quicport --log-format json server --listen 0.0.0.0:9000
 
 # 環境変数で指定
-QUICPORT_LOG_FORMAT=json quicport control-plane --control-plane-addr 0.0.0.0:9000
+QUICPORT_LOG_FORMAT=json quicport control-plane --control-plane-addr localhost:9000 --data-plane-addr 0.0.0.0:9000
 ```
 
 ### コントロールプレーンモード (control-plane)
 
 ```bash
-quicport control-plane --control-plane-addr <bind_address>:<port> --privkey <server_private_key> --client-pubkeys <authorized_public_keys>
+quicport control-plane --control-plane-addr <cp_address>:<port> --data-plane-addr <dp_address>:<port> --privkey <server_private_key> --client-pubkeys <authorized_public_keys>
 ```
 
 **オプション:**
 
 | オプション | 必須 | 説明 |
 |-----------|------|------|
-| `--control-plane-addr` | No | QUIC コネクションを待ち受けるアドレスとポート（デフォルト: `0.0.0.0:39000`） |
+| `--control-plane-addr` | No | コントロールプレーン HTTP IPC サーバーのアドレスとポート（デフォルト: `localhost:39000`） |
+| `--data-plane-addr` | No | データプレーン QUIC リッスンアドレスとポート（デフォルト: `0.0.0.0:39000`） |
 | `--private-api-listen` | No | Private API サーバーのアドレスとポート（デフォルト: `127.0.0.1:<listen_port>`） |
 | `--no-private-api` | No | Private API サーバーを無効化 |
 | `--no-public-api` | No | Public API サーバーを無効化 |
@@ -82,17 +83,17 @@ quicport control-plane --control-plane-addr <bind_address>:<port> --privkey <ser
 
 ```bash
 # 相互認証（サーバー秘密鍵 + クライアント公開鍵）
-quicport control-plane --control-plane-addr 0.0.0.0:9000 \
+quicport control-plane --data-plane-addr 0.0.0.0:9000 \
   --privkey "8JWfeRFI8New0ie+oUTNKDyaHMJOk+EAq4w3wG8HR3U=" \
   --client-pubkeys "IexqQqW8ngM33aoJWqheXfW+11hL6A3h6kpO8uNl9Ws="
 
 # ファイルから読み込み
-quicport control-plane --control-plane-addr 0.0.0.0:9000 \
+quicport control-plane --data-plane-addr 0.0.0.0:9000 \
   --privkey-file /etc/quicport/server.key \
   --client-pubkeys-file /etc/quicport/authorized_keys
 
 # 複数のクライアント公開鍵を指定（カンマ区切り）
-quicport control-plane --control-plane-addr 0.0.0.0:9000 \
+quicport control-plane --data-plane-addr 0.0.0.0:9000 \
   --privkey "SERVER_PRIVATE_KEY" \
   --client-pubkeys "key1,key2,key3"
 ```
@@ -378,19 +379,20 @@ quicport はサーバー再起動時の接続維持を実現するため、デ�
 #!/bin/bash
 # quicport-starter スクリプト概要
 # 設定例:
-#   QUICPORT_LISTEN_ADDR=0.0.0.0:39000  # QUIC リッスンアドレス
-#   QUICPORT_CP_ADDR=127.0.0.1:39000     # CP Private API アドレス
+#   QUICPORT_DP_ADDR=0.0.0.0:39000       # DP QUIC リッスンアドレス
+#   QUICPORT_CP_ADDR=localhost:39000      # CP HTTP IPC アドレス
 #   QUICPORT_CP_URL=http://127.0.0.1:39000
 
 # 1. データプレーンを別 cgroup で起動（HTTP IPC モード）
 systemd-run --slice=user.slice --unit="quicport-dp-$$.service" \
   quicport data-plane \
-    --listen "${QUICPORT_LISTEN_ADDR}" \
+    --listen "${QUICPORT_DP_ADDR}" \
     --control-plane-url "${QUICPORT_CP_URL}"
 
 # 2. コントロールプレーンを起動（PID を引き継ぎ）
 exec quicport control-plane \
-  --listen "${QUICPORT_CP_ADDR}" \
+  --control-plane-addr "${QUICPORT_CP_ADDR}" \
+  --data-plane-addr "${QUICPORT_DP_ADDR}" \
   ...
 ```
 
@@ -1309,7 +1311,7 @@ IPv6 アドレスを正しく扱うための設計:
 
 localhost からのみアクセス可能な管理用 API です。
 
-- **リッスンアドレス**: `127.0.0.1:<listen_port>`（QUIC と同じポート番号、TCP）
+- **リッスンアドレス**: `127.0.0.1:<control_plane_addr_port>`（CP と同じポート番号、TCP）
 - **無効化**: `--no-private-api`
 - **カスタムアドレス**: `--private-api-listen`
 
@@ -1331,7 +1333,7 @@ localhost からのみアクセス可能な管理用 API です。
 
 インターネットからアクセス可能なヘルスチェック専用 API です。
 
-- **リッスンアドレス**: `0.0.0.0:<listen_port + 1>`（QUIC ポート + 1、TCP）
+- **リッスンアドレス**: `<data_plane_addr_ip>:<data_plane_addr_port + 1>`（DP ポート + 1、TCP）
 - **無効化**: `--no-public-api`
 
 | エンドポイント | メソッド | 説明 |
