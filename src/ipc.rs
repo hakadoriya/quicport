@@ -326,6 +326,14 @@ pub struct DataPlaneConfig {
     /// Linux + ebpf feature が必要です。
     #[serde(default)]
     pub enable_ebpf_routing: bool,
+
+    /// stale データプレーンの検出タイムアウト（秒）
+    ///
+    /// CP のバックグラウンドタスクが DP の `last_active` をチェックし、
+    /// この値を超過した DP を stale と判定して eBPF map エントリを削除する。
+    /// SendStatus の送信間隔（デフォルト 30 秒）より十分大きくする必要がある。
+    #[serde(default = "default_stale_dp_timeout")]
+    pub stale_dp_timeout: u64,
 }
 
 fn default_drain_timeout() -> u64 {
@@ -336,6 +344,10 @@ fn default_idle_connection_timeout() -> u64 {
     3600 // 1 hour
 }
 
+fn default_stale_dp_timeout() -> u64 {
+    300 // 5 minutes
+}
+
 impl Default for DataPlaneConfig {
     fn default() -> Self {
         Self {
@@ -344,6 +356,7 @@ impl Default for DataPlaneConfig {
             idle_connection_timeout: default_idle_connection_timeout(),
             server_id: None,
             enable_ebpf_routing: false,
+            stale_dp_timeout: default_stale_dp_timeout(),
         }
     }
 }
