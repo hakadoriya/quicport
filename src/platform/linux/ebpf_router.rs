@@ -573,6 +573,60 @@ impl EbpfRouter {
         Ok(())
     }
 
+    /// デフォルト ACTIVE DP を登録 (key=0)
+    ///
+    /// ACTIVE な DP のソケットを socket_map の key=0 に登録します。
+    /// eBPF プログラムが server_id ルックアップに失敗した際の fallback 先として使用されます。
+    /// `MapFlags::ANY` で常に上書きするため、新しい ACTIVE DP が起動すると自動的に切り替わります。
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - ACTIVE DP の UDP ソケット
+    pub fn register_default_active(&mut self, socket: &UdpSocket) -> Result<()> {
+        let sock_fd = socket.as_raw_fd();
+        let local_addr = socket.local_addr();
+        info!(
+            "Registering default active DP (key=0) with socket fd={}, local_addr={:?}",
+            sock_fd, local_addr
+        );
+
+        let key = 0u32.to_ne_bytes();
+        let value = (sock_fd as u64).to_ne_bytes();
+
+        self.skel
+            .maps
+            .socket_map
+            .update(&key, &value, MapFlags::ANY)
+            .with_context(|| {
+                format!(
+                    "Failed to register default active DP (key=0) in socket_map. sock_fd={}, local_addr={:?}",
+                    sock_fd, local_addr
+                )
+            })?;
+
+        info!(
+            "Registered default active DP (key=0) in REUSEPORT_SOCKARRAY: sock_fd={}, local_addr={:?}",
+            sock_fd, local_addr
+        );
+        Ok(())
+    }
+
+    /// デフォルト ACTIVE DP の登録を解除 (key=0)
+    ///
+    /// key=0 のエントリを socket_map から削除します。
+    pub fn unregister_default_active(&mut self) -> Result<()> {
+        let key = 0u32.to_ne_bytes();
+
+        self.skel
+            .maps
+            .socket_map
+            .delete(&key)
+            .with_context(|| "Failed to unregister default active DP (key=0) from socket_map")?;
+
+        debug!("Unregistered default active DP (key=0)");
+        Ok(())
+    }
+
     /// サーバーの登録を解除
     ///
     /// Data Plane が終了する際に呼び出し、マップからエントリを削除します。
@@ -631,6 +685,22 @@ impl Drop for EbpfRouter {
                         server_id, e
                     );
                 }
+            }
+        }
+
+        // key=0（デフォルト ACTIVE DP）も削除する
+        // DP プロセス終了後はソケットが無効になるため、key=0 が stale エントリになる
+        // 新しい DP が起動すれば再度 key=0 を登録する
+        let default_key = 0u32.to_ne_bytes();
+        match self.skel.maps.socket_map.delete(&default_key) {
+            Ok(()) => {
+                debug!("Deleted default active DP (key=0) from socket_map");
+            }
+            Err(e) => {
+                debug!(
+                    "Failed to delete default active DP (key=0) from socket_map: {}",
+                    e
+                );
             }
         }
 

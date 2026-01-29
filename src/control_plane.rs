@@ -341,6 +341,39 @@ impl ControlPlane {
                 if !entries_to_remove.is_empty() {
                     self.http_ipc.remove_dataplanes(&entries_to_remove).await;
                 }
+
+                // ACTIVE な DP が 1 つも存在しない場合、key=0（デフォルト ACTIVE DP）も削除
+                // key=0 が stale なソケットを指し続けることを防ぐ
+                #[cfg(target_os = "linux")]
+                {
+                    use crate::ipc::DataPlaneState;
+                    use std::path::Path;
+
+                    let dataplanes = self.http_ipc.dataplanes.read().await;
+                    let has_active_dp = dataplanes
+                        .values()
+                        .any(|dp| dp.state == DataPlaneState::Active);
+
+                    if !has_active_dp {
+                        let ebpf_pin_path = Path::new("/sys/fs/bpf/quicport");
+                        match crate::platform::linux::ebpf_router::cleanup_stale_entry(
+                            ebpf_pin_path,
+                            0, // key=0: デフォルト ACTIVE DP
+                        ) {
+                            Ok(()) => {
+                                info!(
+                                    "Cleaned up default active DP (key=0) from eBPF map (no ACTIVE DP exists)"
+                                );
+                            }
+                            Err(e) => {
+                                debug!(
+                                    "Failed to cleanup default active DP (key=0): {} (may already be removed)",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
             }
         });
     }
