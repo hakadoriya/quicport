@@ -131,29 +131,35 @@ impl ControlPlane {
             // プロセスが起動するまで少し待つ
             tokio::time::sleep(Duration::from_millis(500)).await;
 
-            // データプレーンの登録を待つ
+            // データプレーンの登録を待つ（PID で検索）
+            // DP は自ら dp_id を採番し hex 形式（例: "0x3039"）で CP に登録するため、
+            // PID をキーにして dataplanes マップから登録済みの DP を検索する
             let mut retries = 0;
             let max_retries = 20; // 10秒
-            let dp_id = format!("dp_{}", pid);
             loop {
                 {
                     let dataplanes = self.http_ipc.dataplanes.read().await;
-                    if dataplanes.contains_key(&dp_id) {
-                        info!("Data plane {} registered via HTTP IPC", dp_id);
+                    if let Some((dp_id, _)) =
+                        dataplanes.iter().find(|(_, dp)| dp.pid == pid)
+                    {
+                        info!(
+                            "Data plane {} (PID={}) registered via HTTP IPC",
+                            dp_id, pid
+                        );
                         return Ok(pid);
                     }
                 }
                 retries += 1;
                 if retries >= max_retries {
                     return Err(anyhow::anyhow!(
-                        "Data plane {} did not register within {} retries",
-                        dp_id,
+                        "Data plane (PID={}) did not register within {} retries",
+                        pid,
                         max_retries
                     ));
                 }
                 debug!(
-                    "Waiting for data plane {} to register (attempt {}/{})",
-                    dp_id, retries, max_retries
+                    "Waiting for data plane (PID={}) to register (attempt {}/{})",
+                    pid, retries, max_retries
                 );
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
