@@ -238,6 +238,33 @@ extract_server_id(struct sk_reuseport_md *ctx, __u32 *server_id)
 }
 
 /*
+ * Fallback to default active DP (key=0)
+ *
+ * socket_map の key=0 は「デフォルト ACTIVE DP」として予約されている。
+ * server_id の抽出やソケット選択に失敗した場合、key=0 で再ルックアップすることで
+ * 新規コネクション（Initial パケット等）を ACTIVE な DP にルーティングする。
+ *
+ * key=0 にエントリがない場合はカーネルデフォルト（ハッシュベース分散）にフォールスルーする。
+ *
+ * @param ctx: sk_reuseport_md context
+ * @return: SK_PASS
+ */
+static __always_inline int
+fallback_to_default_active(struct sk_reuseport_md *ctx)
+{
+    __u32 default_key = 0;
+    long ret;
+
+    ret = bpf_sk_select_reuseport(ctx, &socket_map, &default_key, 0);
+    if (ret < 0) {
+        bpf_printk("quicport: no default active DP (key=0), using kernel routing\n");
+        return SK_PASS;
+    }
+    bpf_printk("quicport: routed to default active DP (key=0)\n");
+    return SK_PASS;
+}
+
+/*
  * SK_REUSEPORT program entry point
  *
  * Called by the kernel when a UDP packet arrives on a SO_REUSEPORT socket group.
@@ -325,13 +352,15 @@ int quicport_select_socket(struct sk_reuseport_md *ctx)
     if (extract_server_id(ctx, &server_id) < 0) {
         /*
          * Failed to extract server_id - packet might not be QUIC
-         * or uses a different CID format.
+         * or uses a different CID format (e.g., Initial packet with
+         * client-generated random CID).
          *
-         * Fall through to kernel's default SO_REUSEPORT behavior
-         * which typically uses consistent hashing on the 4-tuple.
+         * Fallback to default active DP (key=0) to route new connections
+         * to the ACTIVE DP instead of relying on kernel hash-based routing
+         * which might send to a DRAINING DP.
          */
-        bpf_printk("quicport: failed to extract server_id, using default routing\n");
-        return SK_PASS;
+        bpf_printk("quicport: failed to extract server_id, trying default active DP\n");
+        return fallback_to_default_active(ctx);
     }
 
     bpf_printk("quicport: extracted server_id=%u\n", server_id);
@@ -342,8 +371,8 @@ int quicport_select_socket(struct sk_reuseport_md *ctx)
      * bpf_sk_select_reuseport() looks up the socket in the map
      * and assigns it to handle this packet.
      *
-     * If the lookup fails (server_id not registered), the helper
-     * returns an error and we fall through to default routing.
+     * If the lookup fails (server_id not registered), we fallback
+     * to the default active DP (key=0).
      */
     ret = bpf_sk_select_reuseport(ctx, &socket_map, &server_id, 0);
     if (ret < 0) {
@@ -355,10 +384,10 @@ int quicport_select_socket(struct sk_reuseport_md *ctx)
          * - CID was generated before any Data Plane registered
          * - Map was reset/corrupted
          *
-         * Fall back to kernel default routing.
+         * Fallback to default active DP (key=0).
          */
-        bpf_printk("quicport: server_id=%u not found, using default routing\n", server_id);
-        return SK_PASS;
+        bpf_printk("quicport: server_id=%u not found, trying default active DP\n", server_id);
+        return fallback_to_default_active(ctx);
     }
 
     bpf_printk("quicport: routed to server_id=%u\n", server_id);

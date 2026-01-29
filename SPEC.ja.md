@@ -528,6 +528,35 @@ STARTING --> ACTIVE --> DRAINING --> TERMINATED
 - Connection ID フォーマット: `[server_id: 4B][counter: 4B]` (8 bytes, Big Endian)
 - マップとプログラムは `/sys/fs/bpf/quicport/` にピン留めされ、graceful restart 時に新旧プロセス間で共有される
 
+##### デフォルト ACTIVE DP ルーティング (key=0)
+
+新規 QUIC コネクション（Initial パケット）の Destination CID はクライアントが生成したランダム値であるため、eBPF の `server_id` ルックアップが失敗する。この場合、カーネルの SO_REUSEPORT デフォルト（ハッシュベース分散）にフォールスルーすると、DRAINING な DP にも新規接続が届く可能性がある。
+
+これを防ぐため、`socket_map` の **key=0 をデフォルト ACTIVE DP エントリ**として使用する:
+
+**key=0 fallback が適用されるのは Initial パケット（最初のパケット）のみ。** コネクション確立後の流れは以下の通り:
+
+1. **Initial パケット**: クライアントが生成したランダムな Destination CID → `server_id` 抽出失敗 → **key=0 fallback で ACTIVE DP にルーティング**
+2. **ハンドシェイク中**: DP が自身の `server_id` を埋め込んだ CID（`[server_id:4B][counter:4B]`）をクライアントに発行
+3. **以降のパケット**: クライアントは DP 発行の CID を Destination CID として使用 → eBPF が `server_id` を正しく抽出 → **key={server_id} で該当 DP に直接ルーティング**
+
+この仕組みにより、graceful restart 時に旧 DP の既存接続は旧 DP の `server_id` 入りの CID でルーティングされ続け、新規接続だけが key=0 経由で新 DP に向かう。
+
+**DP 側の実装:**
+
+- **登録**: DP 起動時に `register_server(sid, socket)` の直後に `register_default_active(socket)` で key=0 に自身のソケットを登録（`MapFlags::ANY` で常に上書き）
+- **eBPF fallback**: `extract_server_id()` 失敗時、または `bpf_sk_select_reuseport()` 失敗時に key=0 で再ルックアップ
+- **DRAINING 遷移時**: key=0 は削除しない（新 DP が上書き登録するまで保持）
+- **Drop 時**: key=0 を削除（ソケット無効化による stale 防止）
+- **CP stale cleanup**: ACTIVE な DP が 0 台の場合、key=0 も削除
+
+| シナリオ | 動作 |
+|---------|------|
+| ACTIVE 1 台のみ | key=0 → ACTIVE DP。新規接続は確実にそこへ |
+| ACTIVE 1 + DRAINING 1 | key=0 → ACTIVE DP（新 DP が上書き済み）。既存接続は CID ベースルーティング |
+| 全 DP DRAINING（ACTIVE なし） | key=0 は最後の ACTIVE だった DP を指す → CP cleanup で key=0 削除 → カーネルデフォルト |
+| ACTIVE DP クラッシュ | key=0 のソケットは無効 → `bpf_sk_select_reuseport` 失敗 → カーネルデフォルト。CP stale cleanup で key=0 も削除 |
+
 ##### なぜ eBPF が必要か
 
 - QUIC は UDP 上のプロトコルであり、TCP のように `accept()` が connected fd を返さない

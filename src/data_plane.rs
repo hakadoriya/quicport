@@ -689,6 +689,22 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                         sid
                     );
                 }
+
+                // デフォルト ACTIVE DP (key=0) を登録
+                // 新規コネクション（Initial パケット等）の server_id ルックアップ失敗時に
+                // fallback 先として使用される。MapFlags::ANY で常に上書きするため、
+                // 最後に起動した ACTIVE DP が新規接続を受け付ける。
+                if let Err(e) = router.register_default_active(&socket) {
+                    warn!(
+                        "Failed to register default active DP (key=0) for dp_id={:#06x}: {}",
+                        sid, e
+                    );
+                } else {
+                    info!(
+                        "Default active DP (key=0) registered for dp_id={:#06x}",
+                        sid
+                    );
+                }
             }
         }
 
