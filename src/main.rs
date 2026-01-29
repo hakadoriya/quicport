@@ -22,12 +22,21 @@ use quicport::statistics::ServerStatistics;
 
 /// ログ出力形式
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
-enum LogFormat {
+pub enum LogFormat {
     /// 人間が読みやすい形式
     #[default]
     Console,
     /// JSON 形式（構造化ログ）
     Json,
+}
+
+impl std::fmt::Display for LogFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LogFormat::Console => write!(f, "console"),
+            LogFormat::Json => write!(f, "json"),
+        }
+    }
 }
 
 /// QUIC-based port forwarding / tunneling tool
@@ -705,6 +714,7 @@ async fn main() -> Result<()> {
                 statistics,
                 api_config,
                 no_auto_dataplane,
+                cli.log_format.to_string(),
             )
             .await?;
         }

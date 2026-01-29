@@ -39,7 +39,7 @@
 
 | オプション | 必須 | 説明 |
 |-----------|------|------|
-| `--log-format` | No | ログ出力形式。`console`（デフォルト）または `json`。環境変数 `QUICPORT_LOG_FORMAT` でも指定可 |
+| `--log-format` | No | ログ出力形式。`console`（デフォルト）または `json`。環境変数 `QUICPORT_LOG_FORMAT` でも指定可。control-plane が data-plane を自動起動する際にも継承される |
 
 **例:**
 
@@ -1318,6 +1318,7 @@ IPv6 アドレスを正しく扱うための設計:
   - ssh-proxy では stdout が SSH プロトコルデータ専用のため stderr を使用
 - **理由**: systemd などのプロセス管理ツールとの連携、ログ集約ツールでの扱いやすさ
 - **フォーマット**: `--log-format` オプションで `console`（人間向け）または `json`（構造化ログ）を選択可能
+- **フォーマット継承**: control-plane が data-plane を自動起動する際、`--log-format` の値を引き継ぐ。CP を `--log-format json` で起動すると、DP も JSON 形式でログ出力する
 - **ログレベル**: 環境変数 `RUST_LOG` で制御（デフォルト: `info`）
 
 ### ファイル操作
