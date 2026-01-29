@@ -39,7 +39,7 @@ LogshEmergencyJSON() { test "${LOGSH_LEVEL:-0}" -gt 800 2>/dev/null || _logshJSO
 LogshExecJSON() { LogshInfoJSON "$ $(_logshCmd "$@")" && "$@"; }
 
 # Configuration (overridable by environment variables)
-QUICPORT_BIN="${QUICPORT_BIN:-quicport}"
+QUICPORT_BIN="${QUICPORT_BIN:-$(command -v quicport)}"
 QUICPORT_DP_ADDR="${QUICPORT_DP_ADDR:-0.0.0.0:39000}"
 QUICPORT_CP_ADDR="${QUICPORT_CP_ADDR:-127.0.0.1:39000}"
 # HTTP IPC URL (derived from CP_ADDR, can be overridden)
@@ -47,8 +47,6 @@ QUICPORT_CP_URL="${QUICPORT_CP_URL:-http://${QUICPORT_CP_ADDR}}"
 QUICPORT_LOG_DIR="${QUICPORT_LOG_DIR:-/var/log/quicport}"
 
 PROGRAM_NAME="quicport-starter"
-# timestamp for log file name
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
 # Create a log directory
 # shellcheck disable=SC2174
@@ -79,40 +77,16 @@ fi
 
 LogshInfoJSON "[${PROGRAM_NAME}] Starting data-plane in separate cgroup..."
 LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_BIN=${QUICPORT_BIN}"
+LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_CP_ADDR=${QUICPORT_CP_ADDR}"
 LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_DP_ADDR=${QUICPORT_DP_ADDR}"
 LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_CP_URL=${QUICPORT_CP_URL}"
-
-## data-plane is started in a separate cgroup by systemd-run
-## the following options are required to separate the cgroup
-##   --slice: specify the slice to place the unit
-##   --unit: specify the unit name
-#LogshExecJSON systemd-run \
-#  --slice=user.slice \
-#  --unit="quicport-data-plane-${TIMESTAMP}" \
-#  --property=StandardOutput=append:/var/log/quicport/data-plane.log \
-#  --property=StandardError=inherit \
-#  --setenv=RUST_LOG=quicport=debug,quinn=debug \
-#  --description="quicport data-plane (${TIMESTAMP})" \
-#  "${QUICPORT_BIN}" \
-#  --log-format json \
-#  data-plane \
-#  --listen "${QUICPORT_DP_ADDR}" \
-#  --control-plane-url "${QUICPORT_CP_URL}" \
-#  &
-#
-## wait for data-plane to start
-#while ! pgrep -f "[q]uicport.* data-plane" >/dev/null; do
-#  sleep 0.5
-#done
 
 LogshInfoJSON "[${PROGRAM_NAME}] Starting control-plane..."
 
 # replace the control-plane with exec
-# --no-auto-dataplane: data-plane is already started above via systemd-run
 LogshExecJSON exec "${QUICPORT_BIN}" \
   --log-format json \
   control-plane \
   --control-plane-addr "${QUICPORT_CP_ADDR}" \
   --data-plane-addr "${QUICPORT_DP_ADDR}" \
-  --no-auto-dataplane \
   "${QUICPORT_AUTH_ARGS[@]}"
