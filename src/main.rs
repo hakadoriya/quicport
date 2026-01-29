@@ -131,8 +131,8 @@ enum Commands {
     #[command(name = "control-plane")]
     ControlPlane {
         /// Address and port to listen on for QUIC (data planes bind to this)
-        #[arg(short, long, default_value = "0.0.0.0:39000")]
-        listen: SocketAddr,
+        #[arg(long = "control-plane-addr", default_value = "0.0.0.0:39000")]
+        control_plane_addr: SocketAddr,
 
         /// Disable public API server (/healthcheck)
         #[arg(long, default_value = "false")]
@@ -620,7 +620,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::ControlPlane {
-            listen,
+            control_plane_addr,
             no_public_api,
             private_api_listen,
             no_private_api,
@@ -650,10 +650,10 @@ async fn main() -> Result<()> {
                     None
                 } else {
                     Some(private_api_listen.unwrap_or_else(|| {
-                        // デフォルト: 127.0.0.1:<listen_port>
+                        // デフォルト: 127.0.0.1:<control_plane_addr_port>
                         SocketAddr::new(
                             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                            listen.port(),
+                            control_plane_addr.port(),
                         )
                     }))
                 };
@@ -662,8 +662,8 @@ async fn main() -> Result<()> {
                 let public_addr = if no_public_api {
                     None
                 } else {
-                    // 0.0.0.0:<listen_port + 1>
-                    Some(SocketAddr::new(listen.ip(), listen.port() + 1))
+                    // 0.0.0.0:<control_plane_addr_port + 1>
+                    Some(SocketAddr::new(control_plane_addr.ip(), control_plane_addr.port() + 1))
                 };
 
                 if public_addr.is_some() || private_addr.is_some() {
@@ -677,7 +677,7 @@ async fn main() -> Result<()> {
             };
 
             // コントロールプレーンを起動（API サーバーも統合）
-            info!("Starting control plane (QUIC on {})", listen);
+            info!("Starting control plane (QUIC on {})", control_plane_addr);
             if let Some(ref config) = api_config {
                 if let Some(addr) = config.public_addr {
                     info!("Starting public API server on {} (TCP, /healthcheck)", addr);
@@ -691,7 +691,7 @@ async fn main() -> Result<()> {
             }
 
             control_plane::run_with_api(
-                listen,
+                control_plane_addr,
                 auth_policy,
                 statistics,
                 api_config,

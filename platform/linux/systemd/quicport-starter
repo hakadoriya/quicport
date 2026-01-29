@@ -112,6 +112,6 @@ LogshInfoJSON "[${PROGRAM_NAME}] Starting control-plane..."
 LogshExecJSON exec "${QUICPORT_BIN}" \
   --log-format json \
   control-plane \
-  --listen "${QUICPORT_CP_ADDR}" \
+  --control-plane-addr "${QUICPORT_CP_ADDR}" \
   --no-auto-dataplane \
   "${QUICPORT_AUTH_ARGS[@]}"

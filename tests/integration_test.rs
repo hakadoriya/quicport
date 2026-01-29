@@ -71,7 +71,7 @@ impl TestServer {
         let process = Command::new(quicport_binary())
             .args([
                 "control-plane",
-                "--listen",
+                "--control-plane-addr",
                 &listen_addr,
                 "--no-public-api",
                 "--no-private-api",
@@ -98,7 +98,7 @@ impl TestServer {
         let process = Command::new(quicport_binary())
             .args([
                 "control-plane",
-                "--listen",
+                "--control-plane-addr",
                 &listen_addr,
                 "--no-public-api",
                 "--no-private-api",
