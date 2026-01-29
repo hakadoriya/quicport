@@ -108,7 +108,7 @@ impl ControlPlane {
                 .arg("--listen")
                 .arg(self.dp_listen_addr.to_string())
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
+                .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit());
 
             // HTTP IPC: --control-plane-url を使用
