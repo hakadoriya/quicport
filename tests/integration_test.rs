@@ -73,6 +73,8 @@ impl TestServer {
                 "control-plane",
                 "--control-plane-addr",
                 &listen_addr,
+                "--data-plane-addr",
+                &listen_addr,
                 "--no-public-api",
                 "--no-private-api",
                 "--psk",
@@ -99,6 +101,8 @@ impl TestServer {
             .args([
                 "control-plane",
                 "--control-plane-addr",
+                &listen_addr,
+                "--data-plane-addr",
                 &listen_addr,
                 "--no-public-api",
                 "--no-private-api",
