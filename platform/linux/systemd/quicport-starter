@@ -82,28 +82,28 @@ LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_BIN=${QUICPORT_BIN}"
 LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_LISTEN_ADDR=${QUICPORT_LISTEN_ADDR}"
 LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_CP_URL=${QUICPORT_CP_URL}"
 
-# data-plane is started in a separate cgroup by systemd-run
-# the following options are required to separate the cgroup
-#   --slice: specify the slice to place the unit
-#   --unit: specify the unit name
-LogshExecJSON systemd-run \
-  --slice=user.slice \
-  --unit="quicport-data-plane-${TIMESTAMP}" \
-  --property=StandardOutput=append:/var/log/quicport/data-plane.log \
-  --property=StandardError=inherit \
-  --setenv=RUST_LOG=quicport=debug,quinn=debug \
-  --description="quicport data-plane (${TIMESTAMP})" \
-  "${QUICPORT_BIN}" \
-  --log-format json \
-  data-plane \
-  --listen "${QUICPORT_LISTEN_ADDR}" \
-  --control-plane-url "${QUICPORT_CP_URL}" \
-  &
-
-# wait for data-plane to start
-while ! pgrep -f "[q]uicport.* data-plane" >/dev/null; do
-  sleep 0.5
-done
+## data-plane is started in a separate cgroup by systemd-run
+## the following options are required to separate the cgroup
+##   --slice: specify the slice to place the unit
+##   --unit: specify the unit name
+#LogshExecJSON systemd-run \
+#  --slice=user.slice \
+#  --unit="quicport-data-plane-${TIMESTAMP}" \
+#  --property=StandardOutput=append:/var/log/quicport/data-plane.log \
+#  --property=StandardError=inherit \
+#  --setenv=RUST_LOG=quicport=debug,quinn=debug \
+#  --description="quicport data-plane (${TIMESTAMP})" \
+#  "${QUICPORT_BIN}" \
+#  --log-format json \
+#  data-plane \
+#  --listen "${QUICPORT_LISTEN_ADDR}" \
+#  --control-plane-url "${QUICPORT_CP_URL}" \
+#  &
+#
+## wait for data-plane to start
+#while ! pgrep -f "[q]uicport.* data-plane" >/dev/null; do
+#  sleep 0.5
+#done
 
 LogshInfoJSON "[${PROGRAM_NAME}] Starting control-plane..."
 
