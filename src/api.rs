@@ -249,6 +249,49 @@ impl HttpIpcState {
             tokio::time::sleep(check_interval).await;
         }
     }
+
+    /// stale データプレーンを検出（削除はしない）
+    ///
+    /// `last_active` + `timeout_secs` < 現在時刻 の DP を stale と判定する。
+    /// 実際の削除は eBPF map クリーンアップ成功後に `remove_dataplanes()` で行う。
+    ///
+    /// # Returns
+    ///
+    /// stale と判定された (dp_id, server_id) のリスト
+    pub async fn detect_stale_dataplanes(&self, timeout_secs: u64) -> Vec<(String, u32)> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let dataplanes = self.dataplanes.read().await;
+        dataplanes
+            .iter()
+            .filter_map(|(dp_id, dp)| {
+                if dp.last_active + timeout_secs < now {
+                    dp.server_id.map(|sid| (dp_id.clone(), sid))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// 指定されたデータプレーンを `dataplanes` および `active_server_ids` から削除
+    ///
+    /// eBPF map エントリの削除が成功した後に呼び出すことを想定。
+    pub async fn remove_dataplanes(&self, entries: &[(String, u32)]) {
+        let mut dataplanes = self.dataplanes.write().await;
+        let mut active_ids = self.active_server_ids.write().await;
+        for (dp_id, server_id) in entries {
+            dataplanes.remove(dp_id);
+            active_ids.remove(server_id);
+            warn!(
+                "Removed stale data plane: dp_id={}, server_id={}",
+                dp_id, server_id
+            );
+        }
+    }
 }
 
 impl Default for HttpIpcState {

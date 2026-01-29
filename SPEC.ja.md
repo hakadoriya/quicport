@@ -519,6 +519,35 @@ STARTING --> ACTIVE --> DRAINING --> TERMINATED
 | `DRAINING` | ドレイン中、新規接続拒否、既存接続のみ処理 |
 | `TERMINATED` | 終了済み |
 
+#### eBPF パケットルーティング（Linux）
+
+- quicport は Linux 環境で `BPF_PROG_TYPE_SK_REUSEPORT` ベースの eBPF プログラムを使用し、QUIC Connection ID に基づいてパケットを正しい DP プロセスにルーティングする
+- `BPF_MAP_TYPE_REUSEPORT_SOCKARRAY` マップで server_id → ソケットの対応を管理
+- Connection ID フォーマット: `[server_id: 4B][counter: 4B]` (8 bytes, Big Endian)
+- マップとプログラムは `/sys/fs/bpf/quicport/` にピン留めされ、graceful restart 時に新旧プロセス間で共有される
+
+##### なぜ eBPF が必要か
+
+- QUIC は UDP 上のプロトコルであり、TCP のように `accept()` が connected fd を返さない
+- 複数プロセスが SO_REUSEPORT で同一ポートに BIND する場合、到着パケットを Connection ID に基づいて正しいプロセスに振り分けるカーネルレベルのパケットステアリングが必要
+- Classic BPF (cBPF) では `BPF_MAP_TYPE_REUSEPORT_SOCKARRAY` にアクセスできず、マップのピン留めもできないため代替不可
+- macOS にはカーネルレベルの UDP パケットステアリング手段が存在しないため、macOS では graceful restart を非サポート
+
+##### eBPF map のライフサイクル管理
+
+- **エントリ追加**: DP が起動時に `register_server(server_id, socket)` で自身のエントリを追加（ソケット fd が必要なため DP でのみ実行可能）
+- **エントリ削除（正常終了）**: DP が `EbpfRouter::drop()` で自身のエントリを削除
+- **エントリ削除（異常終了フォールバック）**: CP がバックグラウンドタスクで定期的に stale エントリを検出・削除
+  - DP の `last_active`（最終ハートビート時刻）が設定可能なタイムアウト（デフォルト 300 秒）を超過した場合、stale と判定
+  - CP がピン留めされた eBPF map を開き、該当 server_id のエントリを削除
+  - チェック間隔: 10 秒
+
+##### 必要な権限
+
+- `CAP_BPF`: eBPF プログラムのロード
+- `CAP_NET_ADMIN`: ソケットへのアタッチ
+- `/sys/fs/bpf` への書き込み権限（ピン留め用）
+
 #### HTTP IPC 通信
 
 コントロールプレーンとデータプレーン間の通信には HTTP/JSON API を使用します（RPC スタイル）。

@@ -685,6 +685,81 @@ pub fn ebpf_unavailable_reason() -> Option<String> {
     None
 }
 
+/// ピン留めされた eBPF map から stale エントリを削除
+///
+/// `EbpfRouter` のインスタンスを作らず、ピン留めされた map だけを操作する軽量な関数。
+/// CP がバックグラウンドタスクで stale な DP のエントリを削除するために使用する。
+///
+/// # Arguments
+///
+/// * `pin_path` - eBPF map のピン留めディレクトリ（例: `/sys/fs/bpf/quicport`）
+/// * `server_id` - 削除する server_id
+///
+/// # Errors
+///
+/// - ピン留めされた map が存在しない
+/// - map fd の取得に失敗
+/// - エントリの削除に失敗
+pub fn cleanup_stale_entry(pin_path: &std::path::Path, server_id: u32) -> Result<()> {
+    let socket_map_pin_path = pin_path.join("socket_map");
+
+    if !socket_map_pin_path.exists() {
+        debug!(
+            "Pinned socket_map not found at {:?}, skipping cleanup for server_id={}",
+            socket_map_pin_path, server_id
+        );
+        return Ok(());
+    }
+
+    // bpf_obj_get() でピン留めされた map の fd を取得
+    let path_cstr = std::ffi::CString::new(socket_map_pin_path.to_string_lossy().as_bytes())
+        .context("Invalid pin path for socket_map")?;
+    let map_fd = unsafe { libbpf_sys::bpf_obj_get(path_cstr.as_ptr()) };
+
+    if map_fd < 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(anyhow::anyhow!(
+            "Failed to open pinned socket_map at {:?}: {}",
+            socket_map_pin_path,
+            err
+        ));
+    }
+
+    // SAFETY: map_fd は有効な BPF map fd
+    let map_fd = unsafe { OwnedFd::from_raw_fd(map_fd) };
+
+    // bpf_map_delete_elem() で server_id のエントリを削除
+    let key = server_id.to_ne_bytes();
+    let ret = unsafe {
+        libbpf_sys::bpf_map_delete_elem(map_fd.as_raw_fd(), key.as_ptr() as *const std::ffi::c_void)
+    };
+
+    if ret < 0 {
+        let err = std::io::Error::last_os_error();
+        let errno = err.raw_os_error().unwrap_or(-1);
+        // ENOENT はエントリが既に存在しない場合 - 正常なケース
+        if errno == libc::ENOENT {
+            debug!(
+                "server_id={} not found in socket_map (already removed)",
+                server_id
+            );
+            return Ok(());
+        }
+        return Err(anyhow::anyhow!(
+            "Failed to delete server_id={} from pinned socket_map: {} (errno={})",
+            server_id,
+            err,
+            errno
+        ));
+    }
+
+    info!(
+        "Cleaned up stale eBPF map entry: server_id={} from {:?}",
+        server_id, socket_map_pin_path
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

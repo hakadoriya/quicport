@@ -17,7 +17,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
-use tracing::{debug, info, Instrument};
+use tracing::{debug, info, warn, Instrument};
 
 use crate::api::{run_private_with_http_ipc, HttpIpcState};
 use crate::ipc::{AuthPolicy, ControlCommand, DataPlaneConfig, DataPlaneStatus};
@@ -248,6 +248,92 @@ impl ControlPlane {
 
         statuses
     }
+
+    /// stale データプレーンのクリーンアップタスクを起動
+    ///
+    /// バックグラウンドで 60 秒ごとに stale DP を検出する。
+    /// Linux 環境では eBPF map エントリの削除を先に行い、成功した場合のみ
+    /// `dataplanes` / `active_server_ids` から削除する。
+    /// 非 Linux 環境では eBPF map 操作なしで直接 dataplanes から削除する。
+    pub fn start_stale_cleanup_task(self: Arc<Self>) {
+        let check_interval = Duration::from_secs(10);
+
+        tokio::spawn(async move {
+            info!("Stale data plane cleanup task started (interval=10s)");
+            loop {
+                tokio::time::sleep(check_interval).await;
+
+                // stale DP のタイムアウト値を設定から取得
+                let timeout_secs = {
+                    let config = self.http_ipc.dp_config.read().await;
+                    config.stale_dp_timeout
+                };
+
+                let stale_entries = self.http_ipc.detect_stale_dataplanes(timeout_secs).await;
+
+                if stale_entries.is_empty() {
+                    debug!("No stale data planes detected");
+                    continue;
+                }
+
+                info!(
+                    "Detected {} stale data plane(s), cleaning up",
+                    stale_entries.len()
+                );
+
+                // eBPF map 削除成功後に dataplanes から削除するエントリを収集
+                let mut entries_to_remove: Vec<(String, u32)> = Vec::new();
+
+                // Linux 環境では eBPF map からエントリを削除し、成功したもののみ
+                // dataplanes から削除する
+                #[cfg(target_os = "linux")]
+                {
+                    use std::path::Path;
+                    let ebpf_pin_path = Path::new("/sys/fs/bpf/quicport");
+                    for (dp_id, server_id) in &stale_entries {
+                        match crate::platform::linux::ebpf_router::cleanup_stale_entry(
+                            ebpf_pin_path,
+                            *server_id,
+                        ) {
+                            Ok(()) => {
+                                info!(
+                                    "Cleaned up eBPF map entry for stale DP: dp_id={}, server_id={}",
+                                    dp_id, server_id
+                                );
+                                entries_to_remove.push((dp_id.clone(), *server_id));
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Failed to cleanup eBPF map entry for stale DP: dp_id={}, server_id={}, error={}. \
+                                     Will retry on next cycle.",
+                                    dp_id, server_id, e
+                                );
+                                // eBPF map 削除に失敗した場合は dataplanes から削除しない
+                                // 次のサイクルでリトライされる
+                            }
+                        }
+                    }
+                }
+
+                // 非 Linux 環境では eBPF map がないため、そのまま全て削除対象
+                #[cfg(not(target_os = "linux"))]
+                {
+                    for (dp_id, server_id) in &stale_entries {
+                        warn!(
+                            "Stale DP detected (non-Linux, no eBPF cleanup): dp_id={}, server_id={}",
+                            dp_id, server_id
+                        );
+                        entries_to_remove.push((dp_id.clone(), *server_id));
+                    }
+                }
+
+                // eBPF map 削除が成功したエントリのみ dataplanes から削除
+                if !entries_to_remove.is_empty() {
+                    self.http_ipc.remove_dataplanes(&entries_to_remove).await;
+                }
+            }
+        });
+    }
 }
 
 /// API サーバー設定
@@ -356,7 +442,11 @@ pub async fn run_with_api(
 
     // Control Plane を起動
     let cp_for_dataplane = control_plane.clone();
+    let cp_for_cleanup = control_plane.clone();
     control_plane.start().await?;
+
+    // stale DP クリーンアップタスクを起動
+    cp_for_cleanup.start_stale_cleanup_task();
 
     // API サーバーが起動するのを待つ
     tokio::time::sleep(Duration::from_millis(100)).await;

@@ -27,6 +27,7 @@ pub mod ebpf_router;
 pub use ebpf_router::{
     EbpfRouter,
     EbpfRouterConfig,
+    cleanup_stale_entry,
     is_ebpf_available,
     ebpf_unavailable_reason,
 };
