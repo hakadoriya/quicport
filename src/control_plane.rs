@@ -41,6 +41,8 @@ pub struct ControlPlane {
     executable_path: PathBuf,
     /// HTTP IPC 状態
     http_ipc: Arc<HttpIpcState>,
+    /// ログ出力形式（data-plane に継承させる）
+    log_format: String,
 }
 
 impl ControlPlane {
@@ -51,6 +53,7 @@ impl ControlPlane {
         auth_policy: AuthPolicy,
         statistics: Arc<ServerStatistics>,
         http_ipc: Arc<HttpIpcState>,
+        log_format: String,
     ) -> Result<Arc<Self>> {
         let executable_path =
             std::env::current_exe().context("Failed to get current executable path")?;
@@ -68,6 +71,7 @@ impl ControlPlane {
             statistics,
             executable_path,
             http_ipc,
+            log_format,
         }))
     }
 
@@ -104,7 +108,9 @@ impl ControlPlane {
             use std::os::unix::process::CommandExt;
 
             let mut cmd = Command::new(&self.executable_path);
-            cmd.arg("data-plane")
+            cmd.arg("--log-format")
+                .arg(&self.log_format)
+                .arg("data-plane")
                 .arg("--listen")
                 .arg(self.dp_listen_addr.to_string())
                 .stdin(Stdio::null())
@@ -395,6 +401,7 @@ pub async fn run_with_api(
     statistics: Arc<ServerStatistics>,
     api_config: Option<ApiConfig>,
     skip_dataplane_start: bool,
+    log_format: String,
 ) -> Result<()> {
     // HTTP IPC 状態を作成（API サーバーと ControlPlane で共有）
     let http_ipc = Arc::new(HttpIpcState::new());
@@ -430,6 +437,7 @@ pub async fn run_with_api(
         auth_policy,
         statistics.clone(),
         http_ipc.clone(),
+        log_format,
     )?;
     let cp_for_shutdown = control_plane.clone();
     let cp_for_api = control_plane.clone();
