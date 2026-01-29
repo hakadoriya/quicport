@@ -40,7 +40,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     let cp_addr: SocketAddr = "localhost:39000".parse()?;
+//!     let cp_addr: SocketAddr = "127.0.0.1:39000".parse()?;
 //!     let dp_addr: SocketAddr = "0.0.0.0:39000".parse()?;
 //!     let auth_policy = AuthPolicy::Psk { psk: "secret".to_string() };
 //!     let statistics = Arc::new(ServerStatistics::new());

@@ -41,7 +41,7 @@ LogshExecJSON() { LogshInfoJSON "$ $(_logshCmd "$@")" && "$@"; }
 # Configuration (overridable by environment variables)
 QUICPORT_BIN="${QUICPORT_BIN:-quicport}"
 QUICPORT_DP_ADDR="${QUICPORT_DP_ADDR:-0.0.0.0:39000}"
-QUICPORT_CP_ADDR="${QUICPORT_CP_ADDR:-localhost:39000}"
+QUICPORT_CP_ADDR="${QUICPORT_CP_ADDR:-127.0.0.1:39000}"
 # HTTP IPC URL (derived from CP_ADDR, can be overridden)
 QUICPORT_CP_URL="${QUICPORT_CP_URL:-http://${QUICPORT_CP_ADDR}}"
 QUICPORT_LOG_DIR="${QUICPORT_LOG_DIR:-/var/log/quicport}"

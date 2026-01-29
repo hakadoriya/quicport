@@ -48,7 +48,7 @@
 quicport --log-format json server --listen 0.0.0.0:9000
 
 # 環境変数で指定
-QUICPORT_LOG_FORMAT=json quicport control-plane --control-plane-addr localhost:9000 --data-plane-addr 0.0.0.0:9000
+QUICPORT_LOG_FORMAT=json quicport control-plane --control-plane-addr 127.0.0.1:9000 --data-plane-addr 0.0.0.0:9000
 ```
 
 ### コントロールプレーンモード (control-plane)
@@ -61,7 +61,7 @@ quicport control-plane --control-plane-addr <cp_address>:<port> --data-plane-add
 
 | オプション | 必須 | 説明 |
 |-----------|------|------|
-| `--control-plane-addr` | No | コントロールプレーン HTTP IPC サーバーのアドレスとポート（デフォルト: `localhost:39000`） |
+| `--control-plane-addr` | No | コントロールプレーン HTTP IPC サーバーのアドレスとポート（デフォルト: `127.0.0.1:39000`） |
 | `--data-plane-addr` | No | データプレーン QUIC リッスンアドレスとポート（デフォルト: `0.0.0.0:39000`） |
 | `--private-api-listen` | No | Private API サーバーのアドレスとポート（デフォルト: `127.0.0.1:<listen_port>`） |
 | `--no-private-api` | No | Private API サーバーを無効化 |
@@ -380,7 +380,7 @@ quicport はサーバー再起動時の接続維持を実現するため、デ�
 # quicport-starter スクリプト概要
 # 設定例:
 #   QUICPORT_DP_ADDR=0.0.0.0:39000       # DP QUIC リッスンアドレス
-#   QUICPORT_CP_ADDR=localhost:39000      # CP HTTP IPC アドレス
+#   QUICPORT_CP_ADDR=127.0.0.1:39000      # CP HTTP IPC アドレス
 #   QUICPORT_CP_URL=http://127.0.0.1:39000
 
 # 1. データプレーンを別 cgroup で起動（HTTP IPC モード）

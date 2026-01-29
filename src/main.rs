@@ -131,7 +131,7 @@ enum Commands {
     #[command(name = "control-plane")]
     ControlPlane {
         /// Address and port for control-plane HTTP IPC server
-        #[arg(long = "control-plane-addr", default_value = "localhost:39000")]
+        #[arg(long = "control-plane-addr", default_value = "127.0.0.1:39000")]
         control_plane_addr: SocketAddr,
 
         /// Address and port for data-plane QUIC listen (auto-started data-plane binds to this)
