@@ -48,20 +48,20 @@
 quicport --log-format json server --listen 0.0.0.0:9000
 
 # 環境変数で指定
-QUICPORT_LOG_FORMAT=json quicport control-plane --listen 0.0.0.0:9000
+QUICPORT_LOG_FORMAT=json quicport control-plane --control-plane-addr 0.0.0.0:9000
 ```
 
 ### コントロールプレーンモード (control-plane)
 
 ```bash
-quicport control-plane --listen <bind_address>:<port> --privkey <server_private_key> --client-pubkeys <authorized_public_keys>
+quicport control-plane --control-plane-addr <bind_address>:<port> --privkey <server_private_key> --client-pubkeys <authorized_public_keys>
 ```
 
 **オプション:**
 
 | オプション | 必須 | 説明 |
 |-----------|------|------|
-| `--listen`, `-l` | No | QUIC コネクションを待ち受けるアドレスとポート（デフォルト: `0.0.0.0:39000`） |
+| `--control-plane-addr` | No | QUIC コネクションを待ち受けるアドレスとポート（デフォルト: `0.0.0.0:39000`） |
 | `--private-api-listen` | No | Private API サーバーのアドレスとポート（デフォルト: `127.0.0.1:<listen_port>`） |
 | `--no-private-api` | No | Private API サーバーを無効化 |
 | `--no-public-api` | No | Public API サーバーを無効化 |
@@ -82,17 +82,17 @@ quicport control-plane --listen <bind_address>:<port> --privkey <server_private_
 
 ```bash
 # 相互認証（サーバー秘密鍵 + クライアント公開鍵）
-quicport control-plane --listen 0.0.0.0:9000 \
+quicport control-plane --control-plane-addr 0.0.0.0:9000 \
   --privkey "8JWfeRFI8New0ie+oUTNKDyaHMJOk+EAq4w3wG8HR3U=" \
   --client-pubkeys "IexqQqW8ngM33aoJWqheXfW+11hL6A3h6kpO8uNl9Ws="
 
 # ファイルから読み込み
-quicport control-plane --listen 0.0.0.0:9000 \
+quicport control-plane --control-plane-addr 0.0.0.0:9000 \
   --privkey-file /etc/quicport/server.key \
   --client-pubkeys-file /etc/quicport/authorized_keys
 
 # 複数のクライアント公開鍵を指定（カンマ区切り）
-quicport control-plane --listen 0.0.0.0:9000 \
+quicport control-plane --control-plane-addr 0.0.0.0:9000 \
   --privkey "SERVER_PRIVATE_KEY" \
   --client-pubkeys "key1,key2,key3"
 ```
