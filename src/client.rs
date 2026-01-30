@@ -233,6 +233,8 @@ async fn run_remote_forward(
     local_destination: &str,
     auth_config: ClientAuthConfig,
     insecure: bool,
+    keep_alive_secs: u64,
+    idle_timeout_secs: u64,
 ) -> Result<()> {
     // 引数をパース
     // remote_source は port/protocol 形式（アドレスなし）
@@ -271,7 +273,8 @@ async fn run_remote_forward(
     let connection = if insecure {
         // 証明書検証をスキップ（テスト用）
         warn!("Insecure mode: skipping server certificate verification");
-        let endpoint = create_client_endpoint(&server_addr)?;
+        let endpoint =
+            create_client_endpoint(&server_addr, keep_alive_secs, idle_timeout_secs)?;
         endpoint
             .connect(server_addr, "quicport")
             .context("Failed to initiate connection")?
@@ -282,8 +285,13 @@ async fn run_remote_forward(
         let known_hosts_path = KnownHosts::default_path()?;
         let known_hosts = Arc::new(KnownHosts::new(known_hosts_path)?);
 
-        let (endpoint, tofu_verifier) =
-            create_client_endpoint_with_tofu(&server_addr, destination, known_hosts.clone())?;
+        let (endpoint, tofu_verifier) = create_client_endpoint_with_tofu(
+            &server_addr,
+            destination,
+            known_hosts.clone(),
+            keep_alive_secs,
+            idle_timeout_secs,
+        )?;
 
         let connection = endpoint
             .connect(server_addr, "quicport")
@@ -408,6 +416,8 @@ pub async fn run_remote_forward_with_reconnect(
     auth_config: ClientAuthConfig,
     insecure: bool,
     reconnect_config: ReconnectConfig,
+    keep_alive_secs: u64,
+    idle_timeout_secs: u64,
 ) -> Result<()> {
     if !reconnect_config.enabled {
         // 再接続が無効の場合は通常の run_remote_forward を呼び出す
@@ -417,6 +427,8 @@ pub async fn run_remote_forward_with_reconnect(
             local_destination,
             auth_config,
             insecure,
+            keep_alive_secs,
+            idle_timeout_secs,
         )
         .await;
     }
@@ -440,6 +452,8 @@ pub async fn run_remote_forward_with_reconnect(
             local_destination,
             auth_config.clone(),
             insecure,
+            keep_alive_secs,
+            idle_timeout_secs,
         )
         .await
         {
@@ -951,6 +965,8 @@ async fn run_local_forward(
     remote_destination: &str,
     auth_config: ClientAuthConfig,
     insecure: bool,
+    keep_alive_secs: u64,
+    idle_timeout_secs: u64,
 ) -> Result<()> {
     // 引数をパース
     // local_source は port/protocol 形式（アドレスなし）
@@ -989,7 +1005,8 @@ async fn run_local_forward(
     let connection = if insecure {
         // 証明書検証をスキップ（テスト用）
         warn!("Insecure mode: skipping server certificate verification");
-        let endpoint = create_client_endpoint(&server_addr)?;
+        let endpoint =
+            create_client_endpoint(&server_addr, keep_alive_secs, idle_timeout_secs)?;
         endpoint
             .connect(server_addr, "quicport")
             .context("Failed to initiate connection")?
@@ -1000,8 +1017,13 @@ async fn run_local_forward(
         let known_hosts_path = KnownHosts::default_path()?;
         let known_hosts = Arc::new(KnownHosts::new(known_hosts_path)?);
 
-        let (endpoint, tofu_verifier) =
-            create_client_endpoint_with_tofu(&server_addr, destination, known_hosts.clone())?;
+        let (endpoint, tofu_verifier) = create_client_endpoint_with_tofu(
+            &server_addr,
+            destination,
+            known_hosts.clone(),
+            keep_alive_secs,
+            idle_timeout_secs,
+        )?;
 
         let connection = endpoint
             .connect(server_addr, "quicport")
@@ -1598,6 +1620,8 @@ async fn run_ssh_proxy(
     remote_destination: &str,
     auth_config: ClientAuthConfig,
     insecure: bool,
+    keep_alive_secs: u64,
+    idle_timeout_secs: u64,
 ) -> Result<()> {
     // remote_destination は addr:port/protocol 形式（addr と protocol は省略可）
     // SSH 用なので protocol は TCP 固定
@@ -1625,7 +1649,8 @@ async fn run_ssh_proxy(
     // insecure=false の場合も TOFU は無効化し、既知ホストのみ接続可能とする
     let connection = if insecure {
         warn!("Insecure mode: skipping server certificate verification");
-        let endpoint = create_client_endpoint(&server_addr)?;
+        let endpoint =
+            create_client_endpoint(&server_addr, keep_alive_secs, idle_timeout_secs)?;
         endpoint
             .connect(server_addr, "quicport")
             .context("Failed to initiate connection")?
@@ -1636,8 +1661,13 @@ async fn run_ssh_proxy(
         let known_hosts_path = KnownHosts::default_path()?;
         let known_hosts = Arc::new(KnownHosts::new(known_hosts_path)?);
 
-        let (endpoint, tofu_verifier) =
-            create_client_endpoint_with_tofu(&server_addr, destination, known_hosts.clone())?;
+        let (endpoint, tofu_verifier) = create_client_endpoint_with_tofu(
+            &server_addr,
+            destination,
+            known_hosts.clone(),
+            keep_alive_secs,
+            idle_timeout_secs,
+        )?;
 
         let connection = endpoint
             .connect(server_addr, "quicport")
@@ -1898,6 +1928,8 @@ pub async fn run_local_forward_with_reconnect(
     auth_config: ClientAuthConfig,
     insecure: bool,
     reconnect_config: ReconnectConfig,
+    keep_alive_secs: u64,
+    idle_timeout_secs: u64,
 ) -> Result<()> {
     if !reconnect_config.enabled {
         return run_local_forward(
@@ -1906,6 +1938,8 @@ pub async fn run_local_forward_with_reconnect(
             remote_destination,
             auth_config,
             insecure,
+            keep_alive_secs,
+            idle_timeout_secs,
         )
         .await;
     }
@@ -1929,6 +1963,8 @@ pub async fn run_local_forward_with_reconnect(
             remote_destination,
             auth_config.clone(),
             insecure,
+            keep_alive_secs,
+            idle_timeout_secs,
         )
         .await
         {
@@ -1965,9 +2001,19 @@ pub async fn run_ssh_proxy_with_reconnect(
     auth_config: ClientAuthConfig,
     insecure: bool,
     reconnect_config: ReconnectConfig,
+    keep_alive_secs: u64,
+    idle_timeout_secs: u64,
 ) -> Result<()> {
     if !reconnect_config.enabled {
-        return run_ssh_proxy(destination, remote_destination, auth_config, insecure).await;
+        return run_ssh_proxy(
+            destination,
+            remote_destination,
+            auth_config,
+            insecure,
+            keep_alive_secs,
+            idle_timeout_secs,
+        )
+        .await;
     }
 
     let mut attempt = 0u32;
@@ -1988,6 +2034,8 @@ pub async fn run_ssh_proxy_with_reconnect(
             remote_destination,
             auth_config.clone(),
             insecure,
+            keep_alive_secs,
+            idle_timeout_secs,
         )
         .await
         {

@@ -16,7 +16,8 @@ use quicport::data_plane;
 use quicport::ipc::{AuthPolicy, DataPlaneConfig};
 use quicport::quic::{
     encode_base64_key, generate_psk, load_privkey_from_file, load_pubkeys_from_file,
-    parse_base64_key, psk_file_path,
+    parse_base64_key, psk_file_path, DEFAULT_QUIC_IDLE_TIMEOUT_SECS,
+    DEFAULT_QUIC_KEEP_ALIVE_SECS,
 };
 use quicport::statistics::ServerStatistics;
 
@@ -77,6 +78,14 @@ enum Commands {
         /// Drain timeout in seconds (force shutdown after this time in DRAINING state, 0 means infinite)
         #[arg(long, default_value = "0")]
         drain_timeout: u64,
+
+        /// QUIC keep-alive interval in seconds (ping interval for NAT table maintenance)
+        #[arg(long, default_value_t = DEFAULT_QUIC_KEEP_ALIVE_SECS, env = "QUICPORT_QUIC_KEEP_ALIVE")]
+        quic_keep_alive: u64,
+
+        /// QUIC max idle timeout in seconds (connection closed if no response within this time)
+        #[arg(long, default_value_t = DEFAULT_QUIC_IDLE_TIMEOUT_SECS, env = "QUICPORT_QUIC_IDLE_TIMEOUT")]
+        quic_idle_timeout: u64,
     },
 
     /// Control commands for managing data planes
@@ -131,6 +140,14 @@ enum Commands {
         /// Initial delay between reconnection attempts in seconds
         #[arg(long, default_value = "1")]
         reconnect_delay: u64,
+
+        /// QUIC keep-alive interval in seconds (ping interval for NAT table maintenance)
+        #[arg(long, default_value_t = DEFAULT_QUIC_KEEP_ALIVE_SECS, env = "QUICPORT_QUIC_KEEP_ALIVE")]
+        quic_keep_alive: u64,
+
+        /// QUIC max idle timeout in seconds (connection closed if no response within this time)
+        #[arg(long, default_value_t = DEFAULT_QUIC_IDLE_TIMEOUT_SECS, env = "QUICPORT_QUIC_IDLE_TIMEOUT")]
+        quic_idle_timeout: u64,
     },
 
     /// Run as control plane (manages data planes)
@@ -184,6 +201,14 @@ enum Commands {
         /// Pre-shared key for authentication
         #[arg(long, env = "QUICPORT_PSK")]
         psk: Option<String>,
+
+        /// QUIC keep-alive interval in seconds (ping interval for NAT table maintenance)
+        #[arg(long, default_value_t = DEFAULT_QUIC_KEEP_ALIVE_SECS, env = "QUICPORT_QUIC_KEEP_ALIVE")]
+        quic_keep_alive: u64,
+
+        /// QUIC max idle timeout in seconds (connection closed if no response within this time)
+        #[arg(long, default_value_t = DEFAULT_QUIC_IDLE_TIMEOUT_SECS, env = "QUICPORT_QUIC_IDLE_TIMEOUT")]
+        quic_idle_timeout: u64,
     },
 
     /// Run as client (connect to server and forward ports)
@@ -264,6 +289,14 @@ enum Commands {
         /// Initial delay between reconnection attempts in seconds
         #[arg(long, default_value = "1")]
         reconnect_delay: u64,
+
+        /// QUIC keep-alive interval in seconds (ping interval for NAT table maintenance)
+        #[arg(long, default_value_t = DEFAULT_QUIC_KEEP_ALIVE_SECS, env = "QUICPORT_QUIC_KEEP_ALIVE")]
+        quic_keep_alive: u64,
+
+        /// QUIC max idle timeout in seconds (connection closed if no response within this time)
+        #[arg(long, default_value_t = DEFAULT_QUIC_IDLE_TIMEOUT_SECS, env = "QUICPORT_QUIC_IDLE_TIMEOUT")]
+        quic_idle_timeout: u64,
     },
 }
 
@@ -539,10 +572,14 @@ async fn main() -> Result<()> {
             listen,
             control_plane_url,
             drain_timeout,
+            quic_keep_alive,
+            quic_idle_timeout,
         } => {
             let config = DataPlaneConfig {
                 listen_addr: listen,
                 drain_timeout,
+                quic_keep_alive_secs: quic_keep_alive,
+                quic_idle_timeout_secs: quic_idle_timeout,
                 ..Default::default()
             };
 
@@ -606,6 +643,8 @@ async fn main() -> Result<()> {
             reconnect,
             reconnect_max_attempts,
             reconnect_delay,
+            quic_keep_alive,
+            quic_idle_timeout,
         } => {
             let auth_config = build_client_auth_config(
                 privkey,
@@ -628,6 +667,8 @@ async fn main() -> Result<()> {
                 auth_config,
                 insecure,
                 reconnect_config,
+                quic_keep_alive,
+                quic_idle_timeout,
             )
             .await?;
         }
@@ -644,6 +685,8 @@ async fn main() -> Result<()> {
             client_pubkeys,
             client_pubkeys_file,
             psk,
+            quic_keep_alive,
+            quic_idle_timeout,
         } => {
             // 認証ポリシーを構築（コントロールプレーン → データプレーン間で使用）
             let auth_policy = build_server_auth_policy(
@@ -715,6 +758,8 @@ async fn main() -> Result<()> {
                 api_config,
                 no_auto_dataplane,
                 cli.log_format.to_string(),
+                quic_keep_alive,
+                quic_idle_timeout,
             )
             .await?;
         }
@@ -733,6 +778,8 @@ async fn main() -> Result<()> {
             reconnect,
             reconnect_max_attempts,
             reconnect_delay,
+            quic_keep_alive,
+            quic_idle_timeout,
         } => {
             let auth_config = build_client_auth_config(
                 privkey,
@@ -765,6 +812,8 @@ async fn main() -> Result<()> {
                         auth_config,
                         insecure,
                         reconnect_config,
+                        quic_keep_alive,
+                        quic_idle_timeout,
                     )
                     .await?;
                 }
@@ -781,6 +830,8 @@ async fn main() -> Result<()> {
                         auth_config,
                         insecure,
                         reconnect_config,
+                        quic_keep_alive,
+                        quic_idle_timeout,
                     )
                     .await?;
                 }

@@ -352,6 +352,16 @@ pub struct DataPlaneConfig {
     /// SendStatus の送信間隔（デフォルト 30 秒）より十分大きくする必要がある。
     #[serde(default = "default_stale_dp_timeout")]
     pub stale_dp_timeout: u64,
+
+    /// QUIC keep-alive interval（秒）
+    /// NAT テーブル維持のために定期的に ping を送信する間隔
+    #[serde(default = "default_quic_keep_alive_secs")]
+    pub quic_keep_alive_secs: u64,
+
+    /// QUIC max idle timeout（秒）
+    /// この時間応答がなければ接続をクローズする
+    #[serde(default = "default_quic_idle_timeout_secs")]
+    pub quic_idle_timeout_secs: u64,
 }
 
 fn default_drain_timeout() -> u64 {
@@ -366,6 +376,14 @@ fn default_stale_dp_timeout() -> u64 {
     300 // 5 minutes
 }
 
+fn default_quic_keep_alive_secs() -> u64 {
+    crate::quic::DEFAULT_QUIC_KEEP_ALIVE_SECS
+}
+
+fn default_quic_idle_timeout_secs() -> u64 {
+    crate::quic::DEFAULT_QUIC_IDLE_TIMEOUT_SECS
+}
+
 impl Default for DataPlaneConfig {
     fn default() -> Self {
         Self {
@@ -375,6 +393,8 @@ impl Default for DataPlaneConfig {
             server_id: None,
             enable_ebpf_routing: false,
             stale_dp_timeout: default_stale_dp_timeout(),
+            quic_keep_alive_secs: default_quic_keep_alive_secs(),
+            quic_idle_timeout_secs: default_quic_idle_timeout_secs(),
         }
     }
 }

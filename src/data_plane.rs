@@ -716,7 +716,13 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
 
         // 5. Endpoint を作成（バインド済みソケットの所有権を渡す）
         let endpoint =
-            create_server_endpoint_with_socket(socket, "quicport-dataplane", sid)?;
+            create_server_endpoint_with_socket(
+                socket,
+                "quicport-dataplane",
+                sid,
+                config.quic_keep_alive_secs,
+                config.quic_idle_timeout_secs,
+            )?;
 
         endpoint
     };

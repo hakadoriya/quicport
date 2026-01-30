@@ -402,6 +402,8 @@ pub async fn run_with_api(
     api_config: Option<ApiConfig>,
     skip_dataplane_start: bool,
     log_format: String,
+    quic_keep_alive_secs: u64,
+    quic_idle_timeout_secs: u64,
 ) -> Result<()> {
     // HTTP IPC 状態を作成（API サーバーと ControlPlane で共有）
     let http_ipc = Arc::new(HttpIpcState::new());
@@ -411,6 +413,8 @@ pub async fn run_with_api(
     {
         let mut config = http_ipc.dp_config.write().await;
         config.listen_addr = dp_listen_addr;
+        config.quic_keep_alive_secs = quic_keep_alive_secs;
+        config.quic_idle_timeout_secs = quic_idle_timeout_secs;
     }
 
     // Private API がない場合は HTTP IPC を使用できないため、
