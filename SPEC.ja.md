@@ -311,7 +311,19 @@ quicport ctl <COMMAND>
 | コマンド | 説明 |
 |----------|------|
 | `status` | 全データプレーンの状態を表示 |
-| `drain --pid <PID>` | 特定のデータプレーンに DRAIN を送信 |
+| `drain --dp-id <DP_ID>` | 特定のデータプレーンに DRAIN を送信 |
+
+**共通オプション:**
+
+| オプション | 必須 | 説明 |
+|-----------|------|------|
+| `--control-plane-addr` | No | コントロールプレーンの接続先アドレス（デフォルト: `127.0.0.1:39000`） |
+
+**drain オプション:**
+
+| オプション | 必須 | 説明 |
+|-----------|------|------|
+| `--dp-id` / `-d` | Yes | ドレイン対象のデータプレーン ID（16 進数形式、例: `0x3039`） |
 
 **例:**
 
@@ -320,7 +332,10 @@ quicport ctl <COMMAND>
 quicport ctl status
 
 # 特定のデータプレーンをドレイン
-quicport ctl drain --pid 12345
+quicport ctl drain --dp-id 0x3039
+
+# コントロールプレーンのアドレスを指定
+quicport ctl status --control-plane-addr 127.0.0.1:39001
 ```
 
 **出力例 (status):**
