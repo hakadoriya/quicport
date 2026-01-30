@@ -72,6 +72,8 @@ quicport control-plane --control-plane-addr <cp_address>:<port> --data-plane-add
 | `--client-pubkeys` | Yes* | 認可するクライアントの公開鍵（Base64 形式）。複数指定はカンマ区切り。環境変数 `QUICPORT_CLIENT_PUBKEYS` でも指定可 |
 | `--client-pubkeys-file` | Yes* | 公開鍵を読み込むファイルパス。1 行 1 鍵。環境変数 `QUICPORT_CLIENT_PUBKEYS_FILE` でも指定可 |
 | `--psk` | No | 事前共有キー。環境変数 `QUICPORT_PSK` でも指定可 |
+| `--quic-keep-alive` | No | QUIC keep-alive interval（秒）。NAT テーブル維持のための ping 送信間隔（デフォルト: `5`）。環境変数 `QUICPORT_QUIC_KEEP_ALIVE` でも指定可 |
+| `--quic-idle-timeout` | No | QUIC max idle timeout（秒）。この時間応答がなければ接続をクローズ（デフォルト: `90`）。環境変数 `QUICPORT_QUIC_IDLE_TIMEOUT` でも指定可 |
 
 \* `--client-pubkeys` または `--client-pubkeys-file` のいずれかが必須（`--psk` を使用する場合を除く）
 \** X25519 認証（`--client-pubkeys` / `--client-pubkeys-file`）使用時は `--privkey` または `--privkey-file` が必須（相互認証のため）
@@ -143,6 +145,9 @@ quicport client --server <server_address>:<port> --local-source <port>[/protocol
 | `--reconnect` | No | 接続断時に自動再接続を有効化（デフォルト: true） |
 | `--reconnect-max-attempts` | No | 最大再接続試行回数。0 = 無制限（デフォルト: 0） |
 | `--reconnect-delay` | No | 初期再接続待機時間（秒）。エクスポネンシャルバックオフで最大 60 秒まで増加（デフォルト: 1） |
+| **QUIC オプション** |||
+| `--quic-keep-alive` | No | QUIC keep-alive interval（秒）。NAT テーブル維持のための ping 送信間隔（デフォルト: `5`）。環境変数 `QUICPORT_QUIC_KEEP_ALIVE` でも指定可 |
+| `--quic-idle-timeout` | No | QUIC max idle timeout（秒）。この時間応答がなければ接続をクローズ（デフォルト: `90`）。環境変数 `QUICPORT_QUIC_IDLE_TIMEOUT` でも指定可 |
 
 \* `--privkey` または `--privkey-file` のいずれかが必須（`--psk` を使用する場合を除く）
 \** X25519 認証（`--privkey` / `--privkey-file`）使用時は `--server-pubkey` または `--server-pubkey-file` が必須（MITM 攻撃防止のため）
@@ -226,6 +231,9 @@ quicport ssh-proxy --server <server_address>:<port> --remote-destination [addr:]
 | `--reconnect` | No | 接続断時に自動再接続を有効化（デフォルト: true） |
 | `--reconnect-max-attempts` | No | 最大再接続試行回数。0 = 無制限（デフォルト: 0） |
 | `--reconnect-delay` | No | 初期再接続待機時間（秒）（デフォルト: 1） |
+| **QUIC オプション** |||
+| `--quic-keep-alive` | No | QUIC keep-alive interval（秒）。NAT テーブル維持のための ping 送信間隔（デフォルト: `5`）。環境変数 `QUICPORT_QUIC_KEEP_ALIVE` でも指定可 |
+| `--quic-idle-timeout` | No | QUIC max idle timeout（秒）。この時間応答がなければ接続をクローズ（デフォルト: `90`）。環境変数 `QUICPORT_QUIC_IDLE_TIMEOUT` でも指定可 |
 
 \* `--privkey` または `--privkey-file` のいずれかが必須（`--psk` を使用する場合を除く）
 \** X25519 認証使用時は `--server-pubkey` または `--server-pubkey-file` が必須
@@ -271,6 +279,8 @@ quicport data-plane [OPTIONS]
 | `--listen`, `-l` | No | QUIC リッスンアドレス（デフォルト: `0.0.0.0:39000`） |
 | `--drain-timeout` | No | DRAIN 状態のタイムアウト秒数（デフォルト: `0` = 無限） |
 | `--control-plane-url` | Yes | コントロールプレーンの HTTP API URL（HTTP IPC 接続用） |
+| `--quic-keep-alive` | No | QUIC keep-alive interval（秒）。NAT テーブル維持のための ping 送信間隔（デフォルト: `5`）。環境変数 `QUICPORT_QUIC_KEEP_ALIVE` でも指定可 |
+| `--quic-idle-timeout` | No | QUIC max idle timeout（秒）。この時間応答がなければ接続をクローズ（デフォルト: `90`）。環境変数 `QUICPORT_QUIC_IDLE_TIMEOUT` でも指定可 |
 
 **動作:**
 
@@ -907,9 +917,9 @@ example.com:9000 AB:CD:EF:...
 ### 接続維持とタイムアウト
 
 - **QUIC トランスポート層の keep-alive** を使用
-- 5 秒間隔で keep-alive パケットを自動送信
-- **Idle timeout**: 10 秒間応答がなければ接続をクローズ
-  - クライアントが強制終了された場合でも、最大 10 秒以内にサーバーが接続切断を検出
+- デフォルト 5 秒間隔で keep-alive パケットを自動送信（`--quic-keep-alive` で変更可能）
+- **Idle timeout**: デフォルト 90 秒間応答がなければ接続をクローズ（`--quic-idle-timeout` で変更可能）
+  - クライアントが強制終了された場合でも、最大 idle timeout 以内にサーバーが接続切断を検出
 
 ### グレースフルシャットダウン
 
@@ -1350,8 +1360,8 @@ IPv6 アドレスを正しく扱うための設計:
 
 ### 接続管理
 
-- **Keep-alive**: QUIC トランスポート層で 5 秒間隔の keep-alive を送信
-- **Idle timeout**: 10 秒間応答がなければ接続をクローズ
+- **Keep-alive**: QUIC トランスポート層でデフォルト 5 秒間隔の keep-alive を送信（`--quic-keep-alive` で変更可能）
+- **Idle timeout**: デフォルト 90 秒間応答がなければ接続をクローズ（`--quic-idle-timeout` で変更可能）
 - **グレースフルシャットダウン**: SIGINT/SIGTERM でクリーンな終了処理を実行
 
 ## API サーバー

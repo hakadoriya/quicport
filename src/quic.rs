@@ -24,6 +24,14 @@ type HmacSha256 = Hmac<Sha256>;
 /// ALPN プロトコル識別子
 pub const ALPN_QUICPORT: &[u8] = b"quicport/1";
 
+/// QUIC keep-alive interval のデフォルト値（秒）
+/// NAT テーブル維持のため 5 秒を維持
+pub const DEFAULT_QUIC_KEEP_ALIVE_SECS: u64 = 5;
+
+/// QUIC max idle timeout のデフォルト値（秒）
+/// 1 分のネットワーク断 + 30 秒マージン = 90 秒
+pub const DEFAULT_QUIC_IDLE_TIMEOUT_SECS: u64 = 90;
+
 // =============================================================================
 // TOFU (Trust On First Use) 証明書検証
 // =============================================================================
@@ -678,7 +686,12 @@ pub fn bind_udp_socket(socket: &std::net::UdpSocket, addr: SocketAddr) -> std::i
 ///
 /// 証明書は ~/.config/quicport/ に永続化される
 /// SO_REUSEPORT を設定して複数プロセスが同じポートで LISTEN 可能にする
-pub fn create_server_endpoint(bind_addr: SocketAddr, _psk: &str) -> Result<Endpoint> {
+pub fn create_server_endpoint(
+    bind_addr: SocketAddr,
+    _psk: &str,
+    keep_alive_secs: u64,
+    idle_timeout_secs: u64,
+) -> Result<Endpoint> {
     let (certs, key) = get_or_create_server_cert()?;
 
     let mut server_crypto = rustls::ServerConfig::builder()
@@ -694,13 +707,10 @@ pub fn create_server_endpoint(bind_addr: SocketAddr, _psk: &str) -> Result<Endpo
     ));
 
     // トランスポート設定
-    // Keep-alive: 5 秒ごとに ping を送信
-    // Idle timeout: 10 秒間応答がなければ接続をクローズ
-    // これによりクライアントが強制終了された場合も 10 秒以内に検出可能
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(keep_alive_secs)));
     transport_config.max_idle_timeout(Some(
-        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(10)).unwrap(),
+        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(idle_timeout_secs)).unwrap(),
     ));
     server_config.transport_config(Arc::new(transport_config));
 
@@ -747,6 +757,8 @@ pub fn create_server_endpoint_with_cid(
     bind_addr: SocketAddr,
     _psk: &str,
     server_id: u32,
+    keep_alive_secs: u64,
+    idle_timeout_secs: u64,
 ) -> Result<Endpoint> {
     use crate::cid_generator::RoutableCidGenerator;
 
@@ -765,13 +777,10 @@ pub fn create_server_endpoint_with_cid(
     ));
 
     // トランスポート設定
-    // Keep-alive: 5 秒ごとに ping を送信
-    // Idle timeout: 10 秒間応答がなければ接続をクローズ
-    // これによりクライアントが強制終了された場合も 10 秒以内に検出可能
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(keep_alive_secs)));
     transport_config.max_idle_timeout(Some(
-        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(10)).unwrap(),
+        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(idle_timeout_secs)).unwrap(),
     ));
     server_config.transport_config(Arc::new(transport_config));
 
@@ -878,6 +887,8 @@ pub fn create_server_endpoint_with_socket(
     socket: std::net::UdpSocket,
     _psk: &str,
     server_id: u32,
+    keep_alive_secs: u64,
+    idle_timeout_secs: u64,
 ) -> Result<Endpoint> {
     use crate::cid_generator::RoutableCidGenerator;
 
@@ -897,9 +908,9 @@ pub fn create_server_endpoint_with_socket(
 
     // トランスポート設定
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(keep_alive_secs)));
     transport_config.max_idle_timeout(Some(
-        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(10)).unwrap(),
+        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(idle_timeout_secs)).unwrap(),
     ));
     server_config.transport_config(Arc::new(transport_config));
 
@@ -927,7 +938,11 @@ pub fn create_server_endpoint_with_socket(
 /// server_addr の IP バージョンに応じて適切なバインドアドレスを選択:
 /// - IPv4 サーバー: 0.0.0.0:0 にバインド
 /// - IPv6 サーバー: [::]:0 にバインド
-pub fn create_client_endpoint(server_addr: &std::net::SocketAddr) -> Result<Endpoint> {
+pub fn create_client_endpoint(
+    server_addr: &std::net::SocketAddr,
+    keep_alive_secs: u64,
+    idle_timeout_secs: u64,
+) -> Result<Endpoint> {
     // 接続先の IP バージョンに応じてバインドアドレスを選択
     let bind_addr: std::net::SocketAddr = if server_addr.is_ipv6() {
         "[::]:0".parse().unwrap()
@@ -952,12 +967,10 @@ pub fn create_client_endpoint(server_addr: &std::net::SocketAddr) -> Result<Endp
     ));
 
     // トランスポート設定
-    // Keep-alive: 5 秒ごとに ping を送信
-    // Idle timeout: 10 秒間応答がなければ接続をクローズ
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(keep_alive_secs)));
     transport_config.max_idle_timeout(Some(
-        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(10)).unwrap(),
+        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(idle_timeout_secs)).unwrap(),
     ));
     client_config.transport_config(Arc::new(transport_config));
 
@@ -977,6 +990,8 @@ pub fn create_client_endpoint_with_tofu(
     server_addr: &std::net::SocketAddr,
     server_host: &str,
     known_hosts: Arc<KnownHosts>,
+    keep_alive_secs: u64,
+    idle_timeout_secs: u64,
 ) -> Result<(Endpoint, Arc<TofuVerifier>)> {
     // 接続先の IP バージョンに応じてバインドアドレスを選択
     let bind_addr: std::net::SocketAddr = if server_addr.is_ipv6() {
@@ -1006,9 +1021,9 @@ pub fn create_client_endpoint_with_tofu(
 
     // トランスポート設定
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(keep_alive_secs)));
     transport_config.max_idle_timeout(Some(
-        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(10)).unwrap(),
+        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(idle_timeout_secs)).unwrap(),
     ));
     client_config.transport_config(Arc::new(transport_config));
 
