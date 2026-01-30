@@ -563,9 +563,16 @@ async fn main() -> Result<()> {
         }
     }
 
-    // PID を含むルートスパンを作成（全ログに PID が含まれる）
+    // PID とサブコマンド名を含むルートスパンを作成（全ログに PID・subcommand が含まれる）
     let pid = std::process::id();
-    let _root_span = tracing::info_span!("quicport", pid).entered();
+    let subcommand = match &cli.command {
+        Commands::DataPlane { .. } => "data-plane",
+        Commands::Ctl(_) => "ctl",
+        Commands::SshProxy { .. } => "ssh-proxy",
+        Commands::ControlPlane { .. } => "control-plane",
+        Commands::Client { .. } => "client",
+    };
+    let _root_span = tracing::info_span!("quicport", pid, subcommand).entered();
 
     match cli.command {
         Commands::DataPlane {
