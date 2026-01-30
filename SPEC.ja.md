@@ -392,7 +392,8 @@ quicport はサーバー再起動時の接続維持を実現するため、デ�
 - quicport バイナリ自体はプラットフォーム固有の機能（systemd-run, cgroup 等）に依存しない
 - プラットフォーム依存の部分はシェルスクリプトに切り出す
 - **Linux (systemd)**: `quicport.sh` で systemd-run を使用した cgroup 分離
-- **macOS / Windows**: 手動で cp と dp を別々に起動（graceful restart 時のコネクション維持は手動管理）
+- **UNIX (非 systemd)**: control-plane が data-plane を自動起動（setsid で独立セッション化）。graceful restart は eBPF 非対応のため非サポート
+- **Windows**: 自動起動は未サポート。手動で cp と dp を別々に起動
 
 **責務分離:**
 
@@ -423,6 +424,41 @@ exec quicport control-plane \
   --control-plane-addr "${QUICPORT_CP_ADDR}" \
   --data-plane-addr "${QUICPORT_DP_ADDR}" \
   ...
+```
+
+#### UNIX 上での自動 data-plane 起動（非 systemd 環境）
+
+systemd がない環境（macOS 等）では、control-plane が data-plane プロセスを自動的に起動します。
+`--no-auto-dataplane` オプションで無効化できます。
+
+**起動メカニズム（`start_dataplane()` / `src/control_plane.rs`）:**
+
+1. `std::env::current_exe()` で実行中バイナリのパスを取得（同一バイナリを再利用）
+2. 以下の引数で子プロセスを構築:
+   - `--log-format <format>`: CP の値をそのまま継承（**唯一継承されるグローバルオプション**）
+   - `data-plane` サブコマンド
+   - `--listen <dp_listen_addr>`: CP の `--data-plane-addr` で指定されたアドレス
+   - `--control-plane-url http://127.0.0.1:<cp_port>`: **常にループバック**。`<cp_port>` は CP の `--control-plane-addr` のポート
+3. `pre_exec` で `libc::setsid()` を呼び出し、独立したセッションを作成
+   - 親プロセス（CP）が終了しても DP は動作を継続
+4. `spawn()` で子プロセスを起動（stdin=null, stdout/stderr=inherit）
+5. PID ベースで DP の HTTP IPC 登録を待機（500ms 間隔、最大 20 回 = 10 秒）
+
+**制約:**
+- UNIX のみサポート（`#[cfg(unix)]`）。Windows では未実装
+- `--log-output` は継承されない（DP は stdout に出力）
+- `--control-plane-url` は常に `http://127.0.0.1:<cp_port>` 固定（外部 IF は使用しない）
+
+```
+control-plane                           data-plane (子プロセス)
+    |                                        |
+    |-- current_exe() でパス取得              |
+    |-- setsid() + spawn() ---------------->|
+    |                                        |-- HTTP IPC で CP に接続
+    |                                        |-- 登録リクエスト送信
+    |<-- PID ベースで登録確認 (最大10秒) ------|
+    |                                        |
+    |   [CP 終了しても DP は継続動作]          |
 ```
 
 #### 起動シーケンス
