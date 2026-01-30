@@ -390,7 +390,7 @@ pub struct ApiConfig {
     /// Public API アドレス（/healthcheck のみ、インターネットから見える）
     pub public_addr: Option<SocketAddr>,
     /// Private API アドレス（/metrics, HTTP IPC、localhost のみ）
-    pub private_addr: Option<SocketAddr>,
+    pub private_addr: SocketAddr,
 }
 
 /// コントロールプレーンを起動（API サーバー付き、HTTP IPC モード）
@@ -417,24 +417,6 @@ pub async fn run_with_api(
         config.quic_idle_timeout_secs = quic_idle_timeout_secs;
     }
 
-    // Private API がない場合は HTTP IPC を使用できないため、
-    // 内部的に HTTP IPC サーバーを起動する
-    let has_private_api = api_config
-        .as_ref()
-        .map_or(false, |c| c.private_addr.is_some());
-
-    // HTTP IPC 用の内部 API アドレスを決定
-    // Private API が有効な場合はそれを使用、そうでなければ localhost でリッスン
-    let internal_http_ipc_addr = if has_private_api {
-        None // Private API が HTTP IPC を提供
-    } else {
-        // Private API がない場合は内部的に HTTP IPC サーバーを起動
-        Some(SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            cp_addr.port(),
-        ))
-    };
-
     let control_plane = ControlPlane::new(
         cp_addr,
         dp_listen_addr,
@@ -449,26 +431,6 @@ pub async fn run_with_api(
     // API サーバーを起動
     let mut api_handles = Vec::new();
 
-    // 内部 HTTP IPC サーバーを起動（Private API がない場合）
-    if let Some(internal_addr) = internal_http_ipc_addr {
-        let stats_for_internal = statistics.clone();
-        let http_ipc_for_internal = http_ipc.clone();
-        let cp_for_internal = control_plane.clone();
-        api_handles.push(tokio::spawn(
-            async move {
-                run_private_with_http_ipc(
-                    internal_addr,
-                    stats_for_internal,
-                    Some(cp_for_internal),
-                    http_ipc_for_internal,
-                )
-                .await
-            }
-            .instrument(tracing::Span::current()),
-        ));
-        info!("Internal HTTP IPC server started on {}", internal_addr);
-    }
-
     if let Some(config) = api_config {
         // Public API サーバー（/healthcheck のみ）
         if let Some(public_addr) = config.public_addr {
@@ -479,22 +441,21 @@ pub async fn run_with_api(
         }
 
         // Private API サーバー（/metrics, HTTP IPC）
-        if let Some(private_addr) = config.private_addr {
-            let stats_for_api = statistics.clone();
-            let http_ipc_for_api = http_ipc.clone();
-            api_handles.push(tokio::spawn(
-                async move {
-                    run_private_with_http_ipc(
-                        private_addr,
-                        stats_for_api,
-                        Some(cp_for_api),
-                        http_ipc_for_api,
-                    )
-                    .await
-                }
-                .instrument(tracing::Span::current()),
-            ));
-        }
+        let private_addr = config.private_addr;
+        let stats_for_api = statistics.clone();
+        let http_ipc_for_api = http_ipc.clone();
+        api_handles.push(tokio::spawn(
+            async move {
+                run_private_with_http_ipc(
+                    private_addr,
+                    stats_for_api,
+                    Some(cp_for_api),
+                    http_ipc_for_api,
+                )
+                .await
+            }
+            .instrument(tracing::Span::current()),
+        ));
     }
 
     // Control Plane を起動

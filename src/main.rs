@@ -173,10 +173,6 @@ enum Commands {
         #[arg(long)]
         private_api_listen: Option<SocketAddr>,
 
-        /// Disable private API server
-        #[arg(long, default_value = "false")]
-        no_private_api: bool,
-
         /// Do not automatically start a data-plane process.
         /// Use this when data-plane is started separately (e.g., via systemd-run)
         #[arg(long, default_value = "false")]
@@ -685,7 +681,6 @@ async fn main() -> Result<()> {
             data_plane_addr,
             no_public_api,
             private_api_listen,
-            no_private_api,
             no_auto_dataplane,
             privkey,
             privkey_file,
@@ -710,17 +705,13 @@ async fn main() -> Result<()> {
             // API サーバー設定を構築
             let api_config = {
                 // Private API: QUIC と同じポートの TCP、localhost のみ（/metrics, /graceful-restart）
-                let private_addr = if no_private_api {
-                    None
-                } else {
-                    Some(private_api_listen.unwrap_or_else(|| {
-                        // デフォルト: 127.0.0.1:<control_plane_addr_port>
-                        SocketAddr::new(
-                            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                            control_plane_addr.port(),
-                        )
-                    }))
-                };
+                let private_addr = private_api_listen.unwrap_or_else(|| {
+                    // デフォルト: 127.0.0.1:<control_plane_addr_port>
+                    SocketAddr::new(
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                        control_plane_addr.port(),
+                    )
+                });
 
                 // Public API: DP アドレスの IP + DP ポート + 1（/healthcheck のみ、外部向け）
                 let public_addr = if no_public_api {
@@ -730,14 +721,10 @@ async fn main() -> Result<()> {
                     Some(SocketAddr::new(data_plane_addr.ip(), data_plane_addr.port() + 1))
                 };
 
-                if public_addr.is_some() || private_addr.is_some() {
-                    Some(control_plane::ApiConfig {
-                        public_addr,
-                        private_addr,
-                    })
-                } else {
-                    None
-                }
+                Some(control_plane::ApiConfig {
+                    public_addr,
+                    private_addr,
+                })
             };
 
             // コントロールプレーンを起動（API サーバーも統合）
@@ -749,12 +736,10 @@ async fn main() -> Result<()> {
                 if let Some(addr) = config.public_addr {
                     info!("Starting public API server on {} (TCP, /healthcheck)", addr);
                 }
-                if let Some(addr) = config.private_addr {
-                    info!(
-                        "Starting private API server on {} (/metrics, /graceful-restart)",
-                        addr
-                    );
-                }
+                info!(
+                    "Starting private API server on {} (/metrics, /graceful-restart)",
+                    config.private_addr
+                );
             }
 
             control_plane::run_with_api(
