@@ -76,7 +76,6 @@ impl TestServer {
                 "--data-plane-addr",
                 &listen_addr,
                 "--no-public-api",
-                "--no-private-api",
                 "--psk",
                 psk,
             ])
@@ -105,7 +104,6 @@ impl TestServer {
                 "--data-plane-addr",
                 &listen_addr,
                 "--no-public-api",
-                "--no-private-api",
                 "--privkey",
                 server_privkey,
                 "--client-pubkeys",

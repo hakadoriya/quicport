@@ -103,7 +103,6 @@ quicport control-plane [OPTIONS]
 |--------|---------|-------------|
 | `-l, --listen` | `0.0.0.0:39000` | Address and port to listen on for QUIC (UDP) |
 | `--private-api-listen` | `127.0.0.1:<port>` | Address for private API server (same port as QUIC, TCP) |
-| `--no-private-api` | `false` | Disable private API server (/metrics, /graceful-restart) |
 | `--no-public-api` | `false` | Disable public API server (/healthcheck, port+1) |
 | `--privkey` | - | Server's private key (Base64). Env: `QUICPORT_PRIVKEY` |
 | `--privkey-file` | - | Path to server's private key file. Env: `QUICPORT_PRIVKEY_FILE` |
@@ -185,7 +184,7 @@ curl http://127.0.0.1:39000/metrics
 curl -X POST http://127.0.0.1:39000/api/graceful-restart
 ```
 
-Disable with `--no-private-api` flag. Change address with `--private-api-listen`.
+Change address with `--private-api-listen`.
 
 ### Public API (QUIC port + 1, TCP)
 
