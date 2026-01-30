@@ -305,20 +305,20 @@ enum Commands {
 enum CtlCommands {
     /// Show status of all data planes
     Status {
-        /// Private API server address to connect to
-        #[arg(long, default_value = "127.0.0.1:39000")]
-        api_addr: SocketAddr,
+        /// Control plane address to connect to
+        #[arg(long = "control-plane-addr", default_value = "127.0.0.1:39000")]
+        control_plane_addr: SocketAddr,
     },
 
     /// Drain a specific data plane
     Drain {
-        /// Data plane ID to drain (e.g., "dp_12345")
+        /// Data plane ID to drain (e.g., "0x3039")
         #[arg(short = 'd', long)]
         dp_id: String,
 
-        /// Private API server address to connect to
-        #[arg(long, default_value = "127.0.0.1:39000")]
-        api_addr: SocketAddr,
+        /// Control plane address to connect to
+        #[arg(long = "control-plane-addr", default_value = "127.0.0.1:39000")]
+        control_plane_addr: SocketAddr,
     },
 }
 
@@ -600,13 +600,13 @@ async fn main() -> Result<()> {
 
         Commands::Ctl(ctl_cmd) => {
             match ctl_cmd {
-                CtlCommands::Status { api_addr } => {
-                    control_plane::show_status(api_addr).await?;
+                CtlCommands::Status { control_plane_addr } => {
+                    control_plane::show_status(control_plane_addr).await?;
                 }
-                CtlCommands::Drain { dp_id, api_addr } => {
+                CtlCommands::Drain { dp_id, control_plane_addr } => {
                     use quicport::ipc::DrainDataPlaneRequest;
 
-                    let url = format!("http://{}{}", api_addr, quicport::ipc::api_paths::DRAIN_DATA_PLANE);
+                    let url = format!("http://{}{}", control_plane_addr, quicport::ipc::api_paths::DRAIN_DATA_PLANE);
                     let client = reqwest::Client::new();
 
                     let response = client
@@ -617,7 +617,7 @@ async fn main() -> Result<()> {
                         .send()
                         .await
                         .with_context(|| {
-                            format!("Failed to connect to API server at {}", api_addr)
+                            format!("Failed to connect to API server at {}", control_plane_addr)
                         })?;
 
                     let status = response.status();
