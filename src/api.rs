@@ -785,20 +785,20 @@ pub async fn run_private_with_http_ipc(
         .route("/metrics", get(metrics))
         // HTTP IPC API (v1)
         // DP 用 API
-        .route("/api/v1/dp/SendStatus", post(send_status))
-        .route("/api/v1/dp/ReceiveCommand", post(receive_command))
+        .route(crate::ipc::api_paths::SEND_STATUS, post(send_status))
+        .route(crate::ipc::api_paths::RECEIVE_COMMAND, post(receive_command))
         // 管理用 API
-        .route("/api/v1/admin/ListDataPlanes", post(list_data_planes))
+        .route(crate::ipc::api_paths::LIST_DATA_PLANES, post(list_data_planes))
         .route(
-            "/api/v1/admin/GetDataPlaneStatus",
+            crate::ipc::api_paths::GET_DATA_PLANE_STATUS,
             post(get_data_plane_status),
         )
-        .route("/api/v1/admin/DrainDataPlane", post(drain_data_plane))
+        .route(crate::ipc::api_paths::DRAIN_DATA_PLANE, post(drain_data_plane))
         .route(
-            "/api/v1/admin/ShutdownDataPlane",
+            crate::ipc::api_paths::SHUTDOWN_DATA_PLANE,
             post(shutdown_data_plane),
         )
-        .route("/api/v1/admin/GetConnections", post(get_connections))
+        .route(crate::ipc::api_paths::GET_CONNECTIONS, post(get_connections))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(listen).await?;

@@ -551,7 +551,7 @@ pub async fn run_with_api(
 ///
 /// HTTP API 経由でデータプレーン一覧を取得して表示します。
 pub async fn show_status(api_addr: SocketAddr) -> Result<()> {
-    let url = format!("http://{}/api/v1/ListDataPlanes", api_addr);
+    let url = format!("http://{}{}", api_addr, crate::ipc::api_paths::LIST_DATA_PLANES);
     let client = reqwest::Client::new();
 
     let response = client
