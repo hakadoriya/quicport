@@ -602,6 +602,58 @@ STARTING --> ACTIVE --> DRAINING --> TERMINATED
 | DRAIN タイムアウト | 残りの接続を強制切断して終了（デフォルト: drain_timeout=0 で無限待機、すなわち全接続完了まで待つ） |
 | コントロールプレーン切断 | 最後に受信したポリシーで動作継続し、CP 復旧時に自動再登録 |
 
+#### dp_id / server_id の生成と登録
+
+データプレーンは起動時に一意の ID を生成し、コントロールプレーンに登録します（`src/data_plane.rs`）。
+
+**ID の形式:**
+
+- **server_id**: `u32` 型。値の範囲は `1..65535`（0 は eBPF map のデフォルト ACTIVE DP 用に予約、65536 は `BPF_MAP_TYPE_REUSEPORT_SOCKARRAY` の上限）
+- **dp_id**: server_id の 16 進数文字列表現（`format!("{:#06x}", server_id)` → 例: `0x3039`）
+- server_id は QUIC Connection ID に埋め込まれ（`[server_id: 4B][counter: 4B]`）、eBPF ルーティングに使用される
+- dp_id は HTTP IPC API や CLI での識別子として使用される
+
+**生成アルゴリズム:**
+
+```
+server_id = (rand::random::<u32>() % 65535) + 1
+```
+
+**登録フロー:**
+
+```
+data-plane                              control-plane
+    |                                        |
+    |-- server_id をランダム生成              |
+    |-- SendStatus(dp_id, ...) ------------->|
+    |                                        |
+    |   [成功: 200 OK]                        |
+    |<-- { auth_policy, config } ------------|
+    |                                        |
+    |   [dp_id 重複: 409 Conflict]            |
+    |<-- DP_ID_DUPLICATE --------------------|
+    |-- 新しい server_id を再生成             |
+    |-- SendStatus(new_dp_id, ...) --------->|
+    |   (最大 10 回リトライ)                   |
+    |                                        |
+    |   [CP 接続失敗: ネットワークエラー等]     |
+    |-- 1 秒待機後にリトライ                   |
+    |-- SendStatus(dp_id, ...) ------------->|
+    |   (最大 30 回リトライ)                   |
+```
+
+**リトライポリシー:**
+
+| エラー種別 | リトライ上限 | 間隔 | 動作 |
+|-----------|------------|------|------|
+| dp_id 重複（409 Conflict / `DP_ID_DUPLICATE`） | 10 回 | 即座 | 新しい server_id を再生成して再試行 |
+| CP 接続失敗（ネットワークエラー等） | 30 回 | 1 秒 | 同じ server_id で再試行 |
+
+**定常運用時の再登録:**
+
+- 登録成功後、DP は 5 秒間隔で CP にステータスを送信
+- CP から 404 Not Found が返った場合（CP 再起動等）、自動的に再登録を試行
+
 #### eBPF パケットルーティング（Linux）
 
 - quicport は Linux 環境で `BPF_PROG_TYPE_SK_REUSEPORT` ベースの eBPF プログラムを使用し、QUIC Connection ID に基づいてパケットを正しい DP プロセスにルーティングする
