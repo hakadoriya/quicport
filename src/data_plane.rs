@@ -269,7 +269,7 @@ impl HttpIpcClient {
         ack_cmd_id: Option<&str>,
         ack_status: Option<&str>,
     ) -> anyhow::Result<SendStatusResponse> {
-        let url = format!("{}/api/v1/dp/SendStatus", self.base_url);
+        let url = format!("{}{}", self.base_url, crate::ipc::api_paths::SEND_STATUS);
         // dp_id を 16 進数文字列にフォーマット（eBPF デバッグとの一貫性のため）
         let dp_id_hex = format!("{:#06x}", dp_id_u32);
         let request = SendStatusRequest {
@@ -339,7 +339,7 @@ impl HttpIpcClient {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Not registered with Control Plane"))?;
 
-        let url = format!("{}/api/v1/dp/ReceiveCommand", self.base_url);
+        let url = format!("{}{}", self.base_url, crate::ipc::api_paths::RECEIVE_COMMAND);
         let request = ReceiveCommandRequest {
             dp_id: dp_id.clone(),
             wait_timeout_secs,

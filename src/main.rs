@@ -562,7 +562,7 @@ async fn main() -> Result<()> {
                 CtlCommands::Drain { dp_id, api_addr } => {
                     use quicport::ipc::DrainDataPlaneRequest;
 
-                    let url = format!("http://{}/api/v1/DrainDataPlane", api_addr);
+                    let url = format!("http://{}{}", api_addr, quicport::ipc::api_paths::DRAIN_DATA_PLANE);
                     let client = reqwest::Client::new();
 
                     let response = client

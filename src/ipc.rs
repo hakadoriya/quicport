@@ -30,6 +30,24 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use thiserror::Error;
 
+// =============================================================================
+// API パス定数
+// =============================================================================
+
+/// DP 用 API パス
+pub mod api_paths {
+    // DP → CP（データプレーン用）
+    pub const SEND_STATUS: &str = "/api/v1/dp/SendStatus";
+    pub const RECEIVE_COMMAND: &str = "/api/v1/dp/ReceiveCommand";
+
+    // CLI/外部 → CP（管理用）
+    pub const LIST_DATA_PLANES: &str = "/api/v1/admin/ListDataPlanes";
+    pub const GET_DATA_PLANE_STATUS: &str = "/api/v1/admin/GetDataPlaneStatus";
+    pub const DRAIN_DATA_PLANE: &str = "/api/v1/admin/DrainDataPlane";
+    pub const SHUTDOWN_DATA_PLANE: &str = "/api/v1/admin/ShutdownDataPlane";
+    pub const GET_CONNECTIONS: &str = "/api/v1/admin/GetConnections";
+}
+
 /// IPC エラー
 #[derive(Error, Debug)]
 pub enum IpcError {
