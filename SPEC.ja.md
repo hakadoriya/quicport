@@ -40,6 +40,7 @@
 | オプション | 必須 | 説明 |
 |-----------|------|------|
 | `--log-format` | No | ログ出力形式。`console`（デフォルト）または `json`。環境変数 `QUICPORT_LOG_FORMAT` でも指定可。control-plane が data-plane を自動起動する際にも継承される |
+| `--log-output` | No | ログ出力先ファイルパス。指定時はファイルに追記モードで出力。未指定時のデフォルトは stdout（ssh-proxy モードでは stderr）。環境変数 `QUICPORT_LOG_OUTPUT` でも指定可 |
 
 **例:**
 
@@ -49,6 +50,9 @@ quicport --log-format json server --listen 0.0.0.0:9000
 
 # 環境変数で指定
 QUICPORT_LOG_FORMAT=json quicport control-plane --control-plane-addr 127.0.0.1:9000 --data-plane-addr 0.0.0.0:9000
+
+# ログをファイルに出力
+quicport --log-output /var/log/quicport.log control-plane --control-plane-addr 127.0.0.1:9000 --data-plane-addr 0.0.0.0:9000
 ```
 
 ### コントロールプレーンモード (control-plane)
@@ -1345,7 +1349,8 @@ IPv6 アドレスを正しく扱うための設計:
 
 ### ログ出力
 
-- **出力先**: 通常は stdout、ssh-proxy モードでは stderr
+- **出力先**: `--log-output` オプション（環境変数 `QUICPORT_LOG_OUTPUT`）でファイルパスを指定可能。指定時はファイルに追記モードで出力
+  - 未指定時: 通常は stdout、ssh-proxy モードでは stderr
   - ssh-proxy では stdout が SSH プロトコルデータ専用のため stderr を使用
 - **理由**: systemd などのプロセス管理ツールとの連携、ログ集約ツールでの扱いやすさ
 - **フォーマット**: `--log-format` オプションで `console`（人間向け）または `json`（構造化ログ）を選択可能
