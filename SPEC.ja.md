@@ -1629,6 +1629,21 @@ quicport_auth_x25519_failed_total 2
 コントロールプレーンとデータプレーン間の通信に使用する HTTP IPC エンドポイントです。
 すべてのエンドポイントは POST メソッドを使用する RPC ライクな設計です。
 
+#### DataPlaneConfig フィールド一覧
+
+CP から DP に配信される設定（`SendStatusResponse.config` および `SetConfig` コマンド）のフィールド一覧です。
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|-----|-----------|------|
+| `listen_addr` | `SocketAddr` | `0.0.0.0:39000` | QUIC リッスンアドレス |
+| `drain_timeout` | `u64` | `0`（無制限） | DRAIN 状態のタイムアウト（秒）。0 はタイムアウトなし |
+| `idle_connection_timeout` | `u64` | `3600`（1 時間） | アイドル接続のタイムアウト（秒） |
+| `server_id` | `Option<u32>` | `None` | サーバー ID（eBPF ルーティング用）。QUIC Connection ID の先頭 4 バイトに埋め込まれる。None の場合は従来の接続 ID カウンターを使用 |
+| `enable_ebpf_routing` | `bool` | `false` | eBPF ルーティングの有効化。true の場合、eBPF プログラムで QUIC パケットを Connection ID に基づいてルーティングする（Linux + ebpf feature が必要） |
+| `stale_dp_timeout` | `u64` | `300`（5 分） | stale データプレーン検出タイムアウト（秒）。CP が DP の `last_active` をチェックし、この値を超過した DP を stale と判定して eBPF map エントリを削除する |
+| `quic_keep_alive_secs` | `u64` | `5` | QUIC keep-alive interval（秒）。NAT テーブル維持のために定期的に ping を送信する間隔 |
+| `quic_idle_timeout_secs` | `u64` | `90` | QUIC max idle timeout（秒）。この時間応答がなければ接続をクローズする |
+
 #### DP 用 API
 
 ##### POST /api/v1/dp/SendStatus
@@ -1669,7 +1684,12 @@ quicport_auth_x25519_failed_total 2
   "config": {
     "listen_addr": "0.0.0.0:39000",
     "drain_timeout": 0,
-    "idle_connection_timeout": 300
+    "idle_connection_timeout": 3600,
+    "server_id": 12345,
+    "enable_ebpf_routing": false,
+    "stale_dp_timeout": 300,
+    "quic_keep_alive_secs": 5,
+    "quic_idle_timeout_secs": 90
   }
 }
 ```
@@ -1699,7 +1719,14 @@ quicport_auth_x25519_failed_total 2
     {
       "id": "cmd_002",
       "type": "SetConfig",
-      "drain_timeout": 60
+      "listen_addr": "0.0.0.0:39000",
+      "drain_timeout": 60,
+      "idle_connection_timeout": 3600,
+      "server_id": 12345,
+      "enable_ebpf_routing": false,
+      "stale_dp_timeout": 300,
+      "quic_keep_alive_secs": 5,
+      "quic_idle_timeout_secs": 90
     }
   ]
 }
