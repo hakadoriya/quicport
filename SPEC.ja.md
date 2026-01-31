@@ -434,7 +434,8 @@ systemd がない環境（macOS 等）では、control-plane が data-plane プ�
 
 1. `std::env::current_exe()` で実行中バイナリのパスを取得（同一バイナリを再利用）
 2. 以下の引数で子プロセスを構築:
-   - `--log-format <format>`: CP の値をそのまま継承（**唯一継承されるグローバルオプション**）
+   - `--log-format <format>`: CP の値をそのまま継承
+   - `--log-output <path>`（指定時のみ）: CP の値をそのまま継承
    - `data-plane` サブコマンド
    - `--listen <dp_listen_addr>`: CP の `--data-plane-addr` で指定されたアドレス
    - `--control-plane-url http://127.0.0.1:<cp_port>`: **常にループバック**。`<cp_port>` は CP の `--control-plane-addr` のポート
@@ -445,7 +446,6 @@ systemd がない環境（macOS 等）では、control-plane が data-plane プ�
 
 **制約:**
 - UNIX のみサポート（`#[cfg(unix)]`）。Windows では未実装
-- `--log-output` は継承されない（DP は stdout に出力）
 - `--control-plane-url` は常に `http://127.0.0.1:<cp_port>` 固定（外部 IF は使用しない）
 
 ```
