@@ -28,7 +28,7 @@
 //!
 //! ## API アクセス
 //!
-//! - Private API: localhost からのみアクセス可能（/metrics, /graceful-restart, /api/v1/*）
+//! - Private API: localhost からのみアクセス可能（/metrics, /api/v1/*）
 //! - Public API: インターネットから見える（/healthcheck のみ）
 
 use anyhow::Result;
