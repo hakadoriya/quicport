@@ -406,6 +406,50 @@ impl HttpIpcClient {
         Ok(resp.commands)
     }
 
+    /// コマンドを受信（長ポーリング）— Mutex ロック外で実行可能なスタティック版
+    ///
+    /// `receive_command` と同じ処理だが、`&self` を取らずクローン済みの値を受け取る。
+    /// これにより Mutex ロックを保持せずに長ポーリングの HTTP リクエストを実行できる。
+    async fn receive_command_without_lock(
+        client: &reqwest::Client,
+        base_url: &str,
+        dp_id: Option<&str>,
+        wait_timeout_secs: u64,
+    ) -> anyhow::Result<Vec<CommandWithId>> {
+        let dp_id = dp_id
+            .ok_or_else(|| anyhow::anyhow!("Not registered with Control Plane"))?;
+
+        let url = format!("{}{}", base_url, crate::ipc::api_paths::RECEIVE_COMMAND);
+        let request = ReceiveCommandRequest {
+            dp_id: dp_id.to_string(),
+            wait_timeout_secs,
+        };
+
+        let response = client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send ReceiveCommand request")?;
+
+        let status_code = response.status();
+        if !status_code.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "ReceiveCommand failed: status={}, body={}",
+                status_code,
+                text
+            ));
+        }
+
+        let resp: ReceiveCommandResponse = response
+            .json()
+            .await
+            .context("Failed to parse ReceiveCommand response")?;
+
+        Ok(resp.commands)
+    }
+
     /// dp_id が登録済みかどうか
     pub fn is_registered(&self) -> bool {
         self.dp_id.is_some()
@@ -788,13 +832,13 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     let config_for_status = config.clone();
     let server_id_for_ipc = server_id;
 
-    // 状態送信タスク（5 秒間隔で全状態を送信 + コマンド応答）
+    // 状態送信タスク（1 秒間隔で全状態を送信 + コマンド応答）
     let dp_for_status = dp_for_ipc.clone();
     let config_for_status_task = config_for_status.clone();
     let pending_acks: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let pending_acks_for_status = pending_acks.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
             interval.tick().await;
 
@@ -904,26 +948,39 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                 }
             }
 
-            let commands = {
+            // NOTE: receive_command は長ポーリング（最大 30 秒待機）するため、
+            //       Mutex ロックを保持したまま await すると SendStatus タスクが
+            //       ロック取得待ちでブロックされてしまう。
+            //       そのため、必要な情報をロック内でクローンしてからロックを解放し、
+            //       ロック外で HTTP リクエストを実行する。
+            let (http_client_clone, base_url, dp_id) = {
                 let client = http_client_for_cmd.lock().await;
-                match client.receive_command(30).await {
-                    Ok(cmds) => cmds,
-                    Err(e) => {
-                        let err_str = e.to_string();
+                (client.client.clone(), client.base_url.clone(), client.dp_id.clone())
+            };
+            let commands = match HttpIpcClient::receive_command_without_lock(
+                &http_client_clone,
+                &base_url,
+                dp_id.as_deref(),
+                30,
+            )
+            .await
+            {
+                Ok(cmds) => cmds,
+                Err(e) => {
+                    let err_str = e.to_string();
 
-                        // NOT_FOUND (404) の場合は待機（状態送信タスクが再登録する）
-                        if err_str.contains("NOT_FOUND") || err_str.contains("status=404") {
-                            debug!("DP not found, waiting for re-registration...");
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                        } else if err_str.contains("connect") || err_str.contains("Connection refused") {
-                            debug!("Connection error receiving commands: {}", e);
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                        } else {
-                            debug!("ReceiveCommand error: {}, retrying in 1s", e);
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                        }
-                        continue;
+                    // NOT_FOUND (404) の場合は待機（状態送信タスクが再登録する）
+                    if err_str.contains("NOT_FOUND") || err_str.contains("status=404") {
+                        debug!("DP not found, waiting for re-registration...");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    } else if err_str.contains("connect") || err_str.contains("Connection refused") {
+                        debug!("Connection error receiving commands: {}", e);
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    } else {
+                        debug!("ReceiveCommand error: {}, retrying in 1s", e);
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
+                    continue;
                 }
             };
 
