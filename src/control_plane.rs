@@ -20,7 +20,7 @@ use tokio::process::Command;
 use tracing::{debug, info, warn, Instrument};
 
 use crate::api::{run_private_with_http_ipc, HttpIpcState};
-use crate::ipc::{AuthPolicy, ControlCommand, DataPlaneConfig, DataPlaneStatus};
+use crate::ipc::{AuthPolicy, ControlCommand, DataPlaneConfig};
 use crate::statistics::ServerStatistics;
 
 /// コントロールプレーン
