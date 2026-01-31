@@ -9,12 +9,12 @@
 //!
 //! ### エンドポイント
 //!
-//! #### DP 用 API (`/api/v1/dp/*`)
+//! #### IPC 用 API (`/api/v1/ipc/*`)
 //!
 //! | メソッド | 説明 | 方向 |
 //! |----------|------|------|
-//! | `POST /api/v1/dp/SendStatus` | 状態送信（登録・更新・応答すべて統合） | DP → CP |
-//! | `POST /api/v1/dp/ReceiveCommand` | コマンド受信（長ポーリング） | CP → DP |
+//! | `POST /api/v1/ipc/SendStatus` | 状態送信（登録・更新・応答すべて統合） | DP → CP |
+//! | `POST /api/v1/ipc/ReceiveCommand` | コマンド受信（長ポーリング） | CP → DP |
 //!
 //! #### 管理用 API (`/api/v1/admin/*`)
 //!
@@ -359,7 +359,7 @@ fn parse_hex_dp_id(s: &str) -> Result<u32, String> {
     u32::from_str_radix(s, 16).map_err(|e| format!("Invalid dp_id format: {}", e))
 }
 
-/// POST /api/v1/dp/SendStatus
+/// POST /api/v1/ipc/SendStatus
 ///
 /// 状態送信（登録・更新・コマンド応答すべて統合）
 /// 毎回全状態を冪等に送信することで、CP 再起動後も状態を復旧可能
@@ -523,7 +523,7 @@ async fn send_status(
     }
 }
 
-/// POST /api/v1/dp/ReceiveCommand
+/// POST /api/v1/ipc/ReceiveCommand
 ///
 /// コマンド受信（長ポーリング）
 async fn receive_command(

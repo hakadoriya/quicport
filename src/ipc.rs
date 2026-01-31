@@ -9,12 +9,12 @@
 //!
 //! ### エンドポイント
 //!
-//! #### DP 用 API (`/api/v1/dp/*`)
+//! #### IPC 用 API (`/api/v1/ipc/*`)
 //!
 //! | メソッド | 説明 | 方向 |
 //! |----------|------|------|
-//! | `POST /api/v1/dp/SendStatus` | 状態送信（登録・更新・応答すべて統合） | DP → CP |
-//! | `POST /api/v1/dp/ReceiveCommand` | コマンド受信（長ポーリング） | CP → DP |
+//! | `POST /api/v1/ipc/SendStatus` | 状態送信（登録・更新・応答すべて統合） | DP → CP |
+//! | `POST /api/v1/ipc/ReceiveCommand` | コマンド受信（長ポーリング） | CP → DP |
 //!
 //! #### 管理用 API (`/api/v1/admin/*`)
 //!
@@ -34,11 +34,11 @@ use thiserror::Error;
 // API パス定数
 // =============================================================================
 
-/// DP 用 API パス
+/// IPC 用 API パス
 pub mod api_paths {
     // DP → CP（データプレーン用）
-    pub const SEND_STATUS: &str = "/api/v1/dp/SendStatus";
-    pub const RECEIVE_COMMAND: &str = "/api/v1/dp/ReceiveCommand";
+    pub const SEND_STATUS: &str = "/api/v1/ipc/SendStatus";
+    pub const RECEIVE_COMMAND: &str = "/api/v1/ipc/ReceiveCommand";
 
     // CLI/外部 → CP（管理用）
     pub const LIST_DATA_PLANES: &str = "/api/v1/admin/ListDataPlanes";

@@ -1563,8 +1563,8 @@ localhost からのみアクセス可能な管理用 API です。
 |---------------|---------|------|
 | `/healthcheck` | GET | ヘルスチェック |
 | `/metrics` | GET | Prometheus 形式のメトリクス |
-| `/api/v1/dp/SendStatus` | POST | 状態送信・登録（HTTP IPC） |
-| `/api/v1/dp/ReceiveCommand` | POST | コマンド受信・長ポーリング（HTTP IPC） |
+| `/api/v1/ipc/SendStatus` | POST | 状態送信・登録（HTTP IPC） |
+| `/api/v1/ipc/ReceiveCommand` | POST | コマンド受信・長ポーリング（HTTP IPC） |
 | `/api/v1/admin/ListDataPlanes` | POST | 全データプレーン一覧 |
 | `/api/v1/admin/GetDataPlaneStatus` | POST | データプレーン状態取得 |
 | `/api/v1/admin/DrainDataPlane` | POST | データプレーンをドレイン |
@@ -1672,7 +1672,7 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
 
 #### DP 用 API
 
-##### POST /api/v1/dp/SendStatus
+##### POST /api/v1/ipc/SendStatus
 
 状態送信（登録・更新・コマンド応答すべて統合）。
 毎回全状態を冪等に送信することで、CP 再起動後も状態を復旧可能。
@@ -1720,7 +1720,7 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
 }
 ```
 
-##### POST /api/v1/dp/ReceiveCommand
+##### POST /api/v1/ipc/ReceiveCommand
 
 コマンドの長ポーリング取得（デフォルト 30 秒タイムアウト、最大 60 秒に制限）。
 
