@@ -750,6 +750,7 @@ async fn main() -> Result<()> {
                 api_config,
                 no_auto_dataplane,
                 cli.log_format.to_string(),
+                cli.log_output.clone(),
                 quic_keep_alive,
                 quic_idle_timeout,
             )

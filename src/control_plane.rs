@@ -43,6 +43,8 @@ pub struct ControlPlane {
     http_ipc: Arc<HttpIpcState>,
     /// ログ出力形式（data-plane に継承させる）
     log_format: String,
+    /// ログ出力先（data-plane に継承させる）
+    log_output: Option<PathBuf>,
 }
 
 impl ControlPlane {
@@ -54,6 +56,7 @@ impl ControlPlane {
         statistics: Arc<ServerStatistics>,
         http_ipc: Arc<HttpIpcState>,
         log_format: String,
+        log_output: Option<PathBuf>,
     ) -> Result<Arc<Self>> {
         let executable_path =
             std::env::current_exe().context("Failed to get current executable path")?;
@@ -72,6 +75,7 @@ impl ControlPlane {
             executable_path,
             http_ipc,
             log_format,
+            log_output,
         }))
     }
 
@@ -109,8 +113,12 @@ impl ControlPlane {
 
             let mut cmd = Command::new(&self.executable_path);
             cmd.arg("--log-format")
-                .arg(&self.log_format)
-                .arg("data-plane")
+                .arg(&self.log_format);
+            // CP に --log-output が指定されている場合、DP にも継承する
+            if let Some(ref log_output) = self.log_output {
+                cmd.arg("--log-output").arg(log_output);
+            }
+            cmd.arg("data-plane")
                 .arg("--listen")
                 .arg(self.dp_listen_addr.to_string())
                 .stdin(Stdio::null())
@@ -402,6 +410,7 @@ pub async fn run_with_api(
     api_config: Option<ApiConfig>,
     skip_dataplane_start: bool,
     log_format: String,
+    log_output: Option<PathBuf>,
     quic_keep_alive_secs: u64,
     quic_idle_timeout_secs: u64,
 ) -> Result<()> {
@@ -424,6 +433,7 @@ pub async fn run_with_api(
         statistics.clone(),
         http_ipc.clone(),
         log_format,
+        log_output,
     )?;
     let cp_for_shutdown = control_plane.clone();
     let cp_for_api = control_plane.clone();
