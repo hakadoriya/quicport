@@ -44,7 +44,15 @@
 //!     let dp_addr: SocketAddr = "0.0.0.0:39000".parse()?;
 //!     let auth_policy = AuthPolicy::Psk { psk: "secret".to_string() };
 //!     let statistics = Arc::new(ServerStatistics::new());
-//!     control_plane::run_with_api(cp_addr, dp_addr, auth_policy, statistics, None, false).await
+//!     control_plane::run_with_api(
+//!         cp_addr, dp_addr, auth_policy, statistics,
+//!         None,           // api_config
+//!         false,          // skip_dataplane_start
+//!         "console".to_string(), // log_format
+//!         None,           // log_output
+//!         5,              // quic_keep_alive_secs
+//!         90,             // quic_idle_timeout_secs
+//!     ).await
 //! }
 //! ```
 //!
