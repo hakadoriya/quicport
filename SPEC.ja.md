@@ -1535,15 +1535,13 @@ localhost からのみアクセス可能な管理用 API です。
 |---------------|---------|------|
 | `/healthcheck` | GET | ヘルスチェック |
 | `/metrics` | GET | Prometheus 形式のメトリクス |
-| `/api/v1/RegisterDataPlane` | POST | データプレーン登録（HTTP IPC） |
-| `/api/v1/PollCommands` | POST | コマンドポーリング（HTTP IPC） |
-| `/api/v1/AckCommand` | POST | コマンド応答（HTTP IPC） |
-| `/api/v1/ReportEvent` | POST | イベント報告（HTTP IPC） |
-| `/api/v1/ListDataPlanes` | POST | 全データプレーン一覧 |
-| `/api/v1/GetDataPlaneStatus` | POST | データプレーン状態取得 |
-| `/api/v1/DrainDataPlane` | POST | データプレーンをドレイン |
-| `/api/v1/ShutdownDataPlane` | POST | データプレーンをシャットダウン |
-| `/api/v1/GetConnections` | POST | 接続一覧取得 |
+| `/api/v1/dp/SendStatus` | POST | 状態送信・登録（HTTP IPC） |
+| `/api/v1/dp/ReceiveCommand` | POST | コマンド受信・長ポーリング（HTTP IPC） |
+| `/api/v1/admin/ListDataPlanes` | POST | 全データプレーン一覧 |
+| `/api/v1/admin/GetDataPlaneStatus` | POST | データプレーン状態取得 |
+| `/api/v1/admin/DrainDataPlane` | POST | データプレーンをドレイン |
+| `/api/v1/admin/ShutdownDataPlane` | POST | データプレーンをシャットダウン |
+| `/api/v1/admin/GetConnections` | POST | 接続一覧取得 |
 
 ### Public API サーバー
 
