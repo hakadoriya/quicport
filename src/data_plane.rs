@@ -72,10 +72,10 @@ pub struct DataPlane {
     drain_tx: broadcast::Sender<()>,
     /// アクティブ接続数
     active_connections: AtomicU32,
-    /// 総送信バイト数
-    bytes_sent: AtomicU64,
-    /// 総受信バイト数
-    bytes_received: AtomicU64,
+    /// 閉じたコネクション分の累計送信バイト数
+    closed_bytes_sent: AtomicU64,
+    /// 閉じたコネクション分の累計受信バイト数
+    closed_bytes_received: AtomicU64,
     /// 接続情報（GetConnections 用）
     connection_list: RwLock<HashMap<u32, TrackedConnection>>,
 }
@@ -101,8 +101,8 @@ impl DataPlane {
             shutdown_tx,
             drain_tx,
             active_connections: AtomicU32::new(0),
-            bytes_sent: AtomicU64::new(0),
-            bytes_received: AtomicU64::new(0),
+            closed_bytes_sent: AtomicU64::new(0),
+            closed_bytes_received: AtomicU64::new(0),
             connection_list: RwLock::new(HashMap::new()),
         })
     }
@@ -139,12 +139,24 @@ impl DataPlane {
 
     /// 状態レポートを取得
     pub async fn get_status(&self) -> Result<DataPlaneStatus> {
+        // アクティブなコネクションの per-connection バイトカウンターを合算
+        // (閉じたコネクションは unregister_connection() で connection_list から削除済みなので二重カウントしない)
+        let (active_sent, active_received) = {
+            let connections = self.connection_list.read().await;
+            connections.values().fold((0u64, 0u64), |(sent, recv), conn| {
+                (
+                    sent + conn.bytes_sent.load(Ordering::Relaxed),
+                    recv + conn.bytes_received.load(Ordering::Relaxed),
+                )
+            })
+        };
+
         Ok(DataPlaneStatus {
             state: self.get_state().await,
             pid: self.pid,
             active_connections: self.active_connections.load(Ordering::SeqCst),
-            bytes_sent: self.bytes_sent.load(Ordering::SeqCst),
-            bytes_received: self.bytes_received.load(Ordering::SeqCst),
+            bytes_sent: self.closed_bytes_sent.load(Ordering::SeqCst) + active_sent,
+            bytes_received: self.closed_bytes_received.load(Ordering::SeqCst) + active_received,
             started_at: self.started_at,
         })
     }
@@ -188,10 +200,10 @@ impl DataPlane {
         }
     }
 
-    /// バイト統計を更新
-    pub fn add_bytes(&self, sent: u64, received: u64) {
-        self.bytes_sent.fetch_add(sent, Ordering::SeqCst);
-        self.bytes_received.fetch_add(received, Ordering::SeqCst);
+    /// 閉じたコネクションのバイト統計をグローバルカウンターに加算
+    pub fn add_closed_bytes(&self, sent: u64, received: u64) {
+        self.closed_bytes_sent.fetch_add(sent, Ordering::SeqCst);
+        self.closed_bytes_received.fetch_add(received, Ordering::SeqCst);
         self.statistics.add_bytes_sent(sent);
         self.statistics.add_bytes_received(received);
     }
@@ -1923,7 +1935,7 @@ async fn relay_tcp_stream(
                 }
             }
             let _ = quic_send.finish();
-            dp_for_send.add_bytes(total_sent, 0);
+            dp_for_send.add_closed_bytes(total_sent, 0);
             Ok::<_, anyhow::Error>(())
         }
         .instrument(tracing::Span::current()),
@@ -1955,7 +1967,7 @@ async fn relay_tcp_stream(
                     }
                 }
             }
-            dp_for_recv.add_bytes(0, total_received);
+            dp_for_recv.add_closed_bytes(0, total_received);
             Ok::<_, anyhow::Error>(())
         }
         .instrument(tracing::Span::current()),
@@ -2037,7 +2049,7 @@ async fn relay_rpf_udp_stream(
                 }
             }
             let _ = quic_send.finish();
-            dp_for_send.add_bytes(total_sent, 0);
+            dp_for_send.add_closed_bytes(total_sent, 0);
             Ok::<_, anyhow::Error>(())
         }
         .instrument(tracing::Span::current()),
@@ -2090,7 +2102,7 @@ async fn relay_rpf_udp_stream(
                     }
                 }
             }
-            dp_for_recv.add_bytes(0, total_received);
+            dp_for_recv.add_closed_bytes(0, total_received);
             Ok::<_, anyhow::Error>(())
         }
         .instrument(tracing::Span::current()),
@@ -2171,7 +2183,7 @@ async fn relay_lpf_udp_stream(
                     }
                 }
             }
-            dp_for_recv.add_bytes(0, total_received);
+            dp_for_recv.add_closed_bytes(0, total_received);
             Ok::<_, anyhow::Error>(())
         }
         .instrument(tracing::Span::current()),
@@ -2223,7 +2235,7 @@ async fn relay_lpf_udp_stream(
                 }
             }
             let _ = quic_send.finish();
-            dp_for_send.add_bytes(total_sent, 0);
+            dp_for_send.add_closed_bytes(total_sent, 0);
             Ok::<_, anyhow::Error>(())
         }
         .instrument(tracing::Span::current()),
