@@ -409,6 +409,7 @@ impl Default for DataPlaneConfig {
 
 /// データプレーンの状態
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DataPlaneState {
     /// 起動中、初期化処理
     Starting,
@@ -484,7 +485,7 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("0x1234"));
         assert!(json.contains("12345")); // pid
-        assert!(json.contains("Active"));
+        assert!(json.contains("ACTIVE"));
     }
 
     #[test]
