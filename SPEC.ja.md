@@ -341,10 +341,10 @@ quicport ctl status --control-plane-addr 127.0.0.1:39001
 
 ```
 Data Planes:
-PID        State        Connections  Bytes Sent      Bytes Received
-----------------------------------------------------------------
-12345      ACTIVE       3            10485760        5242880
-12346      DRAINING     1            524288          262144
+ID              PID        State        Connections  Bytes Sent      Bytes Received
+----------------------------------------------------------------------------------
+0x3039          12345      ACTIVE       3            10485760        5242880
+0x304a          12346      DRAINING     1            524288          262144
 ```
 
 ## アーキテクチャ
@@ -1186,7 +1186,7 @@ Status:
   0x03 = Internal error
 ```
 
-#### LocalForwardRequest ペイロード (0x05)
+#### LocalForwardRequest ペイロード (0x01)
 
 ```
 +----------------+--------------------+------------------------+-------------------+
@@ -1207,7 +1207,7 @@ Local Source:
   例: "9022/tcp"
 ```
 
-#### LocalForwardResponse ペイロード (0x06)
+#### LocalForwardResponse ペイロード (0x02)
 
 ```
 +----------------+-------------------+
@@ -1222,7 +1222,7 @@ Status:
   0x03 = Internal error
 ```
 
-#### RemoteNewConnection ペイロード (0x10) - RPF
+#### RemoteNewConnection ペイロード (0x23) - RPF
 
 ```
 +------------------+------------------+
@@ -1242,7 +1242,7 @@ Protocol:
 > **注意:** Connection ID は QUIC Stream のヘッダー（先頭 4 バイト、big-endian）にも書き込まれます。
 > これにより、RemoteNewConnection メッセージと Stream の到着順序に依存せずに接続を識別できます。
 
-#### LocalNewConnection ペイロード (0x13) - LPF
+#### LocalNewConnection ペイロード (0x03) - LPF
 
 ```
 +------------------+------------------+
@@ -1689,7 +1689,7 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
 {
   "dp_id": "0x3039",
   "auth_policy": {
-    "type": "psk",
+    "auth_type": "Psk",
     "psk": "secret"
   },
   "config": {
@@ -1856,7 +1856,7 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
 {
   "connections": [
     {
-      "id": 1,
+      "connection_id": 1,
       "remote_addr": "192.168.1.100:50000",
       "protocol": "TCP",
       "bytes_sent": 1024,
