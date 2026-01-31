@@ -91,6 +91,10 @@ pub struct ConnectionInfo {
     pub remote_addr: String,
     /// プロトコル (TCP/UDP)
     pub protocol: String,
+    /// 送信バイト数
+    pub bytes_sent: u64,
+    /// 受信バイト数
+    pub bytes_received: u64,
 }
 
 // =============================================================================
