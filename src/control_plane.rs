@@ -119,7 +119,7 @@ impl ControlPlane {
                 cmd.arg("--log-output").arg(log_output);
             }
             cmd.arg("data-plane")
-                .arg("--listen")
+                .arg("--data-plane-addr")
                 .arg(self.dp_listen_addr.to_string())
                 .stdin(Stdio::null())
                 .stdout(Stdio::inherit())

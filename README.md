@@ -69,7 +69,7 @@ cat client.pub  # Client public key (Base64)
 
 ```bash
 quicport control-plane \
-  --listen 0.0.0.0:39000 \
+  --data-plane-addr 0.0.0.0:39000 \
   --privkey "SERVER_PRIVATE_KEY_BASE64" \
   --client-pubkeys "CLIENT_PUBLIC_KEY_BASE64"
 ```
@@ -101,9 +101,11 @@ quicport control-plane [OPTIONS]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-l, --listen` | `0.0.0.0:39000` | Address and port to listen on for QUIC (UDP) |
+| `--control-plane-addr` | `127.0.0.1:39000` | Address and port for control-plane HTTP IPC server |
+| `--data-plane-addr` | `0.0.0.0:39000` | Address and port for data-plane QUIC listen |
 | `--private-api-listen` | `127.0.0.1:<port>` | Address for private API server (same port as QUIC, TCP) |
 | `--no-public-api` | `false` | Disable public API server (/healthcheck, port+1) |
+| `--no-auto-dataplane` | `false` | Do not automatically start a data-plane process |
 | `--privkey` | - | Server's private key (Base64). Env: `QUICPORT_PRIVKEY` |
 | `--privkey-file` | - | Path to server's private key file. Env: `QUICPORT_PRIVKEY_FILE` |
 | `--client-pubkeys` | - | Authorized client public keys (comma-separated). Env: `QUICPORT_CLIENT_PUBKEYS` |
@@ -200,18 +202,29 @@ Disable with `--no-public-api` flag.
 quicport can be used as a library in your Rust applications:
 
 ```rust
-use quicport::server::{self, AuthConfig};
-use quicport::client::{self, ClientAuthConfig};
+use quicport::control_plane;
+use quicport::ipc::AuthPolicy;
+use quicport::statistics::ServerStatistics;
+use quicport::client::{self, ClientAuthConfig, ReconnectConfig};
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-// Start server
-let listen: SocketAddr = "0.0.0.0:39000".parse()?;
-let auth = AuthConfig::Psk { psk: "secret".to_string() };
-server::run(listen, auth).await?;
+// Start server (control plane)
+let cp_addr: SocketAddr = "127.0.0.1:39000".parse()?;
+let dp_addr: SocketAddr = "0.0.0.0:39000".parse()?;
+let auth_policy = AuthPolicy::Psk { psk: "secret".to_string() };
+let statistics = Arc::new(ServerStatistics::new());
+control_plane::run_with_api(
+    cp_addr, dp_addr, auth_policy, statistics,
+    None, false, "console".to_string(), None, 5, 90,
+).await?;
 
 // Start client
 let auth = ClientAuthConfig::Psk { psk: "secret".to_string() };
-client::run_remote_forward("127.0.0.1:39000", "8080/tcp", "80/tcp", auth).await?;
+let reconnect = ReconnectConfig::default();
+client::run_remote_forward_with_reconnect(
+    "127.0.0.1:39000", "8080/tcp", "80/tcp", auth, false, reconnect, 5, 90,
+).await?;
 ```
 
 ## Systemd Service

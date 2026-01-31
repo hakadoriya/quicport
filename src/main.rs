@@ -67,8 +67,8 @@ enum Commands {
     /// It operates independently of the control plane after startup.
     DataPlane {
         /// Address and port to listen on for QUIC
-        #[arg(short, long, default_value = "0.0.0.0:39000")]
-        listen: SocketAddr,
+        #[arg(long, default_value = "0.0.0.0:39000")]
+        data_plane_addr: SocketAddr,
 
         /// Control plane HTTP URL to connect to for receiving auth policy (HTTP IPC).
         /// Example: http://127.0.0.1:39000
@@ -572,14 +572,14 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::DataPlane {
-            listen,
+            data_plane_addr,
             control_plane_url,
             drain_timeout,
             quic_keep_alive,
             quic_idle_timeout,
         } => {
             let config = DataPlaneConfig {
-                listen_addr: listen,
+                listen_addr: data_plane_addr,
                 drain_timeout,
                 quic_keep_alive_secs: quic_keep_alive,
                 quic_idle_timeout_secs: quic_idle_timeout,
@@ -589,7 +589,7 @@ async fn main() -> Result<()> {
             // HTTP IPC: control-plane に HTTP で接続して認証ポリシーを取得
             info!(
                 "Starting data plane on {} (HTTP IPC to control plane at {})",
-                listen, control_plane_url
+                data_plane_addr, control_plane_url
             );
             data_plane::run(config, &control_plane_url).await?;
         }
