@@ -470,6 +470,13 @@ impl ConnectionManager {
     fn remove_connection(&mut self, id: u32) {
         self.connections.remove(&id);
     }
+
+    /// 全コネクションのキャンセルトークンを発火し、接続情報をクリアする
+    fn cancel_all(&mut self) {
+        for (_, info) in self.connections.drain() {
+            info.cancel_token.cancel();
+        }
+    }
 }
 
 /// データプレーンを起動
@@ -1439,6 +1446,8 @@ async fn handle_remote_forward(
                     }
                 }
             }
+
+            conn_manager.lock().await.cancel_all();
         }
         Protocol::Udp => {
             // UDP ソケットを作成
@@ -1650,6 +1659,8 @@ async fn handle_remote_forward(
                     }
                 }
             }
+
+            conn_manager.lock().await.cancel_all();
         }
     }
 
@@ -1887,6 +1898,8 @@ async fn handle_local_forward(
             }
         }
     }
+
+    conn_manager.lock().await.cancel_all();
 
     Ok(())
 }
