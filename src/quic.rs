@@ -7,7 +7,7 @@ use base64::Engine;
 use hmac::{Hmac, Mac};
 use quinn::{ClientConfig, Endpoint, RecvStream, SendStream, ServerConfig};
 use rand::rngs::OsRng;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
 use socket2::{Domain, Protocol as SockProtocol, Socket, Type};
 use std::collections::HashMap;
@@ -408,8 +408,8 @@ fn server_cert_lock_path() -> Result<PathBuf> {
     Ok(server_config_dir()?.join("server.lock"))
 }
 
-/// 証明書と秘密鍵をファイルに保存（アトミック操作）
-fn save_server_cert(cert_der: &[u8], key_der: &[u8]) -> Result<()> {
+/// 証明書と秘密鍵を PEM 形式でファイルに保存（アトミック操作）
+fn save_server_cert(cert_pem: &str, key_pem: &str) -> Result<()> {
     let cert_path = server_cert_path()?;
     let key_path = server_key_path()?;
     let config_dir = server_config_dir()?;
@@ -418,9 +418,9 @@ fn save_server_cert(cert_der: &[u8], key_der: &[u8]) -> Result<()> {
     let cert_tmp = config_dir.join("server.crt.tmp");
     let key_tmp = config_dir.join("server.key.tmp");
 
-    fs::write(&cert_tmp, cert_der)
+    fs::write(&cert_tmp, cert_pem)
         .with_context(|| format!("Failed to write certificate to {:?}", cert_tmp))?;
-    fs::write(&key_tmp, key_der)
+    fs::write(&key_tmp, key_pem)
         .with_context(|| format!("Failed to write private key to {:?}", key_tmp))?;
 
     // 秘密鍵ファイルのパーミッションを 0600 に設定 (Unix のみ)
@@ -443,7 +443,7 @@ fn save_server_cert(cert_der: &[u8], key_der: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// 証明書と秘密鍵をファイルから読み込み
+/// 証明書と秘密鍵を PEM 形式のファイルから読み込み
 fn load_server_cert() -> Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>> {
     let cert_path = server_cert_path()?;
     let key_path = server_key_path()?;
@@ -453,17 +453,47 @@ fn load_server_cert() -> Result<Option<(Vec<CertificateDer<'static>>, PrivateKey
         return Ok(None);
     }
 
-    let cert_der = fs::read(&cert_path)
+    // PEM 形式の証明書を読み込み、DER に変換
+    let cert_pem = fs::read_to_string(&cert_path)
         .with_context(|| format!("Failed to read certificate from {:?}", cert_path))?;
-    let key_der = fs::read(&key_path)
-        .with_context(|| format!("Failed to read private key from {:?}", key_path))?;
+    let certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut cert_pem.as_bytes())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("Failed to parse certificate PEM")?;
+    if certs.is_empty() {
+        anyhow::bail!("No certificates found in {:?}", cert_path);
+    }
 
-    let cert = CertificateDer::from(cert_der);
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der));
+    // PEM 形式の秘密鍵を読み込み、DER に変換
+    let key_pem = fs::read_to_string(&key_path)
+        .with_context(|| format!("Failed to read private key from {:?}", key_path))?;
+    let key = rustls_pemfile::pkcs8_private_keys(&mut key_pem.as_bytes())
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No private key found in {:?}", key_path))?
+        .context("Failed to parse private key PEM")?;
 
     tracing::info!("Server certificate loaded from {:?}", cert_path);
 
-    Ok(Some((vec![cert], key)))
+    Ok(Some((certs, PrivateKeyDer::Pkcs8(key))))
+}
+
+/// 読み込みに失敗した証明書・秘密鍵ファイルを .backup にリネームしてバックアップ
+fn backup_server_cert_files() -> Result<()> {
+    let cert_path = server_cert_path()?;
+    let key_path = server_key_path()?;
+
+    for path in [&cert_path, &key_path] {
+        if path.exists() {
+            let mut backup_path = path.as_os_str().to_owned();
+            backup_path.push(".backup");
+            let backup_path = PathBuf::from(backup_path);
+            fs::rename(path, &backup_path)
+                .with_context(|| format!("Failed to rename {:?} to {:?}", path, backup_path))?;
+            tracing::info!("Backed up {:?} to {:?}", path, backup_path);
+        }
+    }
+
+    Ok(())
 }
 
 /// サーバー証明書を取得（ファイルから読み込むか、なければ生成して保存）
@@ -496,8 +526,14 @@ fn get_or_create_server_cert() -> Result<(Vec<CertificateDer<'static>>, PrivateK
     }
 
     // ロック取得後に既存の証明書を確認
-    if let Some(certs) = load_server_cert()? {
-        return Ok(certs);
+    match load_server_cert() {
+        Ok(Some(certs)) => return Ok(certs),
+        Ok(None) => { /* ファイルが存在しない → 新規生成へ */ }
+        Err(e) => {
+            // 読み込み失敗 → 既存ファイルを .backup にリネームして新規生成へ
+            tracing::warn!("Failed to load server certificate, backing up and regenerating: {e:#}");
+            backup_server_cert_files()?;
+        }
     }
 
     // 新規生成
@@ -507,17 +543,24 @@ fn get_or_create_server_cert() -> Result<(Vec<CertificateDer<'static>>, PrivateK
     let certified_key = rcgen::generate_simple_self_signed(subject_alt_names)
         .context("Failed to generate self-signed certificate")?;
 
-    let cert_der_bytes = certified_key.cert.der().to_vec();
-    let key_der_bytes = certified_key.key_pair.serialize_der();
+    // PEM 形式で取得して保存
+    let cert_pem = certified_key.cert.pem();
+    let key_pem = certified_key.key_pair.serialize_pem();
 
-    // ファイルに保存
-    save_server_cert(&cert_der_bytes, &key_der_bytes)?;
+    save_server_cert(&cert_pem, &key_pem)?;
 
-    let cert_der = CertificateDer::from(cert_der_bytes);
-    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der_bytes));
+    // PEM → DER → rustls 型に変換
+    let certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut cert_pem.as_bytes())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("Failed to parse generated certificate PEM")?;
+    let key = rustls_pemfile::pkcs8_private_keys(&mut key_pem.as_bytes())
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No private key found in generated PEM"))?
+        .context("Failed to parse generated private key PEM")?;
 
     // ロックは lock_file が drop されると自動的に解放される
-    Ok((vec![cert_der], key_der))
+    Ok((certs, PrivateKeyDer::Pkcs8(key)))
 }
 
 /// SO_REUSEADDR + SO_REUSEPORT 付きで UDP ソケットを作成（グレースフルリスタート用）
