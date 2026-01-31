@@ -852,6 +852,18 @@ data-plane                    旧 control-plane              新 control-plane
 
 **全てのトラフィックに QUIC Stream を使用します。**
 
+#### ALPN プロトコル識別子
+
+QUIC 接続の TLS ハンドシェイク時に、ALPN (Application-Layer Protocol Negotiation) として `quicport/1` を使用します。
+
+```
+ALPN: quicport/1
+```
+
+- サーバー・クライアントの両方が `quicport/1` を ALPN に設定します
+- これにより、同一ポートで他の QUIC アプリケーション（HTTP/3 等）と共存する場合でも、quicport のトラフィックを正しく識別できます
+- バージョン番号 `/1` は、将来のプロトコル非互換変更時にインクリメントされます
+
 | ローカルプロトコル | QUIC トランスポート |
 |-------------------|---------------------|
 | TCP | QUIC Stream |
