@@ -253,26 +253,6 @@ impl ControlPlane {
         Ok(())
     }
 
-    /// 全データプレーンの状態を取得
-    #[allow(dead_code)]
-    pub async fn get_all_status(&self) -> Vec<DataPlaneStatus> {
-        let mut statuses = Vec::new();
-
-        let dataplanes = self.http_ipc.dataplanes.read().await;
-        for dp in dataplanes.values() {
-            statuses.push(DataPlaneStatus {
-                state: dp.state,
-                pid: dp.pid,
-                active_connections: dp.active_connections,
-                bytes_sent: dp.bytes_sent,
-                bytes_received: dp.bytes_received,
-                started_at: dp.started_at,
-            });
-        }
-
-        statuses
-    }
-
     /// stale データプレーンのクリーンアップタスクを起動
     ///
     /// バックグラウンドで 60 秒ごとに stale DP を検出する。
