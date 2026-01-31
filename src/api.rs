@@ -143,7 +143,7 @@ impl HttpDataPlane {
 /// HTTP IPC 状態
 pub struct HttpIpcState {
     /// 登録済みデータプレーン
-    pub dataplanes: RwLock<HashMap<String, HttpDataPlane>>,
+    pub data_planes: RwLock<HashMap<String, HttpDataPlane>>,
     /// コマンド ID カウンター
     command_id_counter: AtomicU64,
     /// 新コマンド通知（長ポーリング用）
@@ -160,7 +160,7 @@ impl HttpIpcState {
     /// 新しい HttpIpcState を作成
     pub fn new() -> Self {
         Self {
-            dataplanes: RwLock::new(HashMap::new()),
+            data_planes: RwLock::new(HashMap::new()),
             command_id_counter: AtomicU64::new(1),
             command_notify: Notify::new(),
             auth_policy: RwLock::new(None),
@@ -181,8 +181,8 @@ impl HttpIpcState {
         dp_id: &str,
         command: ControlCommand,
     ) -> Result<String, String> {
-        let mut dataplanes = self.dataplanes.write().await;
-        if let Some(dp) = dataplanes.get_mut(dp_id) {
+        let mut data_planes = self.data_planes.write().await;
+        if let Some(dp) = data_planes.get_mut(dp_id) {
             let cmd_id = self.next_command_id();
             dp.pending_commands.push_back(CommandWithId {
                 id: cmd_id.clone(),
@@ -198,8 +198,8 @@ impl HttpIpcState {
 
     /// 全 ACTIVE データプレーンにコマンドを送信
     pub async fn broadcast_command(&self, command: ControlCommand) {
-        let mut dataplanes = self.dataplanes.write().await;
-        for (_, dp) in dataplanes.iter_mut() {
+        let mut data_planes = self.data_planes.write().await;
+        for (_, dp) in data_planes.iter_mut() {
             if dp.state == DataPlaneState::Active {
                 let cmd_id = self.next_command_id();
                 dp.pending_commands.push_back(CommandWithId {
@@ -221,8 +221,8 @@ impl HttpIpcState {
         loop {
             // タイムアウトチェック
             if start.elapsed() >= timeout {
-                let dataplanes = self.dataplanes.read().await;
-                let pending_count: usize = dataplanes
+                let data_planes = self.data_planes.read().await;
+                let pending_count: usize = data_planes
                     .values()
                     .map(|dp| dp.pending_commands.len())
                     .sum();
@@ -237,8 +237,8 @@ impl HttpIpcState {
 
             // すべてのコマンドが配信されたかチェック
             let all_delivered = {
-                let dataplanes = self.dataplanes.read().await;
-                dataplanes.values().all(|dp| dp.pending_commands.is_empty())
+                let data_planes = self.data_planes.read().await;
+                data_planes.values().all(|dp| dp.pending_commands.is_empty())
             };
 
             if all_delivered {
@@ -253,19 +253,19 @@ impl HttpIpcState {
     /// stale データプレーンを検出（削除はしない）
     ///
     /// `last_active` + `timeout_secs` < 現在時刻 の DP を stale と判定する。
-    /// 実際の削除は eBPF map クリーンアップ成功後に `remove_dataplanes()` で行う。
+    /// 実際の削除は eBPF map クリーンアップ成功後に `remove_data_planes()` で行う。
     ///
     /// # Returns
     ///
     /// stale と判定された (dp_id, server_id) のリスト
-    pub async fn detect_stale_dataplanes(&self, timeout_secs: u64) -> Vec<(String, u32)> {
+    pub async fn detect_stale_data_planes(&self, timeout_secs: u64) -> Vec<(String, u32)> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
-        let dataplanes = self.dataplanes.read().await;
-        dataplanes
+        let data_planes = self.data_planes.read().await;
+        data_planes
             .iter()
             .filter_map(|(dp_id, dp)| {
                 if dp.last_active + timeout_secs < now {
@@ -277,14 +277,14 @@ impl HttpIpcState {
             .collect()
     }
 
-    /// 指定されたデータプレーンを `dataplanes` および `active_server_ids` から削除
+    /// 指定されたデータプレーンを `data_planes` および `active_server_ids` から削除
     ///
     /// eBPF map エントリの削除が成功した後に呼び出すことを想定。
-    pub async fn remove_dataplanes(&self, entries: &[(String, u32)]) {
-        let mut dataplanes = self.dataplanes.write().await;
+    pub async fn remove_data_planes(&self, entries: &[(String, u32)]) {
+        let mut data_planes = self.data_planes.write().await;
         let mut active_ids = self.active_server_ids.write().await;
         for (dp_id, server_id) in entries {
-            dataplanes.remove(dp_id);
+            data_planes.remove(dp_id);
             active_ids.remove(server_id);
             warn!(
                 "Removed stale data plane: dp_id={}, server_id={}",
@@ -400,8 +400,8 @@ async fn send_status(
 
     // 既存の DP かどうかを確認
     let is_new_registration = {
-        let dataplanes = state.http_ipc.dataplanes.read().await;
-        !dataplanes.contains_key(&dp_id)
+        let data_planes = state.http_ipc.data_planes.read().await;
+        !data_planes.contains_key(&dp_id)
     };
 
     if is_new_registration {
@@ -451,7 +451,7 @@ async fn send_status(
 
         // データプレーンを登録
         {
-            let mut dataplanes = state.http_ipc.dataplanes.write().await;
+            let mut data_planes = state.http_ipc.data_planes.write().await;
             let mut dp = HttpDataPlane::new(dp_id.clone(), req.pid, req.listen_addr.clone());
             dp.server_id = Some(dp_id_u32);
             dp.state = req.state;
@@ -460,7 +460,7 @@ async fn send_status(
             dp.bytes_received = req.bytes_received;
             dp.started_at = req.started_at;
             dp.last_active = now;
-            dataplanes.insert(dp_id.clone(), dp);
+            data_planes.insert(dp_id.clone(), dp);
         }
 
         info!("Data plane registered: dp_id={}", dp_id);
@@ -476,8 +476,8 @@ async fn send_status(
     } else {
         // ========== 状態更新 ==========
 
-        let mut dataplanes = state.http_ipc.dataplanes.write().await;
-        if let Some(dp) = dataplanes.get_mut(&dp_id) {
+        let mut data_planes = state.http_ipc.data_planes.write().await;
+        if let Some(dp) = data_planes.get_mut(&dp_id) {
             // 全状態を更新（冪等）
             dp.server_id = Some(dp_id_u32);
             dp.pid = req.pid;
@@ -548,8 +548,8 @@ async fn receive_command(
 
     // 即座にコマンドがあるか確認
     {
-        let mut dataplanes = state.http_ipc.dataplanes.write().await;
-        if let Some(dp) = dataplanes.get_mut(&req.dp_id) {
+        let mut data_planes = state.http_ipc.data_planes.write().await;
+        if let Some(dp) = data_planes.get_mut(&req.dp_id) {
             // 最終アクティブ時刻を更新
             dp.last_active = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -590,8 +590,8 @@ async fn receive_command(
     }
 
     // コマンドを取得
-    let mut dataplanes = state.http_ipc.dataplanes.write().await;
-    if let Some(dp) = dataplanes.get_mut(&req.dp_id) {
+    let mut data_planes = state.http_ipc.data_planes.write().await;
+    if let Some(dp) = data_planes.get_mut(&req.dp_id) {
         let commands: Vec<CommandWithId> = dp.pending_commands.drain(..).collect();
         debug!(
             "Returning {} commands after poll for {}",
@@ -620,13 +620,13 @@ async fn list_data_planes(
     State(state): State<PrivateApiState>,
     Json(_req): Json<ListDataPlanesRequest>,
 ) -> impl IntoResponse {
-    let dataplanes = state.http_ipc.dataplanes.read().await;
-    let list: Vec<DataPlaneSummary> = dataplanes.values().map(|dp| dp.to_summary()).collect();
+    let data_planes = state.http_ipc.data_planes.read().await;
+    let list: Vec<DataPlaneSummary> = data_planes.values().map(|dp| dp.to_summary()).collect();
 
     (
         StatusCode::OK,
         Json(serde_json::json!(ListDataPlanesResponse {
-            dataplanes: list
+            data_planes: list
         })),
     )
 }
@@ -638,8 +638,8 @@ async fn get_data_plane_status(
     State(state): State<PrivateApiState>,
     Json(req): Json<GetDataPlaneStatusRequest>,
 ) -> impl IntoResponse {
-    let dataplanes = state.http_ipc.dataplanes.read().await;
-    if let Some(dp) = dataplanes.get(&req.dp_id) {
+    let data_planes = state.http_ipc.data_planes.read().await;
+    if let Some(dp) = data_planes.get(&req.dp_id) {
         (
             StatusCode::OK,
             Json(serde_json::json!(dp.to_status_response())),
@@ -722,8 +722,8 @@ async fn get_connections(
     State(state): State<PrivateApiState>,
     Json(req): Json<GetConnectionsRequest>,
 ) -> impl IntoResponse {
-    let dataplanes = state.http_ipc.dataplanes.read().await;
-    if let Some(dp) = dataplanes.get(&req.dp_id) {
+    let data_planes = state.http_ipc.data_planes.read().await;
+    if let Some(dp) = data_planes.get(&req.dp_id) {
         (
             StatusCode::OK,
             Json(serde_json::json!(GetConnectionsResponse {

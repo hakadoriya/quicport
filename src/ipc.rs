@@ -211,7 +211,7 @@ pub struct DataPlaneSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListDataPlanesResponse {
     /// データプレーン一覧
-    pub dataplanes: Vec<DataPlaneSummary>,
+    pub data_planes: Vec<DataPlaneSummary>,
 }
 
 /// GetDataPlaneStatus リクエスト (CLI/外部 → CP)
