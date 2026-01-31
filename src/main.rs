@@ -89,7 +89,7 @@ enum Commands {
 
     /// Control commands for managing data planes
     #[command(subcommand)]
-    Ctl(CtlCommands),
+    Admin(AdminCommands),
 
     /// SSH ProxyCommand mode (for use with ssh -o ProxyCommand)
     ///
@@ -295,9 +295,9 @@ enum Commands {
     },
 }
 
-/// Control subcommands
+/// Admin subcommands
 #[derive(Subcommand, Debug)]
-enum CtlCommands {
+enum AdminCommands {
     /// List all data planes
     #[command(name = "list-data-planes")]
     ListDataPlanes {
@@ -638,7 +638,7 @@ async fn main() -> Result<()> {
     let pid = std::process::id();
     let subcommand = match &cli.command {
         Commands::DataPlane { .. } => "data-plane",
-        Commands::Ctl(_) => "ctl",
+        Commands::Admin(_) => "admin",
         Commands::SshProxy { .. } => "ssh-proxy",
         Commands::ControlPlane { .. } => "control-plane",
         Commands::Client { .. } => "client",
@@ -669,8 +669,8 @@ async fn main() -> Result<()> {
             data_plane::run(config, &control_plane_url).await?;
         }
 
-        Commands::Ctl(ctl_cmd) => match ctl_cmd {
-            CtlCommands::ListDataPlanes { control_plane_addr } => {
+        Commands::Admin(admin_cmd) => match admin_cmd {
+            AdminCommands::ListDataPlanes { control_plane_addr } => {
                 call_admin_api(
                     control_plane_addr,
                     quicport::ipc::api_paths::LIST_DATA_PLANES,
@@ -678,7 +678,7 @@ async fn main() -> Result<()> {
                 )
                 .await?;
             }
-            CtlCommands::GetDataPlaneStatus {
+            AdminCommands::GetDataPlaneStatus {
                 dp_id,
                 control_plane_addr,
             } => {
@@ -689,7 +689,7 @@ async fn main() -> Result<()> {
                 )
                 .await?;
             }
-            CtlCommands::DrainDataPlane {
+            AdminCommands::DrainDataPlane {
                 dp_id,
                 control_plane_addr,
             } => {
@@ -700,7 +700,7 @@ async fn main() -> Result<()> {
                 )
                 .await?;
             }
-            CtlCommands::ShutdownDataPlane {
+            AdminCommands::ShutdownDataPlane {
                 dp_id,
                 control_plane_addr,
             } => {
@@ -711,7 +711,7 @@ async fn main() -> Result<()> {
                 )
                 .await?;
             }
-            CtlCommands::GetConnections {
+            AdminCommands::GetConnections {
                 dp_id,
                 control_plane_addr,
             } => {

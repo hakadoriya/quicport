@@ -297,12 +297,12 @@ quicport data-plane [OPTIONS]
 quicport data-plane --data-plane-addr 0.0.0.0:39000 --control-plane-url http://127.0.0.1:39000
 ```
 
-### 制御コマンド (ctl)
+### 制御コマンド (admin)
 
 実行中のデータプレーンを管理するためのコマンドです。
 
 ```bash
-quicport ctl <COMMAND>
+quicport admin <COMMAND>
 ```
 
 **サブコマンド:**
@@ -331,22 +331,22 @@ quicport ctl <COMMAND>
 
 ```bash
 # 全データプレーンの一覧を確認
-quicport ctl list-data-planes
+quicport admin list-data-planes
 
 # 特定のデータプレーンの詳細状態を確認
-quicport ctl get-data-plane-status --dp-id 0x3039
+quicport admin get-data-plane-status --dp-id 0x3039
 
 # 特定のデータプレーンをドレイン
-quicport ctl drain-data-plane --dp-id 0x3039
+quicport admin drain-data-plane --dp-id 0x3039
 
 # 特定のデータプレーンをシャットダウン
-quicport ctl shutdown-data-plane --dp-id 0x3039
+quicport admin shutdown-data-plane --dp-id 0x3039
 
 # 特定のデータプレーンの接続一覧を確認
-quicport ctl get-connections --dp-id 0x3039
+quicport admin get-connections --dp-id 0x3039
 
 # コントロールプレーンのアドレスを指定
-quicport ctl list-data-planes --control-plane-addr 127.0.0.1:39001
+quicport admin list-data-planes --control-plane-addr 127.0.0.1:39001
 ```
 
 **出力例 (list-data-planes):**
