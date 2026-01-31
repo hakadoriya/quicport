@@ -46,7 +46,7 @@
 
 ```bash
 # JSON 形式でログ出力（構造化ログ、監視ツール連携向け）
-quicport --log-format json server --listen 0.0.0.0:9000
+quicport --log-format json control-plane --control-plane-addr 127.0.0.1:9000 --data-plane-addr 0.0.0.0:9000
 
 # 環境変数で指定
 QUICPORT_LOG_FORMAT=json quicport control-plane --control-plane-addr 127.0.0.1:9000 --data-plane-addr 0.0.0.0:9000
@@ -279,7 +279,7 @@ quicport data-plane [OPTIONS]
 
 | オプション | 必須 | 説明 |
 |-----------|------|------|
-| `--listen`, `-l` | No | QUIC リッスンアドレス（デフォルト: `0.0.0.0:39000`） |
+| `--data-plane-addr` | No | QUIC リッスンアドレス（デフォルト: `0.0.0.0:39000`） |
 | `--drain-timeout` | No | DRAIN 状態のタイムアウト秒数（デフォルト: `0` = 無限） |
 | `--control-plane-url` | Yes | コントロールプレーンの HTTP API URL（HTTP IPC 接続用） |
 | `--quic-keep-alive` | No | QUIC keep-alive interval（秒）。NAT テーブル維持のための ping 送信間隔（デフォルト: `5`）。環境変数 `QUICPORT_QUIC_KEEP_ALIVE` でも指定可 |
@@ -294,7 +294,7 @@ quicport data-plane [OPTIONS]
 
 ```bash
 # HTTP IPC でコントロールプレーンに接続してデータプレーンを起動
-quicport data-plane --listen 0.0.0.0:39000 --control-plane-url http://127.0.0.1:39000
+quicport data-plane --data-plane-addr 0.0.0.0:39000 --control-plane-url http://127.0.0.1:39000
 ```
 
 ### 制御コマンド (ctl)
@@ -415,7 +415,7 @@ quicport はサーバー再起動時の接続維持を実現するため、デ�
 # 1. データプレーンを別 cgroup で起動（HTTP IPC モード）
 systemd-run --slice=user.slice --unit="quicport-dp-$$.service" \
   quicport data-plane \
-    --listen "${QUICPORT_DP_ADDR}" \
+    --data-plane-addr "${QUICPORT_DP_ADDR}" \
     --control-plane-url "${QUICPORT_CP_URL}"
 
 # 2. コントロールプレーンを起動（PID を引き継ぎ）
@@ -437,7 +437,7 @@ systemd がない環境（macOS 等）では、control-plane が data-plane プ�
    - `--log-format <format>`: CP の値をそのまま継承
    - `--log-output <path>`（指定時のみ）: CP の値をそのまま継承
    - `data-plane` サブコマンド
-   - `--listen <dp_listen_addr>`: CP の `--data-plane-addr` で指定されたアドレス
+   - `--data-plane-addr <dp_listen_addr>`: CP の `--data-plane-addr` で指定されたアドレス
    - `--control-plane-url http://127.0.0.1:<cp_port>`: **常にループバック**。`<cp_port>` は CP の `--control-plane-addr` のポート
 3. `pre_exec` で `libc::setsid()` を呼び出し、独立したセッションを作成
    - 親プロセス（CP）が終了しても DP は動作を継続
@@ -519,6 +519,9 @@ systemd                control-plane            data-plane
    |                        |                        |-- 全コネクション終了
    |                        |                        |-- または drain_timeout 経過
    |                        |                        |
+   |                        |                        |-- TERMINATED 状態を CP に送信
+   |                        |                        |   (SendStatus で明示的に通知)
+   |                        |                        |
    |                        |                        |-- プロセス終了
    |                        |                        |
 ```
@@ -529,7 +532,7 @@ systemd                control-plane            data-plane
 4. dp が新規接続の受付を停止し、DRAINING 状態に遷移
 5. cp がプロセス終了
 6. dp は別 cgroup で独立して動作を継続
-7. dp は既存コネクションをすべて処理完了（または drain_timeout 経過）後に終了
+7. dp は既存コネクションをすべて処理完了（または drain_timeout 経過）後、TERMINATED 状態を SendStatus で CP に明示的に通知してから終了
 
 **DRAINING 状態での動作:**
 
@@ -1664,7 +1667,7 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
 **1 秒間隔**で定期送信される。
 
 - 初回呼び出し: DP 登録（auth_policy と config がレスポンスに含まれる）
-- 以降の呼び出し: 状態更新 + コマンド応答（5 秒周期）
+- 以降の呼び出し: 状態更新 + コマンド応答（1 秒周期）
 
 **リクエスト:**
 
