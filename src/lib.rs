@@ -64,9 +64,11 @@
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let auth = ClientAuthConfig::Psk { psk: "secret".to_string() };
+//!     let insecure = false;
 //!     let reconnect = client::ReconnectConfig::default();
-//!     // 第6引数は reconnect 設定
-//!     client::run_remote_forward_with_reconnect("127.0.0.1:39000", "8080/tcp", "80/tcp", auth, false, reconnect).await
+//!     let keep_alive_secs = 5;
+//!     let idle_timeout_secs = 90;
+//!     client::run_remote_forward_with_reconnect("127.0.0.1:39000", "8080/tcp", "80/tcp", auth, insecure, reconnect, keep_alive_secs, idle_timeout_secs).await
 //! }
 //! ```
 

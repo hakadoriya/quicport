@@ -44,6 +44,14 @@ use crate::statistics::ServerStatistics;
 /// 接続 ID カウンター
 static CONNECTION_ID_COUNTER: AtomicU32 = AtomicU32::new(1);
 
+/// 接続ごとの追跡情報（バイト統計を含む）
+struct TrackedConnection {
+    protocol: Protocol,
+    remote_addr: SocketAddr,
+    bytes_sent: Arc<AtomicU64>,
+    bytes_received: Arc<AtomicU64>,
+}
+
 /// データプレーンの共有状態
 pub struct DataPlane {
     /// プロセス状態
@@ -69,7 +77,7 @@ pub struct DataPlane {
     /// 総受信バイト数
     bytes_received: AtomicU64,
     /// 接続情報（GetConnections 用）
-    connection_list: RwLock<HashMap<u32, (Protocol, SocketAddr)>>,
+    connection_list: RwLock<HashMap<u32, TrackedConnection>>,
 }
 
 impl DataPlane {
@@ -188,12 +196,25 @@ impl DataPlane {
         self.statistics.add_bytes_received(received);
     }
 
-    /// 接続情報を登録
-    pub async fn register_connection(&self, id: u32, protocol: Protocol, remote_addr: SocketAddr) {
-        self.connection_list
-            .write()
-            .await
-            .insert(id, (protocol, remote_addr));
+    /// 接続情報を登録し、接続ごとのバイトカウンターを返す
+    pub async fn register_connection(
+        &self,
+        id: u32,
+        protocol: Protocol,
+        remote_addr: SocketAddr,
+    ) -> (Arc<AtomicU64>, Arc<AtomicU64>) {
+        let bytes_sent = Arc::new(AtomicU64::new(0));
+        let bytes_received = Arc::new(AtomicU64::new(0));
+        self.connection_list.write().await.insert(
+            id,
+            TrackedConnection {
+                protocol,
+                remote_addr,
+                bytes_sent: bytes_sent.clone(),
+                bytes_received: bytes_received.clone(),
+            },
+        );
+        (bytes_sent, bytes_received)
     }
 
     /// 接続情報を削除
@@ -207,10 +228,12 @@ impl DataPlane {
             .read()
             .await
             .iter()
-            .map(|(id, (protocol, addr))| crate::ipc::ConnectionInfo {
+            .map(|(id, tracked)| crate::ipc::ConnectionInfo {
                 connection_id: *id,
-                remote_addr: addr.to_string(),
-                protocol: format!("{:?}", protocol),
+                remote_addr: tracked.remote_addr.to_string(),
+                protocol: format!("{:?}", tracked.protocol),
+                bytes_sent: tracked.bytes_sent.load(Ordering::Relaxed),
+                bytes_received: tracked.bytes_received.load(Ordering::Relaxed),
             })
             .collect()
     }
@@ -1338,7 +1361,7 @@ async fn handle_remote_forward(
                                     tcp_addr,
                                     cancel_token.clone(),
                                 );
-                                data_plane.register_connection(conn_id, Protocol::Tcp, tcp_addr).await;
+                                let (conn_sent, conn_recv) = data_plane.register_connection(conn_id, Protocol::Tcp, tcp_addr).await;
 
                                 let conn_manager_clone = conn_manager.clone();
                                 let dp_clone = data_plane.clone();
@@ -1350,6 +1373,8 @@ async fn handle_remote_forward(
                                         quic_recv,
                                         dp_clone.clone(),
                                         cancel_token,
+                                        conn_sent,
+                                        conn_recv,
                                     )
                                     .await
                                     {
@@ -1536,7 +1561,7 @@ async fn handle_remote_forward(
                                         );
                                         udp_connections.lock().await.insert(src_addr, (conn_id, tx.clone()));
                                     }
-                                    data_plane.register_connection(conn_id, Protocol::Udp, src_addr).await;
+                                    let (conn_sent, conn_recv) = data_plane.register_connection(conn_id, Protocol::Udp, src_addr).await;
 
                                     // 最初のパケットを送信（ロック外で await）
                                     let _ = tx.send(packet).await;
@@ -1556,6 +1581,8 @@ async fn handle_remote_forward(
                                             quic_recv,
                                             dp_clone.clone(),
                                             cancel_token,
+                                            conn_sent,
+                                            conn_recv,
                                         )
                                         .await
                                         {
@@ -1708,7 +1735,7 @@ async fn handle_local_forward(
                                                     remote_addr,
                                                     cancel_token.clone(),
                                                 );
-                                                data_plane.register_connection(conn_id, Protocol::Tcp, remote_addr).await;
+                                                let (conn_sent, conn_recv) = data_plane.register_connection(conn_id, Protocol::Tcp, remote_addr).await;
 
                                                 let conn_manager_clone = conn_manager.clone();
                                                 let dp_clone = data_plane.clone();
@@ -1720,6 +1747,8 @@ async fn handle_local_forward(
                                                         recv,
                                                         dp_clone.clone(),
                                                         cancel_token,
+                                                        conn_sent,
+                                                        conn_recv,
                                                     )
                                                     .await
                                                     {
@@ -1762,7 +1791,7 @@ async fn handle_local_forward(
                                                     remote_addr,
                                                     cancel_token.clone(),
                                                 );
-                                                data_plane.register_connection(conn_id, Protocol::Udp, remote_addr).await;
+                                                let (conn_sent, conn_recv) = data_plane.register_connection(conn_id, Protocol::Udp, remote_addr).await;
 
                                                 let conn_manager_clone = conn_manager.clone();
                                                 let dp_clone = data_plane.clone();
@@ -1774,6 +1803,8 @@ async fn handle_local_forward(
                                                         recv,
                                                         dp_clone.clone(),
                                                         cancel_token,
+                                                        conn_sent,
+                                                        conn_recv,
                                                     )
                                                     .await
                                                     {
@@ -1860,6 +1891,8 @@ async fn relay_tcp_stream(
     mut quic_recv: RecvStream,
     data_plane: Arc<DataPlane>,
     cancel_token: CancellationToken,
+    conn_bytes_sent: Arc<AtomicU64>,
+    conn_bytes_received: Arc<AtomicU64>,
 ) -> Result<()> {
     debug!("Starting relay for conn_id={}", conn_id);
     let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
@@ -1867,6 +1900,7 @@ async fn relay_tcp_stream(
     // TCP -> QUIC
     let dp_for_send = data_plane.clone();
     let cancel_for_send = cancel_token.clone();
+    let conn_sent = conn_bytes_sent.clone();
     let tcp_to_quic = tokio::spawn(
         async move {
             let mut buf = vec![0u8; 8192];
@@ -1884,6 +1918,7 @@ async fn relay_tcp_stream(
                         }
                         quic_send.write_all(&buf[..n]).await?;
                         total_sent += n as u64;
+                        conn_sent.fetch_add(n as u64, Ordering::Relaxed);
                     }
                 }
             }
@@ -1897,6 +1932,7 @@ async fn relay_tcp_stream(
     // QUIC -> TCP
     let dp_for_recv = data_plane.clone();
     let cancel_for_recv = cancel_token.clone();
+    let conn_recv = conn_bytes_received.clone();
     let quic_to_tcp = tokio::spawn(
         async move {
             let mut buf = vec![0u8; 8192];
@@ -1912,6 +1948,7 @@ async fn relay_tcp_stream(
                             Some(n) if n > 0 => {
                                 tcp_write.write_all(&buf[..n]).await?;
                                 total_received += n as u64;
+                                conn_recv.fetch_add(n as u64, Ordering::Relaxed);
                             }
                             _ => break,
                         }
@@ -1953,12 +1990,15 @@ async fn relay_rpf_udp_stream(
     mut quic_recv: RecvStream,
     data_plane: Arc<DataPlane>,
     cancel_token: CancellationToken,
+    conn_bytes_sent: Arc<AtomicU64>,
+    conn_bytes_received: Arc<AtomicU64>,
 ) -> Result<()> {
     debug!("[{}] Starting RPF UDP relay for {}", conn_id, src_addr);
 
     // UDP -> QUIC (受信したパケットをチャネル経由で受け取り、QUIC に送信)
     let dp_for_send = data_plane.clone();
     let cancel_for_send = cancel_token.clone();
+    let conn_sent = conn_bytes_sent.clone();
     let udp_to_quic = tokio::spawn(
         async move {
             let mut total_sent = 0u64;
@@ -1982,7 +2022,9 @@ async fn relay_rpf_udp_stream(
                                     debug!("[{}] Failed to write UDP data: {}", conn_id, e);
                                     break;
                                 }
-                                total_sent += 4 + data.len() as u64;
+                                let bytes = 4 + data.len() as u64;
+                                total_sent += bytes;
+                                conn_sent.fetch_add(bytes, Ordering::Relaxed);
                                 debug!("[{}] UDP->QUIC {} bytes", conn_id, data.len());
                             }
                             None => {
@@ -2004,6 +2046,7 @@ async fn relay_rpf_udp_stream(
     // QUIC -> UDP (QUIC から受信してオリジナルの送信元に返す)
     let dp_for_recv = data_plane.clone();
     let cancel_for_recv = cancel_token.clone();
+    let conn_recv = conn_bytes_received.clone();
     let quic_to_udp = tokio::spawn(
         async move {
             let mut total_received = 0u64;
@@ -2029,7 +2072,9 @@ async fn relay_rpf_udp_stream(
                     } => {
                         match result {
                             Ok((len, payload)) => {
-                                total_received += 4 + len as u64;
+                                let bytes = 4 + len as u64;
+                                total_received += bytes;
+                                conn_recv.fetch_add(bytes, Ordering::Relaxed);
                                 // オリジナルの送信元に返す
                                 if let Err(e) = udp_socket.send_to(&payload, src_addr).await {
                                     debug!("[{}] Failed to send UDP response: {}", conn_id, e);
@@ -2073,6 +2118,8 @@ async fn relay_lpf_udp_stream(
     mut quic_recv: RecvStream,
     data_plane: Arc<DataPlane>,
     cancel_token: CancellationToken,
+    conn_bytes_sent: Arc<AtomicU64>,
+    conn_bytes_received: Arc<AtomicU64>,
 ) -> Result<()> {
     debug!("[{}] Starting LPF UDP relay", conn_id);
 
@@ -2082,6 +2129,7 @@ async fn relay_lpf_udp_stream(
     let socket_for_send = udp_socket.clone();
     let dp_for_recv = data_plane.clone();
     let cancel_for_recv = cancel_token.clone();
+    let conn_recv = conn_bytes_received.clone();
     let quic_to_udp = tokio::spawn(
         async move {
             let mut total_received = 0u64;
@@ -2105,7 +2153,9 @@ async fn relay_lpf_udp_stream(
                     } => {
                         match result {
                             Ok((len, payload)) => {
-                                total_received += 4 + len as u64;
+                                let bytes = 4 + len as u64;
+                                total_received += bytes;
+                                conn_recv.fetch_add(bytes, Ordering::Relaxed);
                                 // リモートサービスに送信
                                 if let Err(e) = socket_for_send.send(&payload).await {
                                     debug!("[{}] UDP send error: {}", conn_id, e);
@@ -2130,6 +2180,7 @@ async fn relay_lpf_udp_stream(
     // UDP -> QUIC (リモートサービスからの応答をクライアントに返す)
     let dp_for_send = data_plane.clone();
     let cancel_for_send = cancel_token.clone();
+    let conn_sent = conn_bytes_sent.clone();
     let udp_to_quic = tokio::spawn(
         async move {
             let mut buf = vec![0u8; 65535];
@@ -2154,7 +2205,9 @@ async fn relay_lpf_udp_stream(
                                     debug!("[{}] QUIC write payload error: {}", conn_id, e);
                                     break;
                                 }
-                                total_sent += 4 + len as u64;
+                                let bytes = 4 + len as u64;
+                                total_sent += bytes;
+                                conn_sent.fetch_add(bytes, Ordering::Relaxed);
                                 debug!("[{}] UDP->QUIC {} bytes", conn_id, len);
                             }
                             Ok(_) => {
