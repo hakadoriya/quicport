@@ -651,7 +651,7 @@ data-plane                              control-plane
 
 **定常運用時の再登録:**
 
-- 登録成功後、DP は 5 秒間隔で CP にステータスを送信
+- 登録成功後、DP は 1 秒間隔で CP にステータスを送信
 - CP から 404 Not Found が返った場合（CP 再起動等）、自動的に再登録を試行
 
 #### eBPF パケットルーティング（Linux）
@@ -771,7 +771,7 @@ Linux?
 │                                                                     │
 │  Data Plane                       Control Plane                     │
 │       │                               │                             │
-│       │ ──POST /dp/SendStatus───────> │ (初回=登録 / 以降=5秒周期)  │
+│       │ ──POST /dp/SendStatus───────> │ (初回=登録 / 以降=1秒周期)  │
 │       │ <─── { dp_id, auth_policy } ─ │                             │
 │       │                               │                             │
 │       │ ──POST /dp/ReceiveCommand───> │ (長ポーリング)              │
@@ -1661,7 +1661,7 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
 
 状態送信（登録・更新・コマンド応答すべて統合）。
 毎回全状態を冪等に送信することで、CP 再起動後も状態を復旧可能。
-**5 秒間隔**で定期送信される。
+**1 秒間隔**で定期送信される。
 
 - 初回呼び出し: DP 登録（auth_policy と config がレスポンスに含まれる）
 - 以降の呼び出し: 状態更新 + コマンド応答（5 秒周期）
