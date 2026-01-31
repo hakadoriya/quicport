@@ -231,7 +231,7 @@ impl DataPlane {
             .map(|(id, tracked)| crate::ipc::ConnectionInfo {
                 connection_id: *id,
                 remote_addr: tracked.remote_addr.to_string(),
-                protocol: format!("{:?}", tracked.protocol),
+                protocol: tracked.protocol.to_string(),
                 bytes_sent: tracked.bytes_sent.load(Ordering::Relaxed),
                 bytes_received: tracked.bytes_received.load(Ordering::Relaxed),
             })

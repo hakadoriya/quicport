@@ -1858,7 +1858,7 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
     {
       "connection_id": 1,
       "remote_addr": "192.168.1.100:50000",
-      "protocol": "TCP",
+      "protocol": "tcp",
       "bytes_sent": 1024,
       "bytes_received": 2048
     }
