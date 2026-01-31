@@ -16,8 +16,7 @@ use quicport::data_plane;
 use quicport::ipc::{AuthPolicy, DataPlaneConfig};
 use quicport::quic::{
     encode_base64_key, generate_psk, load_privkey_from_file, load_pubkeys_from_file,
-    parse_base64_key, psk_file_path, DEFAULT_QUIC_IDLE_TIMEOUT_SECS,
-    DEFAULT_QUIC_KEEP_ALIVE_SECS,
+    parse_base64_key, psk_file_path, DEFAULT_QUIC_IDLE_TIMEOUT_SECS, DEFAULT_QUIC_KEEP_ALIVE_SECS,
 };
 use quicport::statistics::ServerStatistics;
 
@@ -299,23 +298,99 @@ enum Commands {
 /// Control subcommands
 #[derive(Subcommand, Debug)]
 enum CtlCommands {
-    /// Show status of all data planes
-    Status {
+    /// List all data planes
+    #[command(name = "list-data-planes")]
+    ListDataPlanes {
         /// Control plane address to connect to
         #[arg(long = "control-plane-addr", default_value = "127.0.0.1:39000")]
         control_plane_addr: SocketAddr,
     },
 
-    /// Drain a specific data plane
-    Drain {
-        /// Data plane ID to drain (e.g., "0x3039")
-        #[arg(short = 'd', long)]
+    /// Get detailed status of a specific data plane
+    #[command(name = "get-data-plane-status")]
+    GetDataPlaneStatus {
+        /// Data plane ID (e.g., "0x3039")
+        #[arg(long)]
         dp_id: String,
 
         /// Control plane address to connect to
         #[arg(long = "control-plane-addr", default_value = "127.0.0.1:39000")]
         control_plane_addr: SocketAddr,
     },
+
+    /// Drain a specific data plane (reject new connections, wait for existing)
+    #[command(name = "drain-data-plane")]
+    DrainDataPlane {
+        /// Data plane ID to drain (e.g., "0x3039")
+        #[arg(long)]
+        dp_id: String,
+
+        /// Control plane address to connect to
+        #[arg(long = "control-plane-addr", default_value = "127.0.0.1:39000")]
+        control_plane_addr: SocketAddr,
+    },
+
+    /// Shutdown a specific data plane immediately
+    #[command(name = "shutdown-data-plane")]
+    ShutdownDataPlane {
+        /// Data plane ID to shutdown (e.g., "0x3039")
+        #[arg(long)]
+        dp_id: String,
+
+        /// Control plane address to connect to
+        #[arg(long = "control-plane-addr", default_value = "127.0.0.1:39000")]
+        control_plane_addr: SocketAddr,
+    },
+
+    /// Get active connections for a specific data plane
+    #[command(name = "get-connections")]
+    GetConnections {
+        /// Data plane ID (e.g., "0x3039")
+        #[arg(long)]
+        dp_id: String,
+
+        /// Control plane address to connect to
+        #[arg(long = "control-plane-addr", default_value = "127.0.0.1:39000")]
+        control_plane_addr: SocketAddr,
+    },
+}
+
+/// Admin API にリクエストを送信し、レスポンス JSON を pretty-print して出力する。
+/// HTTP エラーレスポンス (4xx/5xx) の場合もレスポンスボディの JSON を出力し、
+/// 終了コード 1 で終了する。
+async fn call_admin_api(
+    control_plane_addr: SocketAddr,
+    path: &str,
+    body: serde_json::Value,
+) -> Result<()> {
+    let url = format!("http://{}{}", control_plane_addr, path);
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to connect to control plane at {}",
+                control_plane_addr
+            )
+        })?;
+
+    let status = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .context("Failed to parse API response as JSON")?;
+
+    println!("{}", serde_json::to_string_pretty(&body)?);
+
+    if !status.is_success() {
+        std::process::exit(1);
+    }
+
+    Ok(())
 }
 
 /// クライアント用の認証設定を構築
@@ -594,45 +669,60 @@ async fn main() -> Result<()> {
             data_plane::run(config, &control_plane_url).await?;
         }
 
-        Commands::Ctl(ctl_cmd) => {
-            match ctl_cmd {
-                CtlCommands::Status { control_plane_addr } => {
-                    control_plane::show_status(control_plane_addr).await?;
-                }
-                CtlCommands::Drain { dp_id, control_plane_addr } => {
-                    use quicport::ipc::DrainDataPlaneRequest;
-
-                    let url = format!("http://{}{}", control_plane_addr, quicport::ipc::api_paths::DRAIN_DATA_PLANE);
-                    let client = reqwest::Client::new();
-
-                    let response = client
-                        .post(&url)
-                        .json(&DrainDataPlaneRequest {
-                            dp_id: dp_id.clone(),
-                        })
-                        .send()
-                        .await
-                        .with_context(|| {
-                            format!("Failed to connect to API server at {}", control_plane_addr)
-                        })?;
-
-                    let status = response.status();
-                    if status.is_success() {
-                        info!("Sent DRAIN to data plane {}", dp_id);
-                    } else {
-                        let body: serde_json::Value = response
-                            .json()
-                            .await
-                            .context("Failed to parse API response")?;
-                        let message = body
-                            .get("message")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Unknown error");
-                        anyhow::bail!("Failed to drain data plane {}: {}", dp_id, message);
-                    }
-                }
+        Commands::Ctl(ctl_cmd) => match ctl_cmd {
+            CtlCommands::ListDataPlanes { control_plane_addr } => {
+                call_admin_api(
+                    control_plane_addr,
+                    quicport::ipc::api_paths::LIST_DATA_PLANES,
+                    serde_json::json!({}),
+                )
+                .await?;
             }
-        }
+            CtlCommands::GetDataPlaneStatus {
+                dp_id,
+                control_plane_addr,
+            } => {
+                call_admin_api(
+                    control_plane_addr,
+                    quicport::ipc::api_paths::GET_DATA_PLANE_STATUS,
+                    serde_json::json!({ "dp_id": dp_id }),
+                )
+                .await?;
+            }
+            CtlCommands::DrainDataPlane {
+                dp_id,
+                control_plane_addr,
+            } => {
+                call_admin_api(
+                    control_plane_addr,
+                    quicport::ipc::api_paths::DRAIN_DATA_PLANE,
+                    serde_json::json!({ "dp_id": dp_id }),
+                )
+                .await?;
+            }
+            CtlCommands::ShutdownDataPlane {
+                dp_id,
+                control_plane_addr,
+            } => {
+                call_admin_api(
+                    control_plane_addr,
+                    quicport::ipc::api_paths::SHUTDOWN_DATA_PLANE,
+                    serde_json::json!({ "dp_id": dp_id }),
+                )
+                .await?;
+            }
+            CtlCommands::GetConnections {
+                dp_id,
+                control_plane_addr,
+            } => {
+                call_admin_api(
+                    control_plane_addr,
+                    quicport::ipc::api_paths::GET_CONNECTIONS,
+                    serde_json::json!({ "dp_id": dp_id }),
+                )
+                .await?;
+            }
+        },
 
         Commands::SshProxy {
             server,
@@ -718,7 +808,10 @@ async fn main() -> Result<()> {
                     None
                 } else {
                     // <data_plane_addr_ip>:<data_plane_addr_port + 1>
-                    Some(SocketAddr::new(data_plane_addr.ip(), data_plane_addr.port() + 1))
+                    Some(SocketAddr::new(
+                        data_plane_addr.ip(),
+                        data_plane_addr.port() + 1,
+                    ))
                 };
 
                 Some(control_plane::ApiConfig {
