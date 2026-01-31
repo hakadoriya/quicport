@@ -1774,7 +1774,7 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
 
 ```json
 {
-  "dataplanes": [
+  "data_planes": [
     {
       "dp_id": "0x3039",
       "pid": 12345,

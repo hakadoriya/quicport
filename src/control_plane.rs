@@ -151,14 +151,14 @@ impl ControlPlane {
 
             // データプレーンの登録を待つ（PID で検索）
             // DP は自ら dp_id を採番し hex 形式（例: "0x3039"）で CP に登録するため、
-            // PID をキーにして dataplanes マップから登録済みの DP を検索する
+            // PID をキーにして data_planes マップから登録済みの DP を検索する
             let mut retries = 0;
             let max_retries = 20; // 10秒
             loop {
                 {
-                    let dataplanes = self.http_ipc.dataplanes.read().await;
+                    let data_planes = self.http_ipc.data_planes.read().await;
                     if let Some((dp_id, _)) =
-                        dataplanes.iter().find(|(_, dp)| dp.pid == pid)
+                        data_planes.iter().find(|(_, dp)| dp.pid == pid)
                     {
                         info!(
                             "Data plane {} (PID={}) registered via HTTP IPC",
@@ -218,8 +218,8 @@ impl ControlPlane {
     pub async fn get_all_connections(&self) -> Vec<crate::ipc::ConnectionInfo> {
         let mut all_connections = Vec::new();
 
-        let dataplanes = self.http_ipc.dataplanes.read().await;
-        for dp in dataplanes.values() {
+        let data_planes = self.http_ipc.data_planes.read().await;
+        for dp in data_planes.values() {
             all_connections.extend(dp.connections.clone());
         }
 
@@ -257,8 +257,8 @@ impl ControlPlane {
     ///
     /// バックグラウンドで 60 秒ごとに stale DP を検出する。
     /// Linux 環境では eBPF map エントリの削除を先に行い、成功した場合のみ
-    /// `dataplanes` / `active_server_ids` から削除する。
-    /// 非 Linux 環境では eBPF map 操作なしで直接 dataplanes から削除する。
+    /// `data_planes` / `active_server_ids` から削除する。
+    /// 非 Linux 環境では eBPF map 操作なしで直接 data_planes から削除する。
     pub fn start_stale_cleanup_task(self: Arc<Self>) {
         let check_interval = Duration::from_secs(10);
 
@@ -273,7 +273,7 @@ impl ControlPlane {
                     config.stale_dp_timeout
                 };
 
-                let stale_entries = self.http_ipc.detect_stale_dataplanes(timeout_secs).await;
+                let stale_entries = self.http_ipc.detect_stale_data_planes(timeout_secs).await;
 
                 if stale_entries.is_empty() {
                     debug!("No stale data planes detected");
@@ -285,11 +285,11 @@ impl ControlPlane {
                     stale_entries.len()
                 );
 
-                // eBPF map 削除成功後に dataplanes から削除するエントリを収集
+                // eBPF map 削除成功後に data_planes から削除するエントリを収集
                 let mut entries_to_remove: Vec<(String, u32)> = Vec::new();
 
                 // Linux 環境では eBPF map からエントリを削除し、成功したもののみ
-                // dataplanes から削除する
+                // data_planes から削除する
                 #[cfg(target_os = "linux")]
                 {
                     use std::path::Path;
@@ -312,7 +312,7 @@ impl ControlPlane {
                                      Will retry on next cycle.",
                                     dp_id, server_id, e
                                 );
-                                // eBPF map 削除に失敗した場合は dataplanes から削除しない
+                                // eBPF map 削除に失敗した場合は data_planes から削除しない
                                 // 次のサイクルでリトライされる
                             }
                         }
@@ -331,9 +331,9 @@ impl ControlPlane {
                     }
                 }
 
-                // eBPF map 削除が成功したエントリのみ dataplanes から削除
+                // eBPF map 削除が成功したエントリのみ data_planes から削除
                 if !entries_to_remove.is_empty() {
-                    self.http_ipc.remove_dataplanes(&entries_to_remove).await;
+                    self.http_ipc.remove_data_planes(&entries_to_remove).await;
                 }
 
                 // ACTIVE な DP が 1 つも存在しない場合、key=0（デフォルト ACTIVE DP）も削除
@@ -343,8 +343,8 @@ impl ControlPlane {
                     use crate::ipc::DataPlaneState;
                     use std::path::Path;
 
-                    let dataplanes = self.http_ipc.dataplanes.read().await;
-                    let has_active_dp = dataplanes
+                    let data_planes = self.http_ipc.data_planes.read().await;
+                    let has_active_dp = data_planes
                         .values()
                         .any(|dp| dp.state == DataPlaneState::Active);
 
