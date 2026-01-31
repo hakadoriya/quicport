@@ -1084,6 +1084,29 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
 
     // 終了処理
     data_plane.set_state(DataPlaneState::Terminated).await;
+
+    // CP に TERMINATED 状態を通知（最終 SendStatus）
+    // NOTE: SendStatus タスクは tokio::spawn で独立動作しているため、プロセス終了が先に来ると
+    //       TERMINATED 状態が送信されない。そのため、ここで明示的に 1 回送信する。
+    if let Ok(status) = data_plane.get_status().await {
+        let mut client = http_client.lock().await;
+        if let Err(e) = client
+            .send_status(
+                server_id,
+                data_plane.pid,
+                &config.listen_addr.to_string(),
+                &status,
+                None,
+                None,
+            )
+            .await
+        {
+            warn!("Failed to send final TERMINATED status to CP: {}", e);
+        } else {
+            info!("Sent final TERMINATED status to CP");
+        }
+    }
+
     info!("Data plane terminated");
 
     Ok(())
