@@ -535,7 +535,16 @@ async fn receive_command(
         req.dp_id, req.wait_timeout_secs
     );
 
-    let timeout = Duration::from_secs(req.wait_timeout_secs.min(60)); // 最大 60 秒
+    const MAX_WAIT_TIMEOUT_SECS: u64 = 60;
+
+    if req.wait_timeout_secs > MAX_WAIT_TIMEOUT_SECS {
+        warn!(
+            "ReceiveCommand: dp_id={}, wait_timeout_secs={} exceeds max {}, clamping",
+            req.dp_id, req.wait_timeout_secs, MAX_WAIT_TIMEOUT_SECS
+        );
+    }
+
+    let timeout = Duration::from_secs(req.wait_timeout_secs.min(MAX_WAIT_TIMEOUT_SECS));
 
     // 即座にコマンドがあるか確認
     {
