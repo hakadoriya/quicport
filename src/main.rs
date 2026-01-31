@@ -168,7 +168,7 @@ enum Commands {
         #[arg(long, default_value = "false")]
         no_public_api: bool,
 
-        /// Address and port for private API server (/metrics, /graceful-restart)
+        /// Address and port for private API server (/metrics, /api/v1/*)
         /// Only accessible from localhost. Default: 127.0.0.1:<listen_port>
         #[arg(long)]
         private_api_listen: Option<SocketAddr>,
@@ -704,7 +704,7 @@ async fn main() -> Result<()> {
 
             // API サーバー設定を構築
             let api_config = {
-                // Private API: QUIC と同じポートの TCP、localhost のみ（/metrics, /graceful-restart）
+                // Private API: QUIC と同じポートの TCP、localhost のみ（/metrics, /api/v1/*）
                 let private_addr = private_api_listen.unwrap_or_else(|| {
                     // デフォルト: 127.0.0.1:<control_plane_addr_port>
                     SocketAddr::new(
@@ -737,7 +737,7 @@ async fn main() -> Result<()> {
                     info!("Starting public API server on {} (TCP, /healthcheck)", addr);
                 }
                 info!(
-                    "Starting private API server on {} (/metrics, /graceful-restart)",
+                    "Starting private API server on {} (/metrics, /api/v1/*)",
                     config.private_addr
                 );
             }

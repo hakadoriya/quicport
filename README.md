@@ -171,7 +171,7 @@ The server provides two HTTP API servers:
 
 ### Private API (same port as QUIC, TCP, localhost only)
 
-Accessible only from localhost. Provides `/healthcheck`, `/metrics`, and `/api/graceful-restart` endpoints.
+Accessible only from localhost. Provides `/healthcheck`, `/metrics`, and `/api/v1/*` endpoints.
 
 ```bash
 # Health check
@@ -179,9 +179,6 @@ curl http://127.0.0.1:39000/healthcheck
 
 # Prometheus metrics
 curl http://127.0.0.1:39000/metrics
-
-# Trigger graceful restart
-curl -X POST http://127.0.0.1:39000/api/graceful-restart
 ```
 
 Change address with `--private-api-listen`.
@@ -234,7 +231,7 @@ Type=simple
 User=quicport
 Group=quicport
 ExecStart=/usr/local/bin/quicport --log-format json server
-ExecReload=/usr/local/bin/quicport ctl graceful-restart
+ExecReload=/bin/kill -HUP $MAINPID
 EnvironmentFile=-/etc/quicport/quicport.env
 Restart=on-failure
 RestartSec=5
