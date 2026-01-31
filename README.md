@@ -216,33 +216,7 @@ client::run_remote_forward("127.0.0.1:39000", "8080/tcp", "80/tcp", auth).await?
 
 ## Systemd Service
 
-Example systemd unit file for running quicport control-plane as a service:
-
-```ini
-[Unit]
-Description=quicport - QUIC-based port forwarding / tunneling server
-Documentation=https://github.com/hakadoriya/quicport
-After=network-online.target
-Wants=network-online.target
-RefuseManualStop=yes
-
-[Service]
-Type=simple
-User=quicport
-Group=quicport
-ExecStart=/usr/local/bin/quicport --log-format json server
-ExecReload=/bin/kill -HUP $MAINPID
-EnvironmentFile=-/etc/quicport/quicport.env
-Restart=on-failure
-RestartSec=5
-StandardOutput=append:/var/log/quicport/quicport.log
-StandardError=inherit
-SyslogIdentifier=quicport
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target
-```
+Example is available in [`platform/linux/systemd/quicport.service`](platform/linux/systemd/quicport.service).
 
 ### Graceful Restart Behavior
 
