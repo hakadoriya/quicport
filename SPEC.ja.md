@@ -722,7 +722,7 @@ data-plane                              control-plane
 │                                                                     │
 │  Data Plane                       Control Plane                     │
 │       │                               │                             │
-│       │ ──POST /dp/SendStatus───────> │ (初回=登録 / 以降=状態更新) │
+│       │ ──POST /dp/SendStatus───────> │ (初回=登録 / 以降=5秒周期)  │
 │       │ <─── { dp_id, auth_policy } ─ │                             │
 │       │                               │                             │
 │       │ ──POST /dp/ReceiveCommand───> │ (長ポーリング)              │
@@ -1586,9 +1586,10 @@ quicport_auth_x25519_failed_total 2
 
 状態送信（登録・更新・コマンド応答すべて統合）。
 毎回全状態を冪等に送信することで、CP 再起動後も状態を復旧可能。
+**5 秒間隔**で定期送信される。
 
 - 初回呼び出し: DP 登録（auth_policy と config がレスポンスに含まれる）
-- 以降の呼び出し: 状態更新 + コマンド応答
+- 以降の呼び出し: 状態更新 + コマンド応答（5 秒周期）
 
 **リクエスト:**
 
