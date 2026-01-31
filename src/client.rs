@@ -270,16 +270,16 @@ async fn run_remote_forward(
     info!("Connecting to {} ...", server_addr);
 
     // insecure モードまたは TOFU モードで接続
-    let connection = if insecure {
+    let tunnel = if insecure {
         // 証明書検証をスキップ（テスト用）
         warn!("Insecure mode: skipping server certificate verification");
         let endpoint =
             create_client_endpoint(&server_addr, keep_alive_secs, idle_timeout_secs)?;
         endpoint
             .connect(server_addr, "quicport")
-            .context("Failed to initiate connection")?
+            .context("Failed to initiate tunnel")?
             .await
-            .context("Failed to establish QUIC connection")?
+            .context("Failed to establish QUIC tunnel")?
     } else {
         // TOFU 検証を行う
         let known_hosts_path = KnownHosts::default_path()?;
@@ -293,24 +293,24 @@ async fn run_remote_forward(
             idle_timeout_secs,
         )?;
 
-        let connection = endpoint
+        let tunnel = endpoint
             .connect(server_addr, "quicport")
-            .context("Failed to initiate connection")?
+            .context("Failed to initiate tunnel")?
             .await
-            .context("Failed to establish QUIC connection")?;
+            .context("Failed to establish QUIC tunnel")?;
 
         // TOFU 検証結果を確認
         if let Some(status) = tofu_verifier.get_status() {
             handle_tofu_status(&status, &known_hosts).await?;
         }
 
-        connection
+        tunnel
     };
 
     info!("Connected to {}", server_addr);
 
     // 制御ストリームを開く
-    let (mut control_send, mut control_recv) = connection
+    let (mut control_send, mut control_recv) = tunnel
         .open_bi()
         .await
         .context("Failed to open control stream")?;
@@ -393,8 +393,8 @@ async fn run_remote_forward(
     );
 
     // RemoteNewConnection を待機してデータ転送を処理
-    handle_incoming_connections(
-        connection,
+    handle_incoming_tunnel(
+        tunnel,
         control_stream,
         &local_addr,
         remote_protocol,
@@ -519,8 +519,8 @@ async fn create_shutdown_signal() {
 ///
 /// QUIC ストリームの先頭 4 bytes に conn_id が書き込まれているため、
 /// それを読み取って接続を識別する。RemoteNewConnection メッセージは情報提供のみ。
-async fn handle_incoming_connections(
-    quic_conn: Connection,
+async fn handle_incoming_tunnel(
+    tunnel: Connection,
     mut control_stream: ControlStream,
     local_addr: &str,
     protocol: Protocol,
@@ -556,7 +556,7 @@ async fn handle_incoming_connections(
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
                 // QUIC コネクションを閉じる
-                quic_conn.close(0u32.into(), b"client shutdown");
+                tunnel.close(0u32.into(), b"client shutdown");
 
                 info!("Connection closed gracefully");
                 break;
@@ -564,7 +564,7 @@ async fn handle_incoming_connections(
 
             // QUIC ストリームを受け付け（サーバーが開く）
             // ストリームの先頭 4 bytes から conn_id を読み取る
-            result = quic_conn.accept_bi() => {
+            result = tunnel.accept_bi() => {
                 match result {
                     Ok((send, mut recv)) => {
                         debug!("QUIC stream accepted");
@@ -1002,16 +1002,16 @@ async fn run_local_forward(
     info!("Connecting to {} ...", server_addr);
 
     // insecure モードまたは TOFU モードで接続
-    let connection = if insecure {
+    let tunnel = if insecure {
         // 証明書検証をスキップ（テスト用）
         warn!("Insecure mode: skipping server certificate verification");
         let endpoint =
             create_client_endpoint(&server_addr, keep_alive_secs, idle_timeout_secs)?;
         endpoint
             .connect(server_addr, "quicport")
-            .context("Failed to initiate connection")?
+            .context("Failed to initiate tunnel")?
             .await
-            .context("Failed to establish QUIC connection")?
+            .context("Failed to establish QUIC tunnel")?
     } else {
         // TOFU 検証を行う
         let known_hosts_path = KnownHosts::default_path()?;
@@ -1025,24 +1025,24 @@ async fn run_local_forward(
             idle_timeout_secs,
         )?;
 
-        let connection = endpoint
+        let tunnel = endpoint
             .connect(server_addr, "quicport")
-            .context("Failed to initiate connection")?
+            .context("Failed to initiate tunnel")?
             .await
-            .context("Failed to establish QUIC connection")?;
+            .context("Failed to establish QUIC tunnel")?;
 
         // TOFU 検証結果を確認
         if let Some(status) = tofu_verifier.get_status() {
             handle_tofu_status(&status, &known_hosts).await?;
         }
 
-        connection
+        tunnel
     };
 
     info!("Connected to {}", server_addr);
 
     // 制御ストリームを開く
-    let (mut control_send, mut control_recv) = connection
+    let (mut control_send, mut control_recv) = tunnel
         .open_bi()
         .await
         .context("Failed to open control stream")?;
@@ -1126,8 +1126,8 @@ async fn run_local_forward(
     );
 
     // ローカルポートでリッスンして接続をサーバーに転送
-    handle_local_connections(
-        connection,
+    handle_local_tunnel(
+        tunnel,
         control_stream,
         local_port_num,
         local_protocol,
@@ -1151,8 +1151,8 @@ enum LpfCloseReason {
 }
 
 /// LPF: ローカルポートでリッスンして接続を処理
-async fn handle_local_connections(
-    quic_conn: Connection,
+async fn handle_local_tunnel(
+    tunnel: Connection,
     mut control_stream: ControlStream,
     local_port: u16,
     protocol: Protocol,
@@ -1203,7 +1203,7 @@ async fn handle_local_connections(
                         }
 
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                        quic_conn.close(0u32.into(), b"client shutdown");
+                        tunnel.close(0u32.into(), b"client shutdown");
 
                         info!("Connection closed gracefully");
                         close_reason = LpfCloseReason::GracefulShutdown;
@@ -1211,8 +1211,8 @@ async fn handle_local_connections(
                     }
 
                     // QUIC コネクションがクローズされた場合
-                    reason = quic_conn.closed() => {
-                        info!("QUIC connection closed: {:?}, stopping LPF listener", reason);
+                    reason = tunnel.closed() => {
+                        info!("QUIC tunnel closed: {:?}, stopping LPF listener", reason);
                         close_reason = LpfCloseReason::ConnectionLost(format!("{:?}", reason));
                         break;
                     }
@@ -1225,7 +1225,7 @@ async fn handle_local_connections(
                                 info!("New local TCP connection {} from {}", conn_id, tcp_addr);
 
                                 // 1. QUIC ストリームを開く（LPF ではクライアントが開く）
-                                let (mut quic_send, quic_recv) = match quic_conn.open_bi().await {
+                                let (mut quic_send, quic_recv) = match tunnel.open_bi().await {
                                     Ok(s) => s,
                                     Err(e) => {
                                         error!("Failed to open QUIC stream: {}", e);
@@ -1357,7 +1357,7 @@ async fn handle_local_connections(
                         }
 
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                        quic_conn.close(0u32.into(), b"client shutdown");
+                        tunnel.close(0u32.into(), b"client shutdown");
 
                         info!("Connection closed gracefully");
                         udp_close_reason = LpfCloseReason::GracefulShutdown;
@@ -1365,8 +1365,8 @@ async fn handle_local_connections(
                     }
 
                     // QUIC コネクションがクローズされた場合
-                    reason = quic_conn.closed() => {
-                        info!("QUIC connection closed: {:?}, stopping UDP LPF listener", reason);
+                    reason = tunnel.closed() => {
+                        info!("QUIC tunnel closed: {:?}, stopping UDP LPF listener", reason);
                         udp_close_reason = LpfCloseReason::ConnectionLost(format!("{:?}", reason));
                         break;
                     }
@@ -1396,7 +1396,7 @@ async fn handle_local_connections(
                                     info!("New local UDP connection {} from {}", conn_id, src_addr);
 
                                     // QUIC ストリームを開く
-                                    let (mut quic_send, quic_recv) = match quic_conn.open_bi().await {
+                                    let (mut quic_send, quic_recv) = match tunnel.open_bi().await {
                                         Ok(s) => s,
                                         Err(e) => {
                                             error!("Failed to open QUIC stream for UDP: {}", e);
@@ -1647,15 +1647,15 @@ async fn run_ssh_proxy(
     // insecure モードまたは TOFU モードで接続
     // 注意: ssh-proxy は対話的でないため、TOFU の未知ホスト確認はできない
     // insecure=false の場合も TOFU は無効化し、既知ホストのみ接続可能とする
-    let connection = if insecure {
+    let tunnel = if insecure {
         warn!("Insecure mode: skipping server certificate verification");
         let endpoint =
             create_client_endpoint(&server_addr, keep_alive_secs, idle_timeout_secs)?;
         endpoint
             .connect(server_addr, "quicport")
-            .context("Failed to initiate connection")?
+            .context("Failed to initiate tunnel")?
             .await
-            .context("Failed to establish QUIC connection")?
+            .context("Failed to establish QUIC tunnel")?
     } else {
         // TOFU 検証を行う（ただし非対話なので未知ホストは拒否）
         let known_hosts_path = KnownHosts::default_path()?;
@@ -1669,11 +1669,11 @@ async fn run_ssh_proxy(
             idle_timeout_secs,
         )?;
 
-        let connection = endpoint
+        let tunnel = endpoint
             .connect(server_addr, "quicport")
-            .context("Failed to initiate connection")?
+            .context("Failed to initiate tunnel")?
             .await
-            .context("Failed to establish QUIC connection")?;
+            .context("Failed to establish QUIC tunnel")?;
 
         // TOFU 検証結果を確認（非対話モードなので未知/変更は拒否）
         if let Some(status) = tofu_verifier.get_status() {
@@ -1709,13 +1709,13 @@ async fn run_ssh_proxy(
             }
         }
 
-        connection
+        tunnel
     };
 
     info!("Connected to {}", server_addr);
 
     // 制御ストリームを開く
-    let (mut control_send, mut control_recv) = connection
+    let (mut control_send, mut control_recv) = tunnel
         .open_bi()
         .await
         .context("Failed to open control stream")?;
@@ -1794,7 +1794,7 @@ async fn run_ssh_proxy(
     let conn_id = LPF_CONNECTION_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
     info!("Opening data stream for SSH proxy (conn_id={})", conn_id);
 
-    let (mut quic_send, quic_recv) = connection
+    let (mut quic_send, quic_recv) = tunnel
         .open_bi()
         .await
         .context("Failed to open data stream")?;
@@ -1835,9 +1835,9 @@ async fn run_ssh_proxy(
 
     // 少し待ってから接続を閉じる
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    connection.close(0u32.into(), b"ssh-proxy done");
+    tunnel.close(0u32.into(), b"ssh-proxy done");
 
-    info!("SSH proxy connection closed");
+    info!("SSH proxy tunnel closed");
     Ok(())
 }
 

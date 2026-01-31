@@ -58,11 +58,11 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Run as data plane (QUIC connection handler)
+    /// Run as data plane (QUIC tunnel handler)
     ///
     /// This command is typically invoked by the control plane (quicport control-plane) or
     /// by quicport.sh script for cgroup separation.
-    /// The data plane handles QUIC connections and maintains backend TCP connections.
+    /// The data plane handles QUIC tunnels and maintains backend TCP connections.
     /// It operates independently of the control plane after startup.
     DataPlane {
         /// Address and port to listen on for QUIC
@@ -82,7 +82,7 @@ enum Commands {
         #[arg(long, default_value_t = DEFAULT_QUIC_KEEP_ALIVE_SECS, env = "QUICPORT_QUIC_KEEP_ALIVE")]
         quic_keep_alive: u64,
 
-        /// QUIC max idle timeout in seconds (connection closed if no response within this time)
+        /// QUIC max idle timeout in seconds (tunnel closed if no response within this time)
         #[arg(long, default_value_t = DEFAULT_QUIC_IDLE_TIMEOUT_SECS, env = "QUICPORT_QUIC_IDLE_TIMEOUT")]
         quic_idle_timeout: u64,
     },
@@ -128,7 +128,7 @@ enum Commands {
         #[arg(long, default_value = "false")]
         insecure: bool,
 
-        /// Auto-reconnect on connection loss (for ssh-proxy mode)
+        /// Auto-reconnect on tunnel loss (for ssh-proxy mode)
         #[arg(long, default_value = "true")]
         reconnect: bool,
 
@@ -144,7 +144,7 @@ enum Commands {
         #[arg(long, default_value_t = DEFAULT_QUIC_KEEP_ALIVE_SECS, env = "QUICPORT_QUIC_KEEP_ALIVE")]
         quic_keep_alive: u64,
 
-        /// QUIC max idle timeout in seconds (connection closed if no response within this time)
+        /// QUIC max idle timeout in seconds (tunnel closed if no response within this time)
         #[arg(long, default_value_t = DEFAULT_QUIC_IDLE_TIMEOUT_SECS, env = "QUICPORT_QUIC_IDLE_TIMEOUT")]
         quic_idle_timeout: u64,
     },
@@ -201,7 +201,7 @@ enum Commands {
         #[arg(long, default_value_t = DEFAULT_QUIC_KEEP_ALIVE_SECS, env = "QUICPORT_QUIC_KEEP_ALIVE")]
         quic_keep_alive: u64,
 
-        /// QUIC max idle timeout in seconds (connection closed if no response within this time)
+        /// QUIC max idle timeout in seconds (tunnel closed if no response within this time)
         #[arg(long, default_value_t = DEFAULT_QUIC_IDLE_TIMEOUT_SECS, env = "QUICPORT_QUIC_IDLE_TIMEOUT")]
         quic_idle_timeout: u64,
     },
@@ -273,7 +273,7 @@ enum Commands {
         #[arg(long, default_value = "false")]
         insecure: bool,
 
-        /// Auto-reconnect on connection loss
+        /// Auto-reconnect on tunnel loss
         #[arg(long, default_value = "true")]
         reconnect: bool,
 
@@ -289,7 +289,7 @@ enum Commands {
         #[arg(long, default_value_t = DEFAULT_QUIC_KEEP_ALIVE_SECS, env = "QUICPORT_QUIC_KEEP_ALIVE")]
         quic_keep_alive: u64,
 
-        /// QUIC max idle timeout in seconds (connection closed if no response within this time)
+        /// QUIC max idle timeout in seconds (tunnel closed if no response within this time)
         #[arg(long, default_value_t = DEFAULT_QUIC_IDLE_TIMEOUT_SECS, env = "QUICPORT_QUIC_IDLE_TIMEOUT")]
         quic_idle_timeout: u64,
     },
@@ -318,7 +318,7 @@ enum AdminCommands {
         control_plane_addr: SocketAddr,
     },
 
-    /// Drain a specific data plane (reject new connections, wait for existing)
+    /// Drain a specific data plane (reject new tunnels, wait for existing)
     #[command(name = "drain-data-plane")]
     DrainDataPlane {
         /// Data plane ID to drain (e.g., "0x3039")

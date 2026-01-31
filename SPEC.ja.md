@@ -525,10 +525,10 @@ systemd                control-plane            data-plane
    |                        |                        |
    |<-- cp 終了を検知 -------|                        |
    |                        |                        |
-   |                        |                        |-- 既存コネクション処理継続
+   |                        |                        |-- 既存トンネル処理継続
    |                        |                        |   (別 cgroup なので独立動作)
    |                        |                        |
-   |                        |                        |-- 全コネクション終了
+   |                        |                        |-- 全トンネル終了
    |                        |                        |-- または drain_timeout 経過
    |                        |                        |
    |                        |                        |-- TERMINATED 状態を CP に送信
@@ -544,7 +544,7 @@ systemd                control-plane            data-plane
 4. dp が新規接続の受付を停止し、DRAINING 状態に遷移
 5. cp がプロセス終了
 6. dp は別 cgroup で独立して動作を継続
-7. dp は既存コネクションをすべて処理完了（または drain_timeout 経過）後、TERMINATED 状態を SendStatus で CP に明示的に通知してから終了
+7. dp は既存トンネルをすべて処理完了（または drain_timeout 経過）後、TERMINATED 状態を SendStatus で CP に明示的に通知してから終了
 
 **DRAINING 状態での動作:**
 
@@ -571,16 +571,16 @@ systemd                旧 cp                     旧 dp                    新 
    |                     |                         |      新 dp が SO_REUSEPORT で
    |                     |                         |      同一ポートを LISTEN
    |                     |                         |                          |
-   |                     |                         |-- 既存コネクション処理 -->|
+   |                     |                         |-- 既存トンネル処理 ----->|
    |                     |                         |   (DRAINING 継続)         |
    |                     |                         |                          |
-   |                     |                         |-- 全コネクション終了      |
+   |                     |                         |-- 全トンネル終了          |
    |                     |                         |-- プロセス終了            |
    |                     |                         |                          |
 ```
 
 - 新規接続は新しい dp が処理
-- 旧 dp は DRAINING 状態で既存コネクションのみ処理
+- 旧 dp は DRAINING 状態で既存トンネルのみ処理
 - SO_REUSEPORT により新旧 dp が同一ポートで共存可能
 
 **複数 DRAINING データプレーンの許容:**
@@ -602,8 +602,8 @@ STARTING --> ACTIVE --> DRAINING --> TERMINATED
 | 状態 | 説明 |
 |-----|------|
 | `STARTING` | 起動中、cp への接続リトライ |
-| `ACTIVE` | 通常稼働中、新規接続受付可能 |
-| `DRAINING` | ドレイン中、新規接続拒否、既存接続のみ処理 |
+| `ACTIVE` | 通常稼働中、新規トンネル受付可能 |
+| `DRAINING` | ドレイン中、新規トンネル拒否、既存トンネルのみ処理 |
 | `TERMINATED` | 終了済み |
 
 #### エラーハンドリング
@@ -689,7 +689,7 @@ data-plane                              control-plane
 
 ##### デフォルト ACTIVE DP ルーティング (key=0)
 
-新規 QUIC コネクション（Initial パケット）の Destination CID はクライアントが生成したランダム値であるため、eBPF の `server_id` ルックアップが失敗する。この場合、カーネルの SO_REUSEPORT デフォルト（ハッシュベース分散）にフォールスルーすると、DRAINING な DP にも新規接続が届く可能性がある。
+新規 QUIC トンネル（Initial パケット）の Destination CID はクライアントが生成したランダム値であるため、eBPF の `server_id` ルックアップが失敗する。この場合、カーネルの SO_REUSEPORT デフォルト（ハッシュベース分散）にフォールスルーすると、DRAINING な DP にも新規接続が届く可能性がある。
 
 これを防ぐため、`socket_map` の **key=0 をデフォルト ACTIVE DP エントリ**として使用する:
 
@@ -1112,7 +1112,7 @@ example.com:9000 AB:CD:EF:...
 
 シャットダウン時の動作:
 1. `SessionClose` メッセージをサーバーに送信
-2. QUIC コネクションを正常にクローズ
+2. QUIC トンネルを正常にクローズ
 3. サーバーは即座に TCP リスナーを解放し、ポートを再利用可能に
 
 ```
@@ -1605,13 +1605,13 @@ Prometheus 形式でサーバーの稼働状況を返します（Private API の
 # TYPE quicport_uptime_seconds gauge
 quicport_uptime_seconds 3600
 
-# HELP quicport_connections_total Total number of connections since server start
-# TYPE quicport_connections_total counter
-quicport_connections_total 150
+# HELP quicport_tunnels_total Total number of tunnels since server start
+# TYPE quicport_tunnels_total counter
+quicport_tunnels_total 150
 
-# HELP quicport_connections_active Current number of active connections
-# TYPE quicport_connections_active gauge
-quicport_connections_active 3
+# HELP quicport_tunnels_active Current number of active tunnels
+# TYPE quicport_tunnels_active gauge
+quicport_tunnels_active 3
 
 # HELP quicport_bytes_sent_total Total bytes sent to clients
 # TYPE quicport_bytes_sent_total counter
@@ -1641,8 +1641,8 @@ quicport_auth_x25519_failed_total 2
 | メトリクス | タイプ | 説明 |
 |-----------|--------|------|
 | `quicport_uptime_seconds` | gauge | サーバー稼働時間（秒） |
-| `quicport_connections_total` | counter | 累計接続数 |
-| `quicport_connections_active` | gauge | 現在アクティブな接続数 |
+| `quicport_tunnels_total` | counter | 累計トンネル数 |
+| `quicport_tunnels_active` | gauge | 現在アクティブなトンネル数 |
 | `quicport_bytes_sent_total` | counter | サーバーからクライアントへの送信バイト数 |
 | `quicport_bytes_received_total` | counter | クライアントからサーバーへの受信バイト数 |
 | `quicport_auth_psk_success_total` | counter | PSK 認証成功回数 |
@@ -1689,7 +1689,7 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
   "pid": 12345,
   "listen_addr": "0.0.0.0:39000",
   "state": "ACTIVE",
-  "active_connections": 5,
+  "active_tunnels": 5,
   "bytes_sent": 1024,
   "bytes_received": 2048,
   "started_at": 1234567890,
@@ -1779,7 +1779,7 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
       "dp_id": "0x3039",
       "pid": 12345,
       "state": "ACTIVE",
-      "active_connections": 5,
+      "active_tunnels": 5,
       "bytes_sent": 1024,
       "bytes_received": 2048
     }
@@ -1806,7 +1806,7 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
   "dp_id": "0x3039",
   "pid": 12345,
   "state": "ACTIVE",
-  "active_connections": 5,
+  "active_tunnels": 5,
   "bytes_sent": 1024,
   "bytes_received": 2048,
   "started_at": 1234567890

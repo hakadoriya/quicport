@@ -73,8 +73,8 @@ pub struct HttpDataPlane {
     pub listen_addr: String,
     /// 状態
     pub state: DataPlaneState,
-    /// アクティブ接続数
-    pub active_connections: u32,
+    /// アクティブトンネル数
+    pub active_tunnels: u32,
     /// 送信バイト数
     pub bytes_sent: u64,
     /// 受信バイト数
@@ -103,7 +103,7 @@ impl HttpDataPlane {
             pid,
             listen_addr,
             state: DataPlaneState::Starting,
-            active_connections: 0,
+            active_tunnels: 0,
             bytes_sent: 0,
             bytes_received: 0,
             started_at: now,
@@ -120,7 +120,7 @@ impl HttpDataPlane {
             dp_id: self.dp_id.clone(),
             pid: self.pid,
             state: self.state,
-            active_connections: self.active_connections,
+            active_tunnels: self.active_tunnels,
             bytes_sent: self.bytes_sent,
             bytes_received: self.bytes_received,
         }
@@ -132,7 +132,7 @@ impl HttpDataPlane {
             dp_id: self.dp_id.clone(),
             pid: self.pid,
             state: self.state,
-            active_connections: self.active_connections,
+            active_tunnels: self.active_tunnels,
             bytes_sent: self.bytes_sent,
             bytes_received: self.bytes_received,
             started_at: self.started_at,
@@ -455,7 +455,7 @@ async fn send_status(
             let mut dp = HttpDataPlane::new(dp_id.clone(), req.pid, req.listen_addr.clone());
             dp.server_id = Some(dp_id_u32);
             dp.state = req.state;
-            dp.active_connections = req.active_connections;
+            dp.active_tunnels = req.active_tunnels;
             dp.bytes_sent = req.bytes_sent;
             dp.bytes_received = req.bytes_received;
             dp.started_at = req.started_at;
@@ -482,7 +482,7 @@ async fn send_status(
             dp.server_id = Some(dp_id_u32);
             dp.pid = req.pid;
             dp.state = req.state;
-            dp.active_connections = req.active_connections;
+            dp.active_tunnels = req.active_tunnels;
             dp.bytes_sent = req.bytes_sent;
             dp.bytes_received = req.bytes_received;
             dp.listen_addr = req.listen_addr.clone();
