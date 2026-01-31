@@ -69,7 +69,7 @@ pub enum ControlCommand {
     /// 設定を更新
     SetConfig(DataPlaneConfig),
 
-    /// DRAIN モードに移行（新規接続拒否）
+    /// DRAIN モードに移行（新規トンネル拒否）
     Drain,
 
     /// 即座にシャットダウン
@@ -122,8 +122,8 @@ pub struct SendStatusRequest {
     // ========== 状態情報 ==========
     /// 現在の状態
     pub state: DataPlaneState,
-    /// アクティブ接続数
-    pub active_connections: u32,
+    /// アクティブトンネル数
+    pub active_tunnels: u32,
     /// 総送信バイト数
     pub bytes_sent: u64,
     /// 総受信バイト数
@@ -199,8 +199,8 @@ pub struct DataPlaneSummary {
     pub pid: u32,
     /// 状態
     pub state: DataPlaneState,
-    /// アクティブ接続数
-    pub active_connections: u32,
+    /// アクティブトンネル数
+    pub active_tunnels: u32,
     /// 送信バイト数
     pub bytes_sent: u64,
     /// 受信バイト数
@@ -230,8 +230,8 @@ pub struct GetDataPlaneStatusResponse {
     pub pid: u32,
     /// 状態
     pub state: DataPlaneState,
-    /// アクティブ接続数
-    pub active_connections: u32,
+    /// アクティブトンネル数
+    pub active_tunnels: u32,
     /// 送信バイト数
     pub bytes_sent: u64,
     /// 受信バイト数
@@ -413,9 +413,9 @@ impl Default for DataPlaneConfig {
 pub enum DataPlaneState {
     /// 起動中、初期化処理
     Starting,
-    /// 通常稼働中、新規接続受付可能
+    /// 通常稼働中、新規トンネル受付可能
     Active,
-    /// ドレイン中、新規接続拒否、既存接続のみ処理
+    /// ドレイン中、新規トンネル拒否、既存トンネルのみ処理
     Draining,
     /// 終了済み
     Terminated,
@@ -439,8 +439,8 @@ pub struct DataPlaneStatus {
     pub state: DataPlaneState,
     /// PID
     pub pid: u32,
-    /// アクティブ接続数
-    pub active_connections: u32,
+    /// アクティブトンネル数
+    pub active_tunnels: u32,
     /// 総送信バイト数
     pub bytes_sent: u64,
     /// 総受信バイト数
@@ -475,7 +475,7 @@ mod tests {
             pid: 12345,
             listen_addr: "0.0.0.0:39000".to_string(),
             state: DataPlaneState::Active,
-            active_connections: 10,
+            active_tunnels: 10,
             bytes_sent: 1000,
             bytes_received: 2000,
             started_at: 1700000000,

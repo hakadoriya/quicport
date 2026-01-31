@@ -1,17 +1,17 @@
 //! データプレーン実装
 //!
-//! QUIC 接続とバックエンド TCP 接続を維持するデーモンです。
+//! QUIC トンネルとバックエンド TCP 接続を維持するデーモンです。
 //! コントロールプレーン（quicport control-plane）とは別プロセスとして動作し、
 //! コントロールプレーンの再起動・終了後も独立して動作を継続します。
 //!
 //! ## 責務
 //!
-//! - QUIC 終端: クライアントからの QUIC 接続を処理
+//! - QUIC 終端: クライアントからの QUIC トンネルを処理
 //! - 認証実行: コントロールプレーンから受け取ったポリシーに基づき認証
 //! - バックエンド接続: SSH 等への TCP 接続を確立・維持
 //! - データ転送: QUIC ↔ TCP 間のデータ中継
 //! - 独立動作: コントロールプレーン終了後も継続動作
-//! - グレースフル終了: DRAIN モードで既存接続を処理しつつ終了
+//! - グレースフル終了: DRAIN モードで既存トンネルを処理しつつ終了
 
 use anyhow::{Context, Result};
 use quinn::{Connection, RecvStream, SendStream};
@@ -70,8 +70,8 @@ pub struct DataPlane {
     shutdown_tx: broadcast::Sender<()>,
     /// ドレイン通知用
     drain_tx: broadcast::Sender<()>,
-    /// アクティブ接続数
-    active_connections: AtomicU32,
+    /// アクティブトンネル数
+    active_tunnels: AtomicU32,
     /// 閉じたコネクション分の累計送信バイト数
     closed_bytes_sent: AtomicU64,
     /// 閉じたコネクション分の累計受信バイト数
@@ -100,7 +100,7 @@ impl DataPlane {
             pid: std::process::id(),
             shutdown_tx,
             drain_tx,
-            active_connections: AtomicU32::new(0),
+            active_tunnels: AtomicU32::new(0),
             closed_bytes_sent: AtomicU64::new(0),
             closed_bytes_received: AtomicU64::new(0),
             connection_list: RwLock::new(HashMap::new()),
@@ -154,7 +154,7 @@ impl DataPlane {
         Ok(DataPlaneStatus {
             state: self.get_state().await,
             pid: self.pid,
-            active_connections: self.active_connections.load(Ordering::SeqCst),
+            active_tunnels: self.active_tunnels.load(Ordering::SeqCst),
             bytes_sent: self.closed_bytes_sent.load(Ordering::SeqCst) + active_sent,
             bytes_received: self.closed_bytes_received.load(Ordering::SeqCst) + active_received,
             started_at: self.started_at,
@@ -182,21 +182,21 @@ impl DataPlane {
         self.drain_tx.subscribe()
     }
 
-    /// 接続数をインクリメント
-    pub fn connection_opened(&self) {
-        self.active_connections.fetch_add(1, Ordering::SeqCst);
-        self.statistics.connection_opened();
+    /// トンネル数をインクリメント
+    pub fn tunnel_opened(&self) {
+        self.active_tunnels.fetch_add(1, Ordering::SeqCst);
+        self.statistics.tunnel_opened();
     }
 
-    /// 接続数をデクリメント
-    pub fn connection_closed(&self) {
-        let prev = self.active_connections.fetch_sub(1, Ordering::SeqCst);
-        self.statistics.connection_closed();
+    /// トンネル数をデクリメント
+    pub fn tunnel_closed(&self) {
+        let prev = self.active_tunnels.fetch_sub(1, Ordering::SeqCst);
+        self.statistics.tunnel_closed();
 
-        // DRAINING 状態で接続が 0 になった場合はログを出力
+        // DRAINING 状態でトンネルが 0 になった場合はログを出力
         // 実際の終了判定はメインループで行う
         if prev == 1 {
-            debug!("Active connections reached 0");
+            debug!("Active tunnels reached 0");
         }
     }
 
@@ -314,7 +314,7 @@ impl HttpIpcClient {
             pid,
             listen_addr: listen_addr.to_string(),
             state: status.state,
-            active_connections: status.active_connections,
+            active_tunnels: status.active_tunnels,
             bytes_sent: status.bytes_sent,
             bytes_received: status.bytes_received,
             started_at: status.started_at,
@@ -571,7 +571,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
         let initial_status = DataPlaneStatus {
             state: DataPlaneState::Starting,
             pid,
-            active_connections: 0,
+            active_tunnels: 0,
             bytes_sent: 0,
             bytes_received: 0,
             started_at: data_plane.started_at,
@@ -1032,45 +1032,45 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                 loop {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     let state = data_plane.get_state().await;
-                    let connections = data_plane.active_connections.load(Ordering::SeqCst);
-                    debug!("Drain check: state={:?}, active_connections={}", state, connections);
-                    if state == DataPlaneState::Draining && connections == 0 {
+                    let tunnels = data_plane.active_tunnels.load(Ordering::SeqCst);
+                    debug!("Drain check: state={:?}, active_tunnels={}", state, tunnels);
+                    if state == DataPlaneState::Draining && tunnels == 0 {
                         return;
                     }
                 }
             } => {
-                info!("All connections drained, shutting down");
+                info!("All tunnels drained, shutting down");
                 break;
             }
 
-            // QUIC 接続
+            // QUIC トンネル
             result = endpoint.accept() => {
                 match result {
                     Some(incoming) => {
                         let state = data_plane.get_state().await;
                         if state == DataPlaneState::Draining {
-                            // DRAINING 状態では新規接続を拒否
-                            debug!("Rejecting new connection in DRAINING state");
+                            // DRAINING 状態では新規トンネルを拒否
+                            debug!("Rejecting new tunnel in DRAINING state");
                             continue;
                         }
 
                         let dp = data_plane.clone();
                         tokio::spawn(async move {
                             match incoming.await {
-                                Ok(connection) => {
-                                    let remote_addr = connection.remote_address();
-                                    info!("New QUIC connection from {}", remote_addr);
-                                    dp.connection_opened();
+                                Ok(tunnel) => {
+                                    let remote_addr = tunnel.remote_address();
+                                    info!("New QUIC tunnel from {}", remote_addr);
+                                    dp.tunnel_opened();
 
-                                    if let Err(e) = handle_quic_connection(dp.clone(), connection).await {
+                                    if let Err(e) = handle_quic_tunnel(dp.clone(), tunnel).await {
                                         error!("QUIC handler error: {}", e);
                                     }
 
-                                    dp.connection_closed();
-                                    info!("QUIC connection closed: {}", remote_addr);
+                                    dp.tunnel_closed();
+                                    info!("QUIC tunnel closed: {}", remote_addr);
                                 }
                                 Err(e) => {
-                                    error!("Failed to accept QUIC connection: {}", e);
+                                    error!("Failed to accept QUIC tunnel: {}", e);
                                 }
                             }
                         }.instrument(tracing::Span::current()));
@@ -1154,12 +1154,12 @@ async fn process_ipc_command(data_plane: &DataPlane, cmd: ControlCommand) {
     }
 }
 
-/// QUIC 接続を処理
-async fn handle_quic_connection(data_plane: Arc<DataPlane>, connection: Connection) -> Result<()> {
-    let remote_addr = connection.remote_address();
+/// QUIC トンネルを処理
+async fn handle_quic_tunnel(data_plane: Arc<DataPlane>, tunnel: Connection) -> Result<()> {
+    let remote_addr = tunnel.remote_address();
 
     // 制御用ストリームを受け付け
-    let (mut send, mut recv) = connection
+    let (mut send, mut recv) = tunnel
         .accept_bi()
         .await
         .context("Failed to accept control stream")?;
@@ -1250,7 +1250,7 @@ async fn handle_quic_connection(data_plane: Arc<DataPlane>, connection: Connecti
             handle_remote_forward(
                 port,
                 protocol,
-                connection,
+                tunnel,
                 control_stream,
                 conn_manager,
                 data_plane,
@@ -1268,7 +1268,7 @@ async fn handle_quic_connection(data_plane: Arc<DataPlane>, connection: Connecti
             );
 
             handle_local_forward(
-                connection,
+                tunnel,
                 control_stream,
                 &remote_destination,
                 protocol,
@@ -1417,7 +1417,7 @@ async fn handle_remote_forward(
 
                     // QUIC 接続クローズ
                     reason = quic_conn.closed() => {
-                        info!("QUIC connection closed: {:?}, releasing port {}", reason, port);
+                        info!("QUIC tunnel closed: {:?}, releasing port {}", reason, port);
                         break;
                     }
 
@@ -1591,7 +1591,7 @@ async fn handle_remote_forward(
 
                     // QUIC 接続クローズ
                     reason = quic_conn.closed() => {
-                        info!("QUIC connection closed: {:?}, releasing UDP port {}", reason, port);
+                        info!("QUIC tunnel closed: {:?}, releasing UDP port {}", reason, port);
                         break;
                     }
 
@@ -1801,7 +1801,7 @@ async fn handle_local_forward(
 
             // QUIC 接続クローズ
             reason = quic_conn.closed() => {
-                info!("QUIC connection closed: {:?}, stopping LPF handler", reason);
+                info!("QUIC tunnel closed: {:?}, stopping LPF handler", reason);
                 break;
             }
 

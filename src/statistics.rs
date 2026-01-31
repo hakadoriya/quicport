@@ -1,6 +1,6 @@
 //! サーバー統計情報
 //!
-//! サーバーの稼働状況（接続数、転送量など）を追跡するための構造体とメソッドを提供します。
+//! サーバーの稼働状況（トンネル数、転送量など）を追跡するための構造体とメソッドを提供します。
 //! Prometheus 形式でのメトリクスエクスポートに対応しています。
 
 use std::fmt::Write;
@@ -13,10 +13,10 @@ use std::time::Instant;
 pub struct ServerStatistics {
     /// サーバー開始時刻
     start_time: Instant,
-    /// 累計接続数
-    total_connections: AtomicU64,
-    /// 現在アクティブな接続数
-    active_connections: AtomicU64,
+    /// 累計トンネル数
+    total_tunnels: AtomicU64,
+    /// 現在アクティブなトンネル数
+    active_tunnels: AtomicU64,
     /// 送信バイト数の累計
     bytes_sent: AtomicU64,
     /// 受信バイト数の累計
@@ -38,8 +38,8 @@ impl ServerStatistics {
     pub fn new() -> Self {
         Self {
             start_time: Instant::now(),
-            total_connections: AtomicU64::new(0),
-            active_connections: AtomicU64::new(0),
+            total_tunnels: AtomicU64::new(0),
+            active_tunnels: AtomicU64::new(0),
             bytes_sent: AtomicU64::new(0),
             bytes_received: AtomicU64::new(0),
             auth_psk_success: AtomicU64::new(0),
@@ -49,19 +49,19 @@ impl ServerStatistics {
         }
     }
 
-    /// 新しい接続が開始されたときに呼び出す
+    /// 新しいトンネルが開始されたときに呼び出す
     ///
-    /// 累計接続数とアクティブ接続数を増加させます。
-    pub fn connection_opened(&self) {
-        self.total_connections.fetch_add(1, Ordering::Relaxed);
-        self.active_connections.fetch_add(1, Ordering::Relaxed);
+    /// 累計トンネル数とアクティブトンネル数を増加させます。
+    pub fn tunnel_opened(&self) {
+        self.total_tunnels.fetch_add(1, Ordering::Relaxed);
+        self.active_tunnels.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// 接続が終了したときに呼び出す
+    /// トンネルが終了したときに呼び出す
     ///
-    /// アクティブ接続数を減少させます。
-    pub fn connection_closed(&self) {
-        self.active_connections.fetch_sub(1, Ordering::Relaxed);
+    /// アクティブトンネル数を減少させます。
+    pub fn tunnel_closed(&self) {
+        self.active_tunnels.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// 送信バイト数を加算
@@ -97,8 +97,8 @@ impl ServerStatistics {
     /// Prometheus 形式でメトリクスを出力
     pub fn to_prometheus(&self) -> String {
         let uptime = self.start_time.elapsed().as_secs();
-        let total_connections = self.total_connections.load(Ordering::Relaxed);
-        let active_connections = self.active_connections.load(Ordering::Relaxed);
+        let total_tunnels = self.total_tunnels.load(Ordering::Relaxed);
+        let active_tunnels = self.active_tunnels.load(Ordering::Relaxed);
         let bytes_sent = self.bytes_sent.load(Ordering::Relaxed);
         let bytes_received = self.bytes_received.load(Ordering::Relaxed);
         let auth_psk_success = self.auth_psk_success.load(Ordering::Relaxed);
@@ -117,23 +117,23 @@ impl ServerStatistics {
         writeln!(output, "# TYPE quicport_uptime_seconds gauge").unwrap();
         writeln!(output, "quicport_uptime_seconds {}", uptime).unwrap();
 
-        // connections total
+        // tunnels total
         writeln!(
             output,
-            "# HELP quicport_connections_total Total number of connections since server start"
+            "# HELP quicport_tunnels_total Total number of tunnels since server start"
         )
         .unwrap();
-        writeln!(output, "# TYPE quicport_connections_total counter").unwrap();
-        writeln!(output, "quicport_connections_total {}", total_connections).unwrap();
+        writeln!(output, "# TYPE quicport_tunnels_total counter").unwrap();
+        writeln!(output, "quicport_tunnels_total {}", total_tunnels).unwrap();
 
-        // connections active
+        // tunnels active
         writeln!(
             output,
-            "# HELP quicport_connections_active Current number of active connections"
+            "# HELP quicport_tunnels_active Current number of active tunnels"
         )
         .unwrap();
-        writeln!(output, "# TYPE quicport_connections_active gauge").unwrap();
-        writeln!(output, "quicport_connections_active {}", active_connections).unwrap();
+        writeln!(output, "# TYPE quicport_tunnels_active gauge").unwrap();
+        writeln!(output, "quicport_tunnels_active {}", active_tunnels).unwrap();
 
         // bytes sent
         writeln!(
