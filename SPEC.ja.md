@@ -696,6 +696,43 @@ data-plane                              control-plane
 - Classic BPF (cBPF) では `BPF_MAP_TYPE_REUSEPORT_SOCKARRAY` にアクセスできず、マップのピン留めもできないため代替不可
 - macOS にはカーネルレベルの UDP パケットステアリング手段が存在しないため、macOS では graceful restart を非サポート
 
+##### eBPF 利用不可・アタッチ失敗時のフォールバック（Linux）
+
+Linux 環境であっても、eBPF が利用できない、またはロード・アタッチに失敗する場合がある。データプレーンはこのケースを検出し、カーネルのデフォルト `SO_REUSEPORT` 動作（ハッシュベース分散）にフォールバックする（`src/data_plane.rs`）。
+
+**フォールバックが発生する条件と挙動:**
+
+| 条件 | ログレベル | 挙動 |
+|------|-----------|------|
+| `/sys/fs/bpf` が存在しない（`is_ebpf_available()` = false） | INFO | eBPF を使用せず、カーネルデフォルト `SO_REUSEPORT` で動作 |
+| `EbpfRouter::load()` 失敗（権限不足、カーネル非対応等） | WARN | カーネルデフォルト `SO_REUSEPORT` にフォールバック。**graceful restart 時の接続リセットの可能性を警告** |
+| `attach_to_socket()` 失敗（`setsockopt(SO_ATTACH_REUSEPORT_EBPF)` エラー） | WARN | カーネルデフォルト `SO_REUSEPORT` にフォールバック。**graceful restart 時の接続リセットの可能性を警告** |
+
+**フォールバック時の影響:**
+
+- **単一 DP 運用時**: 影響なし。パケットは唯一の DP に配送される
+- **graceful restart 時（複数 DP 共存）**: カーネルの `SO_REUSEPORT` ハッシュベース分散により、既存の QUIC 接続のパケットが新 DP に誤配送される可能性がある。これにより **既存接続がリセットされる** 場合がある
+- **フォールバック状態でもデータプレーンは正常に起動・動作する**（eBPF はあくまで graceful restart 時の接続維持を改善するためのオプション機能）
+
+**フォールバック判定のフロー（`src/data_plane.rs`）:**
+
+```text
+Linux?
+├── Yes
+│   └── is_ebpf_available()?
+│       ├── Yes
+│       │   └── EbpfRouter::load()
+│       │       ├── Ok → attach_to_socket()
+│       │       │         ├── Ok → eBPF ルーティング有効 ✓
+│       │       │         └── Err → WARN + SO_REUSEPORT フォールバック ⚠
+│       │       └── Err → WARN + SO_REUSEPORT フォールバック ⚠
+│       └── No → INFO + SO_REUSEPORT フォールバック
+└── No (macOS 等)
+    └── SO_REUSEPORT のみ（eBPF 非対応）
+```
+
+> **運用上の注意**: Linux 環境で graceful restart を安全に行うには、eBPF が正常に動作している必要がある。フォールバックが発生している場合、ログに警告メッセージ `"Falling back to kernel default SO_REUSEPORT behavior. This may cause connection resets during graceful restart."` が出力されるため、監視対象に含めることを推奨する。
+
 ##### eBPF map のライフサイクル管理
 
 - **エントリ追加**: DP が起動時に `register_server(server_id, socket)` で自身のエントリを追加（ソケット fd が必要なため DP でのみ実行可能）
