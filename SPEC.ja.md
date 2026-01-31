@@ -1060,8 +1060,8 @@ quicport は以下のディレクトリにファイルを配置します（XDG B
 
 | パス | 用途 |
 |------|------|
-| `~/.config/quicport/server.crt` | サーバー証明書（DER 形式） |
-| `~/.config/quicport/server.key` | サーバー秘密鍵（DER 形式、パーミッション 0600） |
+| `~/.config/quicport/server.crt` | サーバー証明書（PEM 形式） |
+| `~/.config/quicport/server.key` | サーバー秘密鍵（PEM 形式、パーミッション 0600） |
 | `~/.config/quicport/psk` | 自動生成された PSK（Base64 形式、32 バイト） |
 | `~/.local/share/quicport/known_hosts` | クライアントの既知ホスト一覧 |
 
