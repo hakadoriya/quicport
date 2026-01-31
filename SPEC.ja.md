@@ -610,6 +610,7 @@ STARTING --> ACTIVE --> DRAINING --> TERMINATED
 - **server_id**: `u32` 型。値の範囲は `1..65535`（0 は eBPF map のデフォルト ACTIVE DP 用に予約、65536 は `BPF_MAP_TYPE_REUSEPORT_SOCKARRAY` の上限）
 - **dp_id**: server_id の 16 進数文字列表現（`format!("{:#06x}", server_id)` → 例: `0x3039`）
 - server_id は QUIC Connection ID に埋め込まれ（`[server_id: 4B][counter: 4B]`）、eBPF ルーティングに使用される
+- CID の有効期限は 24 時間に設定されている（graceful restart を考慮）
 - dp_id は HTTP IPC API や CLI での識別子として使用される
 
 **生成アルゴリズム:**
@@ -659,6 +660,17 @@ data-plane                              control-plane
 - `BPF_MAP_TYPE_REUSEPORT_SOCKARRAY` マップで server_id → ソケットの対応を管理
 - Connection ID フォーマット: `[server_id: 4B][counter: 4B]` (8 bytes, Big Endian)
 - マップとプログラムは `/sys/fs/bpf/quicport/` にピン留めされ、graceful restart 時に新旧プロセス間で共有される
+
+##### eBPF アタッチ順序の制約
+
+`SO_ATTACH_REUSEPORT_EBPF` は `bind()` の **前に** 呼び出す必要がある。`bind()` 後にアタッチした場合、一部のカーネルでは既存の reuseport グループにプログラムが適用されない。
+
+ソケット作成からエンドポイント構築までの正しい手順（`src/data_plane.rs`）:
+
+1. `create_unbound_udp_socket()` — 未バインドソケット作成（`SO_REUSEPORT` 付き）
+2. `attach_to_socket()` — eBPF プログラムをアタッチ（**bind 前**）
+3. `bind_udp_socket()` — ソケットをバインド
+4. `create_server_endpoint_with_socket()` — QUIC Endpoint 作成
 
 ##### デフォルト ACTIVE DP ルーティング (key=0)
 
@@ -1507,6 +1519,7 @@ IPv6 アドレスを正しく扱うための設計:
 - **フォーマット**: `--log-format` オプションで `console`（人間向け）または `json`（構造化ログ）を選択可能
 - **フォーマット継承**: control-plane が data-plane を自動起動する際、`--log-format` の値を引き継ぐ。CP を `--log-format json` で起動すると、DP も JSON 形式でログ出力する
 - **ログレベル**: 環境変数 `RUST_LOG` で制御（デフォルト: `info`）
+- **ルートスパン**: 全ログに `pid`（プロセス ID）と `subcommand`（実行中のサブコマンド名）がスパン属性として付与される。複数プロセス運用時のログ識別に有用
 
 ### ファイル操作
 
