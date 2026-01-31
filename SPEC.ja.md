@@ -309,8 +309,11 @@ quicport ctl <COMMAND>
 
 | コマンド | 説明 |
 |----------|------|
-| `status` | 全データプレーンの状態を表示 |
-| `drain --dp-id <DP_ID>` | 特定のデータプレーンに DRAIN を送信 |
+| `list-data-planes` | 全データプレーンの一覧を表示 |
+| `get-data-plane-status --dp-id <DP_ID>` | 特定のデータプレーンの詳細状態を表示 |
+| `drain-data-plane --dp-id <DP_ID>` | 特定のデータプレーンに DRAIN を送信 |
+| `shutdown-data-plane --dp-id <DP_ID>` | 特定のデータプレーンを即座にシャットダウン |
+| `get-connections --dp-id <DP_ID>` | 特定のデータプレーンのアクティブ接続一覧を表示 |
 
 **共通オプション:**
 
@@ -318,26 +321,35 @@ quicport ctl <COMMAND>
 |-----------|------|------|
 | `--control-plane-addr` | No | コントロールプレーンの接続先アドレス（デフォルト: `127.0.0.1:39000`） |
 
-**drain オプション:**
+**サブコマンド固有オプション:**
 
-| オプション | 必須 | 説明 |
-|-----------|------|------|
-| `--dp-id` / `-d` | Yes | ドレイン対象のデータプレーン ID（16 進数形式、例: `0x3039`） |
+| オプション | 必須 | 対象サブコマンド | 説明 |
+|-----------|------|-----------------|------|
+| `--dp-id` | Yes | `get-data-plane-status`, `drain-data-plane`, `shutdown-data-plane`, `get-connections` | 対象のデータプレーン ID（16 進数形式、例: `0x3039`） |
 
 **例:**
 
 ```bash
-# 全データプレーンの状態を確認
-quicport ctl status
+# 全データプレーンの一覧を確認
+quicport ctl list-data-planes
+
+# 特定のデータプレーンの詳細状態を確認
+quicport ctl get-data-plane-status --dp-id 0x3039
 
 # 特定のデータプレーンをドレイン
-quicport ctl drain --dp-id 0x3039
+quicport ctl drain-data-plane --dp-id 0x3039
+
+# 特定のデータプレーンをシャットダウン
+quicport ctl shutdown-data-plane --dp-id 0x3039
+
+# 特定のデータプレーンの接続一覧を確認
+quicport ctl get-connections --dp-id 0x3039
 
 # コントロールプレーンのアドレスを指定
-quicport ctl status --control-plane-addr 127.0.0.1:39001
+quicport ctl list-data-planes --control-plane-addr 127.0.0.1:39001
 ```
 
-**出力例 (status):**
+**出力例 (list-data-planes):**
 
 ```
 Data Planes:
