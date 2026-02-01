@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn, Instrument};
 
@@ -64,6 +64,11 @@ struct TrackedTunnel {
     bytes_received: Arc<AtomicU64>,
 }
 
+#[derive(Debug)]
+enum EbpfCommand {
+    RegisterDefaultActive,
+}
+
 /// データプレーンの共有状態
 pub struct DataPlane {
     /// プロセス状態
@@ -94,6 +99,8 @@ pub struct DataPlane {
     tunnel_id_counter: AtomicU64,
     /// トンネル情報（ListTunnels 用）
     tunnel_list: RwLock<HashMap<u64, TrackedTunnel>>,
+    /// eBPF 用の内部コマンド送信
+    ebpf_cmd_tx: RwLock<Option<mpsc::Sender<EbpfCommand>>>,
 }
 
 impl DataPlane {
@@ -122,6 +129,7 @@ impl DataPlane {
             connection_list: RwLock::new(HashMap::new()),
             tunnel_id_counter: AtomicU64::new(1),
             tunnel_list: RwLock::new(HashMap::new()),
+            ebpf_cmd_tx: RwLock::new(None),
         })
     }
 
@@ -198,6 +206,23 @@ impl DataPlane {
     /// ドレイン通知を購読
     pub fn subscribe_drain(&self) -> broadcast::Receiver<()> {
         self.drain_tx.subscribe()
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn set_ebpf_command_sender(&self, sender: Option<mpsc::Sender<EbpfCommand>>) {
+        let mut tx = self.ebpf_cmd_tx.write().await;
+        *tx = sender;
+    }
+
+    async fn request_default_active_registration(&self) {
+        let tx = self.ebpf_cmd_tx.read().await.clone();
+        if let Some(tx) = tx {
+            if let Err(e) = tx.send(EbpfCommand::RegisterDefaultActive).await {
+                debug!("Failed to send eBPF command (receiver closed): {}", e);
+            }
+        } else {
+            debug!("eBPF command sender not available (default active not registered)");
+        }
     }
 
     /// トンネル数をインクリメント
@@ -762,6 +787,10 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     let mut _ebpf_router: Option<crate::platform::linux::EbpfRouter> = None;
 
     // eBPF ルーティング用に常に dp_id を使用
+
+    #[cfg(target_os = "linux")]
+    let mut ebpf_cmd_tx: Option<mpsc::Sender<EbpfCommand>> = None;
+
     let endpoint = {
         let sid = server_id;
         info!(
@@ -886,6 +915,51 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
             }
         }
 
+        // eBPF デフォルト ACTIVE 登録用のコマンド受信をセットアップ
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(ref _router) = _ebpf_router {
+                match socket.try_clone() {
+                    Ok(socket_for_ebpf) => {
+                        let (tx, mut rx) = mpsc::channel::<EbpfCommand>(4);
+                        ebpf_cmd_tx = Some(tx);
+
+                        // 受信ループに router を移動して保持する
+                        let mut router = _ebpf_router
+                            .take()
+                            .expect("ebpf router must exist when setting up command handler");
+
+                        tokio::spawn(async move {
+                            while let Some(cmd) = rx.recv().await {
+                                match cmd {
+                                    EbpfCommand::RegisterDefaultActive => {
+                                        if let Err(e) =
+                                            router.register_default_active(&socket_for_ebpf)
+                                        {
+                                            warn!(
+                                                "Failed to register default active DP (key=0) via command: {}",
+                                                e
+                                            );
+                                        } else {
+                                            info!(
+                                                "Default active DP (key=0) registered via command"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to clone UDP socket for eBPF default active registration: {}",
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
         // 非 Linux 時
         #[cfg(not(target_os = "linux"))]
         {
@@ -904,6 +978,10 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
 
         endpoint
     };
+
+    // eBPF コマンド送信のセットアップ（Linux のみ）
+    #[cfg(target_os = "linux")]
+    data_plane.set_ebpf_command_sender(ebpf_cmd_tx).await;
     info!("Data plane QUIC listening on {}", config.listen_addr);
 
     // ACTIVE 状態に移行
@@ -1255,6 +1333,11 @@ async fn process_ipc_command(data_plane: &DataPlane, cmd: ControlCommand) {
             // トンネル情報は定期 SendStatus で自動的に送信される
             let tunnels = data_plane.get_tunnels().await;
             debug!("GetTunnels command received: {} tunnels", tunnels.len());
+        }
+
+        ControlCommand::SetDefaultActive => {
+            data_plane.request_default_active_registration().await;
+            info!("Default active registration requested");
         }
     }
 }

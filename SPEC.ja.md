@@ -610,7 +610,7 @@ STARTING --> ACTIVE --> DRAINING --> TERMINATED
 
 | 状況 | 動作 |
 |------|------|
-| データプレーンクラッシュ | コントロールプレーンが stale 検出で検知し、新しいインスタンスを起動 |
+| データプレーンクラッシュ | コントロールプレーンが unresponsive 検出で検知し、新しいインスタンスを起動 |
 | バックエンド接続失敗 | クライアントにエラーを返し、該当接続をクローズ |
 | 認証失敗 | 制御ストリームをクローズし、接続を終了 |
 | DRAIN タイムアウト | 残りの接続を強制切断して終了（デフォルト: drain_timeout=0 で無限待機、すなわち全接続完了まで待つ） |
@@ -701,20 +701,20 @@ data-plane                              control-plane
 
 この仕組みにより、graceful restart 時に旧 DP の既存接続は旧 DP の `server_id` 入りの CID でルーティングされ続け、新規接続だけが key=0 経由で新 DP に向かう。
 
-**DP 側の実装:**
+**DP/CP 側の実装:**
 
-- **登録**: DP 起動時に `register_server(sid, socket)` の直後に `register_default_active(socket)` で key=0 に自身のソケットを登録（`MapFlags::ANY` で常に上書き）
+- **初回登録**: DP 起動時に `register_server(sid, socket)` の直後に `register_default_active(socket)` で key=0 に自身のソケットを登録（`MapFlags::ANY` で常に上書き）
+- **CP 指示による再登録**: CP が「最新の ACTIVE」を選び、`ReceiveCommand` で key=0 再登録を指示（DP は `register_default_active` を実行）
 - **eBPF fallback**: `extract_server_id()` 失敗時、または `bpf_sk_select_reuseport()` 失敗時に key=0 で再ルックアップ
-- **DRAINING 遷移時**: key=0 は削除しない（新 DP が上書き登録するまで保持）
-- **Drop 時**: key=0 を削除（ソケット無効化による stale 防止）
-- **CP stale cleanup**: ACTIVE な DP が 0 台の場合、key=0 も削除
+- **DRAINING 遷移時**: key=0 は削除しない（CP からの指示で上書きされるまで保持）
+- **CP unresponsive cleanup**: ACTIVE な DP が 0 台の場合、key=0 も削除
 
 | シナリオ | 動作 |
 |---------|------|
 | ACTIVE 1 台のみ | key=0 → ACTIVE DP。新規接続は確実にそこへ |
 | ACTIVE 1 + DRAINING 1 | key=0 → ACTIVE DP（新 DP が上書き済み）。既存接続は CID ベースルーティング |
 | 全 DP DRAINING（ACTIVE なし） | key=0 は最後の ACTIVE だった DP を指す → CP cleanup で key=0 削除 → カーネルデフォルト |
-| ACTIVE DP クラッシュ | key=0 のソケットは無効 → `bpf_sk_select_reuseport` 失敗 → カーネルデフォルト。CP stale cleanup で key=0 も削除 |
+| ACTIVE DP クラッシュ | key=0 のソケットは無効 → `bpf_sk_select_reuseport` 失敗 → カーネルデフォルト。CP unresponsive cleanup で key=0 も削除 |
 
 ##### なぜ eBPF が必要か
 
@@ -764,8 +764,8 @@ Linux?
 
 - **エントリ追加**: DP が起動時に `register_server(server_id, socket)` で自身のエントリを追加（ソケット fd が必要なため DP でのみ実行可能）
 - **エントリ削除（正常終了）**: DP が `EbpfRouter::drop()` で自身のエントリを削除
-- **エントリ削除（異常終了フォールバック）**: CP がバックグラウンドタスクで定期的に stale エントリを検出・削除
-  - DP の `last_active`（最終ハートビート時刻）が設定可能なタイムアウト（デフォルト 300 秒）を超過した場合、stale と判定
+- **エントリ削除（異常終了フォールバック）**: CP がバックグラウンドタスクで定期的に unresponsive エントリを検出・削除
+  - DP の `last_active`（最終ハートビート時刻）が設定可能なタイムアウト（デフォルト 300 秒）を超過した場合、unresponsive と判定
   - CP がピン留めされた eBPF map を開き、該当 server_id のエントリを削除
   - チェック間隔: 10 秒
 
@@ -790,7 +790,7 @@ Linux?
 │       │ <─── { dp_id, auth_policy } ─ │                             │
 │       │                               │                             │
 │       │ ──POST /dp/ReceiveCommand───> │ (長ポーリング)              │
-│       │ <─── { commands: [...] } ──── │                             │
+│       │ <─── { commands: [...] } ──── │ (例: SetDefaultActive)       │
 │       │                               │                             │
 │  CLI / 外部                                                         │
 │       │                               │                             │
@@ -850,7 +850,8 @@ data-plane                    旧 control-plane              新 control-plane
 2. control-plane が終了すると、接続エラーまたは 404 NOT_FOUND が返る
 3. 404 NOT_FOUND を検出した場合、data-plane は自動的に再登録を試行
 4. 再登録成功後、現在の状態（ACTIVE または DRAINING）を Status イベントで報告
-5. **DRAINING 状態は維持される**（古い data-plane が ACTIVE に戻らないようにする）
+5. control-plane は必要に応じて `SetDefaultActive` を送信し、key=0 再登録を指示
+6. **DRAINING 状態は維持される**（古い data-plane が ACTIVE に戻らないようにする）
 
 **状態維持の重要性:**
 
@@ -1666,7 +1667,7 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
 | `idle_connection_timeout` | `u64` | `3600`（1 時間） | アイドル接続のタイムアウト（秒） |
 | `server_id` | `Option<u32>` | `None` | サーバー ID（eBPF ルーティング用）。QUIC Connection ID の先頭 4 バイトに埋め込まれる。None の場合は従来の接続 ID カウンターを使用 |
 | `enable_ebpf_routing` | `bool` | `false` | eBPF ルーティングの有効化。true の場合、eBPF プログラムで QUIC パケットを Connection ID に基づいてルーティングする（Linux + ebpf feature が必要） |
-| `stale_dp_timeout` | `u64` | `300`（5 分） | stale データプレーン検出タイムアウト（秒）。CP が DP の `last_active` をチェックし、この値を超過した DP を stale と判定して eBPF map エントリを削除する |
+| `unresponsive_dp_timeout` | `u64` | `300`（5 分） | unresponsive データプレーン検出タイムアウト（秒）。CP が DP の `last_active` をチェックし、この値を超過した DP を unresponsive と判定して eBPF map エントリを削除する |
 | `quic_keep_alive_secs` | `u64` | `5` | QUIC keep-alive interval（秒）。NAT テーブル維持のために定期的に ping を送信する間隔 |
 | `quic_idle_timeout_secs` | `u64` | `90` | QUIC max idle timeout（秒）。この時間応答がなければ接続をクローズする |
 
@@ -1713,7 +1714,7 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
     "idle_connection_timeout": 3600,
     "server_id": 12345,
     "enable_ebpf_routing": false,
-    "stale_dp_timeout": 300,
+    "unresponsive_dp_timeout": 300,
     "quic_keep_alive_secs": 5,
     "quic_idle_timeout_secs": 90
   }
@@ -1743,6 +1744,10 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
       "type": "Drain"
     },
     {
+      "id": "cmd_001a",
+      "type": "SetDefaultActive"
+    },
+    {
       "id": "cmd_002",
       "type": "SetConfig",
       "listen_addr": "0.0.0.0:39000",
@@ -1750,13 +1755,18 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
       "idle_connection_timeout": 3600,
       "server_id": 12345,
       "enable_ebpf_routing": false,
-      "stale_dp_timeout": 300,
+      "unresponsive_dp_timeout": 300,
       "quic_keep_alive_secs": 5,
       "quic_idle_timeout_secs": 90
     }
   ]
 }
 ```
+
+**コマンド種別:**
+
+- `SetAuthPolicy` / `SetConfig` / `Drain` / `Shutdown` / `GetStatus` / `GetConnections` / `GetTunnels` / `SetDefaultActive`
+- `SetDefaultActive`: CP が選んだ「最新の ACTIVE DP」に key=0 再登録を指示する（eBPF ルーティング用）
 
 #### 管理用 API
 

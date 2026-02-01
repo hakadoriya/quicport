@@ -213,6 +213,9 @@ async fn send_status(
 
         info!("Data plane registered: dp_id={}", dp_id);
 
+        // 最新の ACTIVE をデフォルト ACTIVE として指示
+        state.http_ipc.update_default_active_dp().await;
+
         (
             StatusCode::OK,
             Json(serde_json::json!(SendStatusResponse {
@@ -257,6 +260,9 @@ async fn send_status(
                     dp_id, cmd_id, ack_status
                 );
             }
+
+            // 最新の ACTIVE をデフォルト ACTIVE として指示
+            state.http_ipc.update_default_active_dp().await;
 
             (
                 StatusCode::OK,

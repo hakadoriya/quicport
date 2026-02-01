@@ -254,36 +254,37 @@ impl ControlPlane {
         Ok(())
     }
 
-    /// stale データプレーンのクリーンアップタスクを起動
+    /// 応答不能データプレーンのクリーンアップタスクを起動
     ///
-    /// バックグラウンドで 60 秒ごとに stale DP を検出する。
+    /// バックグラウンドで 60 秒ごとに応答不能 DP を検出する。
     /// Linux 環境では eBPF map エントリの削除を先に行い、成功した場合のみ
     /// `data_planes` / `active_server_ids` から削除する。
     /// 非 Linux 環境では eBPF map 操作なしで直接 data_planes から削除する。
-    pub fn start_stale_cleanup_task(self: Arc<Self>) {
+    pub fn start_unresponsive_cleanup_task(self: Arc<Self>) {
         let check_interval = Duration::from_secs(10);
 
         tokio::spawn(async move {
-            info!("Stale data plane cleanup task started (interval=10s)");
+            info!("Unresponsive data plane cleanup task started (interval=10s)");
             loop {
                 tokio::time::sleep(check_interval).await;
 
-                // stale DP のタイムアウト値を設定から取得
+                // 応答不能 DP のタイムアウト値を設定から取得
                 let timeout_secs = {
                     let config = self.http_ipc.dp_config.read().await;
-                    config.stale_dp_timeout
+                    config.unresponsive_dp_timeout
                 };
 
-                let stale_entries = self.http_ipc.detect_stale_data_planes(timeout_secs).await;
+                let unresponsive_entries =
+                    self.http_ipc.detect_unresponsive_data_planes(timeout_secs).await;
 
-                if stale_entries.is_empty() {
-                    debug!("No stale data planes detected");
+                if unresponsive_entries.is_empty() {
+                    debug!("No unresponsive data planes detected");
                     continue;
                 }
 
                 info!(
-                    "Detected {} stale data plane(s), cleaning up",
-                    stale_entries.len()
+                    "Detected {} unresponsive data plane(s), cleaning up",
+                    unresponsive_entries.len()
                 );
 
                 // eBPF map 削除成功後に data_planes から削除するエントリを収集
@@ -295,21 +296,21 @@ impl ControlPlane {
                 {
                     use std::path::Path;
                     let ebpf_pin_path = Path::new("/sys/fs/bpf/quicport");
-                    for (dp_id, server_id) in &stale_entries {
-                        match crate::platform::linux::ebpf_router::cleanup_stale_entry(
+                    for (dp_id, server_id) in &unresponsive_entries {
+                        match crate::platform::linux::ebpf_router::cleanup_unresponsive_entry(
                             ebpf_pin_path,
                             *server_id,
                         ) {
                             Ok(()) => {
                                 info!(
-                                    "Cleaned up eBPF map entry for stale DP: dp_id={}, server_id={}",
+                                    "Cleaned up eBPF map entry for unresponsive DP: dp_id={}, server_id={}",
                                     dp_id, server_id
                                 );
                                 entries_to_remove.push((dp_id.clone(), *server_id));
                             }
                             Err(e) => {
                                 warn!(
-                                    "Failed to cleanup eBPF map entry for stale DP: dp_id={}, server_id={}, error={}. \
+                                    "Failed to cleanup eBPF map entry for unresponsive DP: dp_id={}, server_id={}, error={}. \
                                      Will retry on next cycle.",
                                     dp_id, server_id, e
                                 );
@@ -323,9 +324,9 @@ impl ControlPlane {
                 // 非 Linux 環境では eBPF map がないため、そのまま全て削除対象
                 #[cfg(not(target_os = "linux"))]
                 {
-                    for (dp_id, server_id) in &stale_entries {
+                    for (dp_id, server_id) in &unresponsive_entries {
                         warn!(
-                            "Stale DP detected (non-Linux, no eBPF cleanup): dp_id={}, server_id={}",
+                            "Unresponsive DP detected (non-Linux, no eBPF cleanup): dp_id={}, server_id={}",
                             dp_id, server_id
                         );
                         entries_to_remove.push((dp_id.clone(), *server_id));
@@ -337,8 +338,11 @@ impl ControlPlane {
                     self.http_ipc.remove_data_planes(&entries_to_remove).await;
                 }
 
+                // ACTIVE DP の変動を反映してデフォルト ACTIVE を再計算
+                self.http_ipc.update_default_active_dp().await;
+
                 // ACTIVE な DP が 1 つも存在しない場合、key=0（デフォルト ACTIVE DP）も削除
-                // key=0 が stale なソケットを指し続けることを防ぐ
+                // key=0 が応答不能なソケットを指し続けることを防ぐ
                 #[cfg(target_os = "linux")]
                 {
                     use crate::ipc::DataPlaneState;
@@ -351,7 +355,7 @@ impl ControlPlane {
 
                     if !has_active_dp {
                         let ebpf_pin_path = Path::new("/sys/fs/bpf/quicport");
-                        match crate::platform::linux::ebpf_router::cleanup_stale_entry(
+                        match crate::platform::linux::ebpf_router::cleanup_unresponsive_entry(
                             ebpf_pin_path,
                             0, // key=0: デフォルト ACTIVE DP
                         ) {
@@ -454,8 +458,8 @@ pub async fn run_with_api(
     let cp_for_cleanup = control_plane.clone();
     control_plane.start().await?;
 
-    // stale DP クリーンアップタスクを起動
-    cp_for_cleanup.start_stale_cleanup_task();
+    // 応答不能 DP クリーンアップタスクを起動
+    cp_for_cleanup.start_unresponsive_cleanup_task();
 
     // API サーバーが起動するのを待つ
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -502,4 +506,3 @@ pub async fn run_with_api(
 
     Ok(())
 }
-

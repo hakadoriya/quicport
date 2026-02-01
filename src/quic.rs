@@ -456,10 +456,9 @@ fn load_server_cert() -> Result<Option<(Vec<CertificateDer<'static>>, PrivateKey
     // PEM 形式の証明書を読み込み、DER に変換
     let cert_pem = fs::read_to_string(&cert_path)
         .with_context(|| format!("Failed to read certificate from {:?}", cert_path))?;
-    let certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut cert_pem.as_bytes())
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("Failed to parse certificate PEM")?;
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("Failed to parse certificate PEM")?;
     if certs.is_empty() {
         anyhow::bail!("No certificates found in {:?}", cert_path);
     }
@@ -550,10 +549,9 @@ fn get_or_create_server_cert() -> Result<(Vec<CertificateDer<'static>>, PrivateK
     save_server_cert(&cert_pem, &key_pem)?;
 
     // PEM → DER → rustls 型に変換
-    let certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut cert_pem.as_bytes())
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("Failed to parse generated certificate PEM")?;
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("Failed to parse generated certificate PEM")?;
     let key = rustls_pemfile::pkcs8_private_keys(&mut key_pem.as_bytes())
         .next()
         .ok_or_else(|| anyhow::anyhow!("No private key found in generated PEM"))?
