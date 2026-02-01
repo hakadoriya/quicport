@@ -24,7 +24,9 @@
 //! | `POST /api/v1/admin/GetDataPlaneStatus` | 特定 DP の詳細 |
 //! | `POST /api/v1/admin/DrainDataPlane` | ドレイン |
 //! | `POST /api/v1/admin/ShutdownDataPlane` | シャットダウン |
-//! | `POST /api/v1/admin/GetConnections` | 接続一覧 |
+//! | `POST /api/v1/admin/GetConnections` | 接続一覧（dp_id 指定必須） |
+//! | `POST /api/v1/admin/ListTunnels` | トンネル一覧（全 DP 横断可） |
+//! | `POST /api/v1/admin/ListConnections` | 接続一覧（全 DP 横断可） |
 //!
 //! ## API アクセス
 //!
@@ -50,12 +52,14 @@ use tracing::{debug, info, warn};
 
 use crate::control_plane::ControlPlane;
 use crate::ipc::{
-    AuthPolicy, CommandWithId, ConnectionInfo, ControlCommand, DataPlaneConfig, DataPlaneState,
-    DataPlaneSummary, DrainDataPlaneRequest, DrainDataPlaneResponse, ErrorResponse,
-    GetConnectionsRequest, GetConnectionsResponse, GetDataPlaneStatusRequest,
-    GetDataPlaneStatusResponse, ListDataPlanesRequest, ListDataPlanesResponse,
-    ReceiveCommandRequest, ReceiveCommandResponse, SendStatusRequest, SendStatusResponse,
-    ShutdownDataPlaneRequest, ShutdownDataPlaneResponse,
+    AuthPolicy, CommandWithId, ConnectionInfo, ConnectionInfoWithDpId, ControlCommand,
+    DataPlaneConfig, DataPlaneState, DataPlaneSummary, DrainDataPlaneRequest,
+    DrainDataPlaneResponse, ErrorResponse, GetConnectionsRequest, GetConnectionsResponse,
+    GetDataPlaneStatusRequest, GetDataPlaneStatusResponse, ListConnectionsRequest,
+    ListConnectionsResponse, ListDataPlanesRequest, ListDataPlanesResponse, ListTunnelsRequest,
+    ListTunnelsResponse, ReceiveCommandRequest, ReceiveCommandResponse, SendStatusRequest,
+    SendStatusResponse, ShutdownDataPlaneRequest, ShutdownDataPlaneResponse, TunnelInfo,
+    TunnelInfoWithDpId,
 };
 use crate::statistics::ServerStatistics;
 
@@ -85,6 +89,8 @@ pub struct HttpDataPlane {
     pub pending_commands: VecDeque<CommandWithId>,
     /// 接続一覧（DP から報告されたもの）
     pub connections: Vec<ConnectionInfo>,
+    /// トンネル一覧（DP から報告されたもの）
+    pub tunnels: Vec<TunnelInfo>,
     /// 最終アクティブ時刻
     pub last_active: u64,
     /// server_id（eBPF ルーティング用）
@@ -109,6 +115,7 @@ impl HttpDataPlane {
             started_at: now,
             pending_commands: VecDeque::new(),
             connections: Vec::new(),
+            tunnels: Vec::new(),
             last_active: now,
             server_id: None,
         }
@@ -488,6 +495,14 @@ async fn send_status(
             dp.listen_addr = req.listen_addr.clone();
             dp.last_active = now;
 
+            // トンネル・接続情報が送信された場合はキャッシュを更新
+            if let Some(tunnels) = req.tunnels {
+                dp.tunnels = tunnels;
+            }
+            if let Some(connections) = req.connections {
+                dp.connections = connections;
+            }
+
             // dp_id を使用中として登録（CP 再起動後の復旧用）
             {
                 let mut active_ids = state.http_ipc.active_server_ids.write().await;
@@ -742,6 +757,104 @@ async fn get_connections(
 }
 
 
+/// POST /api/v1/admin/ListTunnels
+///
+/// トンネル一覧を取得（dp_id 省略時は全 DP 横断）
+async fn list_tunnels(
+    State(state): State<PrivateApiState>,
+    Json(req): Json<ListTunnelsRequest>,
+) -> impl IntoResponse {
+    let data_planes = state.http_ipc.data_planes.read().await;
+
+    let tunnels: Vec<TunnelInfoWithDpId> = if let Some(ref dp_id) = req.dp_id {
+        // 特定 DP のトンネルのみ
+        match data_planes.get(dp_id) {
+            Some(dp) => dp
+                .tunnels
+                .iter()
+                .map(|t| TunnelInfoWithDpId {
+                    dp_id: dp_id.clone(),
+                    tunnel: t.clone(),
+                })
+                .collect(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!(ErrorResponse {
+                        error: "NOT_FOUND".to_string(),
+                        message: format!("Data plane not found: {}", dp_id),
+                    })),
+                );
+            }
+        }
+    } else {
+        // 全 DP 横断
+        data_planes
+            .iter()
+            .flat_map(|(dp_id, dp)| {
+                dp.tunnels.iter().map(move |t| TunnelInfoWithDpId {
+                    dp_id: dp_id.clone(),
+                    tunnel: t.clone(),
+                })
+            })
+            .collect()
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!(ListTunnelsResponse { tunnels })),
+    )
+}
+
+/// POST /api/v1/admin/ListConnections
+///
+/// 接続一覧を取得（dp_id 省略時は全 DP 横断）
+async fn list_connections(
+    State(state): State<PrivateApiState>,
+    Json(req): Json<ListConnectionsRequest>,
+) -> impl IntoResponse {
+    let data_planes = state.http_ipc.data_planes.read().await;
+
+    let connections: Vec<ConnectionInfoWithDpId> = if let Some(ref dp_id) = req.dp_id {
+        // 特定 DP の接続のみ
+        match data_planes.get(dp_id) {
+            Some(dp) => dp
+                .connections
+                .iter()
+                .map(|c| ConnectionInfoWithDpId {
+                    dp_id: dp_id.clone(),
+                    connection: c.clone(),
+                })
+                .collect(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!(ErrorResponse {
+                        error: "NOT_FOUND".to_string(),
+                        message: format!("Data plane not found: {}", dp_id),
+                    })),
+                );
+            }
+        }
+    } else {
+        // 全 DP 横断
+        data_planes
+            .iter()
+            .flat_map(|(dp_id, dp)| {
+                dp.connections.iter().map(move |c| ConnectionInfoWithDpId {
+                    dp_id: dp_id.clone(),
+                    connection: c.clone(),
+                })
+            })
+            .collect()
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!(ListConnectionsResponse { connections })),
+    )
+}
+
 // =============================================================================
 // サーバー起動
 // =============================================================================
@@ -808,6 +921,8 @@ pub async fn run_private_with_http_ipc(
             post(shutdown_data_plane),
         )
         .route(crate::ipc::api_paths::GET_CONNECTIONS, post(get_connections))
+        .route(crate::ipc::api_paths::LIST_TUNNELS, post(list_tunnels))
+        .route(crate::ipc::api_paths::LIST_CONNECTIONS, post(list_connections))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(listen).await?;

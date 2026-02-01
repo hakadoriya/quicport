@@ -24,7 +24,9 @@
 //! | `POST /api/v1/admin/GetDataPlaneStatus` | 特定 DP の詳細 |
 //! | `POST /api/v1/admin/DrainDataPlane` | ドレイン |
 //! | `POST /api/v1/admin/ShutdownDataPlane` | シャットダウン |
-//! | `POST /api/v1/admin/GetConnections` | 接続一覧 |
+//! | `POST /api/v1/admin/GetConnections` | 接続一覧（dp_id 指定必須） |
+//! | `POST /api/v1/admin/ListTunnels` | トンネル一覧（全 DP 横断可） |
+//! | `POST /api/v1/admin/ListConnections` | 接続一覧（全 DP 横断可） |
 
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -46,6 +48,8 @@ pub mod api_paths {
     pub const DRAIN_DATA_PLANE: &str = "/api/v1/admin/DrainDataPlane";
     pub const SHUTDOWN_DATA_PLANE: &str = "/api/v1/admin/ShutdownDataPlane";
     pub const GET_CONNECTIONS: &str = "/api/v1/admin/GetConnections";
+    pub const LIST_TUNNELS: &str = "/api/v1/admin/ListTunnels";
+    pub const LIST_CONNECTIONS: &str = "/api/v1/admin/ListConnections";
 }
 
 /// IPC エラー
@@ -80,6 +84,9 @@ pub enum ControlCommand {
 
     /// アクティブ接続の一覧を取得
     GetConnections,
+
+    /// アクティブトンネルの一覧を取得
+    GetTunnels,
 }
 
 /// 接続情報
@@ -91,6 +98,25 @@ pub struct ConnectionInfo {
     pub remote_addr: String,
     /// プロトコル (TCP/UDP)
     pub protocol: String,
+    /// 送信バイト数
+    pub bytes_sent: u64,
+    /// 受信バイト数
+    pub bytes_received: u64,
+}
+
+/// トンネル情報（QUIC 接続単位）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TunnelInfo {
+    /// トンネル ID
+    pub tunnel_id: u64,
+    /// クライアントのリモートアドレス
+    pub remote_addr: String,
+    /// フォワーディングモード ("RPF" or "LPF")
+    pub forwarding_mode: String,
+    /// 開始時刻（UNIX タイムスタンプ）
+    pub started_at: u64,
+    /// アクティブ接続数（このトンネル内のバックエンド接続）
+    pub active_connections: u32,
     /// 送信バイト数
     pub bytes_sent: u64,
     /// 受信バイト数
@@ -138,6 +164,14 @@ pub struct SendStatusRequest {
     /// コマンド実行ステータス（"completed", "failed" など）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ack_status: Option<String>,
+
+    // ========== トンネル・接続情報（オプション） ==========
+    /// トンネル一覧（定期送信時に含む）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnels: Option<Vec<TunnelInfo>>,
+    /// 接続一覧（定期送信時に含む）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<Vec<ConnectionInfo>>,
 }
 
 /// SendStatus レスポンス (CP → DP)
@@ -280,6 +314,56 @@ pub struct GetConnectionsRequest {
 pub struct GetConnectionsResponse {
     /// 接続一覧
     pub connections: Vec<ConnectionInfo>,
+}
+
+/// ListTunnels リクエスト (CLI/外部 → CP)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListTunnelsRequest {
+    /// Data Plane ID（省略時は全 DP 横断）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp_id: Option<String>,
+}
+
+/// ListTunnels レスポンス (CP → CLI/外部)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListTunnelsResponse {
+    /// トンネル一覧
+    pub tunnels: Vec<TunnelInfoWithDpId>,
+}
+
+/// DP ID 付きトンネル情報
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TunnelInfoWithDpId {
+    /// Data Plane ID
+    pub dp_id: String,
+    /// トンネル情報
+    #[serde(flatten)]
+    pub tunnel: TunnelInfo,
+}
+
+/// ListConnections リクエスト (CLI/外部 → CP)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListConnectionsRequest {
+    /// Data Plane ID（省略時は全 DP 横断）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp_id: Option<String>,
+}
+
+/// ListConnections レスポンス (CP → CLI/外部)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListConnectionsResponse {
+    /// 接続一覧
+    pub connections: Vec<ConnectionInfoWithDpId>,
+}
+
+/// DP ID 付き接続情報
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionInfoWithDpId {
+    /// Data Plane ID
+    pub dp_id: String,
+    /// 接続情報
+    #[serde(flatten)]
+    pub connection: ConnectionInfo,
 }
 
 /// HTTP IPC エラーレスポンス
@@ -481,6 +565,8 @@ mod tests {
             started_at: 1700000000,
             ack_cmd_id: None,
             ack_status: None,
+            tunnels: None,
+            connections: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("0x1234"));
