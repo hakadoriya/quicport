@@ -489,7 +489,8 @@ pub async fn run_remote_forward_with_reconnect(
 ///
 /// ループ外で一度だけ呼び出し、tokio::pin! でピン留めして使い回す。
 /// Unix では SIGINT と SIGTERM の両方を、Windows では Ctrl+C のみを待機。
-async fn create_shutdown_signal() {
+/// 受信したシグナル名を返す。
+async fn create_shutdown_signal() -> &'static str {
     #[cfg(unix)]
     {
         let mut sigint = signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
@@ -497,12 +498,8 @@ async fn create_shutdown_signal() {
             signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
 
         tokio::select! {
-            _ = sigint.recv() => {
-                info!("Received SIGINT");
-            }
-            _ = sigterm.recv() => {
-                info!("Received SIGTERM");
-            }
+            _ = sigint.recv() => "SIGINT",
+            _ = sigterm.recv() => "SIGTERM",
         }
     }
 
@@ -511,7 +508,36 @@ async fn create_shutdown_signal() {
         tokio::signal::ctrl_c()
             .await
             .expect("Failed to install Ctrl+C handler");
-        info!("Received Ctrl+C");
+        "Ctrl+C"
+    }
+}
+
+/// SSH ProxyCommand 用シャットダウンシグナル Future を作成
+///
+/// SSH がセッション終了時に ProxyCommand へ送るシグナル (SIGTERM, SIGHUP) と、
+/// 直接の Ctrl+C (SIGINT) を待機する。
+/// 受信したシグナル名を返す。
+async fn create_shutdown_signal_for_ssh_proxy() -> &'static str {
+    #[cfg(unix)]
+    {
+        let mut sigint = signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+        let mut sighup = signal(SignalKind::hangup()).expect("Failed to install SIGHUP handler");
+
+        tokio::select! {
+            _ = sigint.recv() => "SIGINT",
+            _ = sigterm.recv() => "SIGTERM",
+            _ = sighup.recv() => "SIGHUP",
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+        "Ctrl+C"
     }
 }
 
@@ -538,8 +564,8 @@ async fn handle_incoming_tunnel(
         tokio::select! {
             // SIGINT または SIGTERM を受信
             // ピン留めした Future を参照で使用
-            _ = &mut shutdown_signal => {
-                info!("Sending SessionClose to server...");
+            signal_name = &mut shutdown_signal => {
+                info!("Received {}, sending SessionClose to server...", signal_name);
 
                 // SessionClose メッセージを送信
                 let close_msg = ControlMessage::SessionClose;
@@ -1190,8 +1216,8 @@ async fn handle_local_tunnel(
                 tokio::select! {
                     // SIGINT または SIGTERM を受信
                     // ピン留めした Future を参照で使用
-                    _ = &mut shutdown_signal => {
-                        info!("Sending SessionClose to server...");
+                    signal_name = &mut shutdown_signal => {
+                        info!("Received {}, sending SessionClose to server...", signal_name);
 
                         let close_msg = ControlMessage::SessionClose;
                         if let Err(e) = control_stream.send_message(&close_msg).await {
@@ -1344,8 +1370,8 @@ async fn handle_local_tunnel(
                 tokio::select! {
                     // シャットダウンシグナル
                     // ピン留めした Future を参照で使用
-                    _ = &mut shutdown_signal => {
-                        info!("Sending SessionClose to server...");
+                    signal_name = &mut shutdown_signal => {
+                        info!("Received {}, sending SessionClose to server...", signal_name);
 
                         let close_msg = ControlMessage::SessionClose;
                         if let Err(e) = control_stream.send_message(&close_msg).await {
@@ -1900,7 +1926,11 @@ async fn relay_stdio_to_quic(
         .instrument(tracing::Span::current()),
     );
 
-    // どちらかが終了したら完了
+    // シグナルハンドラを作成（SIGINT, SIGTERM, SIGHUP）
+    let shutdown_signal = create_shutdown_signal_for_ssh_proxy();
+    tokio::pin!(shutdown_signal);
+
+    // どちらかが終了 or シグナル受信で完了
     tokio::select! {
         result = stdin_to_quic => {
             if let Err(e) = result {
@@ -1911,6 +1941,9 @@ async fn relay_stdio_to_quic(
             if let Err(e) = result {
                 debug!("[{}] QUIC->stdout task error: {}", conn_id, e);
             }
+        }
+        signal_name = &mut shutdown_signal => {
+            info!("[{}] Received {}, stopping relay", conn_id, signal_name);
         }
     }
 
