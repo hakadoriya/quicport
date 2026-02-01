@@ -41,11 +41,11 @@ update:  ## Update dependencies
 
 .PHONY: build-debug
 build-debug:  ## Build binary for debug
-	cargo build --offline
+	cargo build --locked
 
 .PHONY: build
 build:  ## Build binary for release
-	cargo build --offline --release
+	cargo build --locked --release
 
 .PHONY: clean
 clean:  ## Clean up cache, etc
