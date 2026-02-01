@@ -19,7 +19,8 @@ use std::time::Duration;
 use tokio::process::Command;
 use tracing::{debug, info, warn, Instrument};
 
-use crate::api::{run_private_with_http_ipc, HttpIpcState};
+use crate::api::run_private_with_http_ipc;
+use crate::ipc::state::HttpIpcState;
 use crate::ipc::{AuthPolicy, ControlCommand, DataPlaneConfig};
 use crate::statistics::ServerStatistics;
 

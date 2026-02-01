@@ -28,6 +28,8 @@
 //! | `POST /api/v1/admin/ListTunnels` | トンネル一覧（全 DP 横断可） |
 //! | `POST /api/v1/admin/ListConnections` | 接続一覧（全 DP 横断可） |
 
+pub mod state;
+
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use thiserror::Error;

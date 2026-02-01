@@ -77,10 +77,10 @@ impl ReconnectConfig {
 
 /// アクティブな接続を管理
 struct ConnectionManager {
-    connections: HashMap<u32, ConnectionInfo>,
+    connections: HashMap<u32, ClientConnectionState>,
 }
 
-struct ConnectionInfo {
+struct ClientConnectionState {
     #[allow(dead_code)]
     protocol: Protocol,
 }
@@ -94,7 +94,7 @@ impl ConnectionManager {
 
     fn add_connection(&mut self, conn_id: u32, protocol: Protocol) {
         self.connections
-            .insert(conn_id, ConnectionInfo { protocol });
+            .insert(conn_id, ClientConnectionState { protocol });
     }
 
     fn remove_connection(&mut self, conn_id: u32) {
