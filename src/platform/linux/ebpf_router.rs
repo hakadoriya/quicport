@@ -162,6 +162,11 @@ pub struct EbpfRouter {
     pinned_prog_fd: Option<OwnedFd>,
 }
 
+// SAFETY: EbpfRouter は単一の tokio タスクに move されて使用される。
+// 内部の libbpf オブジェクトは生ポインタを含むが、fd ベースのカーネルインターフェースを
+// 使用しており、所有権が単一タスクに移動する限りスレッド間の移動は安全。
+unsafe impl Send for EbpfRouter {}
+
 impl EbpfRouter {
     /// eBPF ルーターをロード
     ///
