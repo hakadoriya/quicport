@@ -16,7 +16,7 @@ set -Eeuo pipefail
 #       The systemd service must be run as root.
 # =============================================================================
 
-export PATH="${PATH:-}${PATH:+:}~/bin:~/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
+export PATH="${PATH:-}${PATH:+:}~/.cargo/bin:~/bin:~/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 
 # LICENSE: https://github.com/hakadoriya/log.sh/blob/HEAD/LICENSE
 # Common
