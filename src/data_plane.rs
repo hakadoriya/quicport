@@ -825,7 +825,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     let drain_timeout = data_plane.get_config().await.drain_timeout;
 
     // HTTP IPC タスク
-    // - 状態送信タスク: 5 秒間隔で SendStatus を呼び出し、状態を同期
+    // - 状態送信タスク: 1 秒間隔で SendStatus を呼び出し、状態を同期
     // - コマンド受信タスク: ReceiveCommand で長ポーリング
     let dp_for_ipc = data_plane.clone();
     let http_client = std::sync::Arc::new(tokio::sync::Mutex::new(http_client));

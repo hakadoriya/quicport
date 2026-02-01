@@ -353,7 +353,7 @@ pub struct DataPlaneConfig {
     ///
     /// CP のバックグラウンドタスクが DP の `last_active` をチェックし、
     /// この値を超過した DP を stale と判定して eBPF map エントリを削除する。
-    /// SendStatus の送信間隔（デフォルト 5 秒）より十分大きくする必要がある。
+    /// SendStatus の送信間隔（デフォルト 1 秒）より十分大きくする必要がある。
     #[serde(default = "default_stale_dp_timeout")]
     pub stale_dp_timeout: u64,
 
