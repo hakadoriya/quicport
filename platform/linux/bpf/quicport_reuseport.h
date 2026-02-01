@@ -63,6 +63,7 @@
  *   - (flags & 0x80) != 0  -> Long Header
  */
 #define QUIC_FLAGS_LONG_HEADER_MASK  0x80
+#define QUIC_FLAGS_FIXED_BIT         0x40
 
 /* Short Header: CID starts at offset 1 */
 #define QUIC_SHORT_HEADER_CID_OFFSET 1
