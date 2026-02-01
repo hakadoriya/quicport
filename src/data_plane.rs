@@ -16,7 +16,7 @@
 use anyhow::{Context, Result};
 use quinn::{Connection, RecvStream, SendStream};
 use socket2::{Domain, Protocol as SockProtocol, Socket, Type};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -30,6 +30,7 @@ use tracing::{debug, error, info, warn, Instrument};
 use crate::ipc::{
     AuthPolicy, CommandWithId, ControlCommand, DataPlaneConfig, DataPlaneState, DataPlaneStatus,
     ReceiveCommandRequest, ReceiveCommandResponse, SendStatusRequest, SendStatusResponse,
+    TunnelInfo,
 };
 use crate::protocol::{
     CloseReason, ControlMessage, ControlStream, Protocol, ProtocolError, ResponseStatus,
@@ -48,6 +49,17 @@ static CONNECTION_ID_COUNTER: AtomicU32 = AtomicU32::new(1);
 struct TrackedConnection {
     protocol: Protocol,
     remote_addr: SocketAddr,
+    bytes_sent: Arc<AtomicU64>,
+    bytes_received: Arc<AtomicU64>,
+}
+
+/// トンネルごとの追跡情報
+struct TrackedTunnel {
+    remote_addr: SocketAddr,
+    forwarding_mode: String, // "RPF" or "LPF"
+    started_at: u64,
+    /// このトンネルに紐づくバックエンド接続 ID の集合
+    connection_ids: HashSet<u32>,
     bytes_sent: Arc<AtomicU64>,
     bytes_received: Arc<AtomicU64>,
 }
@@ -78,6 +90,10 @@ pub struct DataPlane {
     closed_bytes_received: AtomicU64,
     /// 接続情報（GetConnections 用）
     connection_list: RwLock<HashMap<u32, TrackedConnection>>,
+    /// トンネル ID カウンター
+    tunnel_id_counter: AtomicU64,
+    /// トンネル情報（ListTunnels 用）
+    tunnel_list: RwLock<HashMap<u64, TrackedTunnel>>,
 }
 
 impl DataPlane {
@@ -104,6 +120,8 @@ impl DataPlane {
             closed_bytes_sent: AtomicU64::new(0),
             closed_bytes_received: AtomicU64::new(0),
             connection_list: RwLock::new(HashMap::new()),
+            tunnel_id_counter: AtomicU64::new(1),
+            tunnel_list: RwLock::new(HashMap::new()),
         })
     }
 
@@ -251,6 +269,72 @@ impl DataPlane {
             })
             .collect()
     }
+
+    /// トンネルを登録し、tunnel_id とバイトカウンターを返す
+    pub async fn register_tunnel(
+        &self,
+        remote_addr: SocketAddr,
+        forwarding_mode: &str,
+    ) -> (u64, Arc<AtomicU64>, Arc<AtomicU64>) {
+        let tunnel_id = self.tunnel_id_counter.fetch_add(1, Ordering::SeqCst);
+        let bytes_sent = Arc::new(AtomicU64::new(0));
+        let bytes_received = Arc::new(AtomicU64::new(0));
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        self.tunnel_list.write().await.insert(
+            tunnel_id,
+            TrackedTunnel {
+                remote_addr,
+                forwarding_mode: forwarding_mode.to_string(),
+                started_at: now,
+                connection_ids: HashSet::new(),
+                bytes_sent: bytes_sent.clone(),
+                bytes_received: bytes_received.clone(),
+            },
+        );
+
+        (tunnel_id, bytes_sent, bytes_received)
+    }
+
+    /// トンネルを登録解除
+    pub async fn unregister_tunnel(&self, tunnel_id: u64) {
+        self.tunnel_list.write().await.remove(&tunnel_id);
+    }
+
+    /// 接続をトンネルに紐付け
+    pub async fn add_connection_to_tunnel(&self, tunnel_id: u64, connection_id: u32) {
+        if let Some(tunnel) = self.tunnel_list.write().await.get_mut(&tunnel_id) {
+            tunnel.connection_ids.insert(connection_id);
+        }
+    }
+
+    /// 接続のトンネル紐付けを解除
+    pub async fn remove_connection_from_tunnel(&self, tunnel_id: u64, connection_id: u32) {
+        if let Some(tunnel) = self.tunnel_list.write().await.get_mut(&tunnel_id) {
+            tunnel.connection_ids.remove(&connection_id);
+        }
+    }
+
+    /// トンネル一覧を取得
+    pub async fn get_tunnels(&self) -> Vec<TunnelInfo> {
+        self.tunnel_list
+            .read()
+            .await
+            .iter()
+            .map(|(id, tracked)| TunnelInfo {
+                tunnel_id: *id,
+                remote_addr: tracked.remote_addr.to_string(),
+                forwarding_mode: tracked.forwarding_mode.clone(),
+                started_at: tracked.started_at,
+                active_connections: tracked.connection_ids.len() as u32,
+                bytes_sent: tracked.bytes_sent.load(Ordering::Relaxed),
+                bytes_received: tracked.bytes_received.load(Ordering::Relaxed),
+            })
+            .collect()
+    }
 }
 
 // =============================================================================
@@ -305,6 +389,8 @@ impl HttpIpcClient {
         status: &DataPlaneStatus,
         ack_cmd_id: Option<&str>,
         ack_status: Option<&str>,
+        tunnels: Option<Vec<TunnelInfo>>,
+        connections: Option<Vec<crate::ipc::ConnectionInfo>>,
     ) -> anyhow::Result<SendStatusResponse> {
         let url = format!("{}{}", self.base_url, crate::ipc::api_paths::SEND_STATUS);
         // dp_id を 16 進数文字列にフォーマット（eBPF デバッグとの一貫性のため）
@@ -320,6 +406,8 @@ impl HttpIpcClient {
             started_at: status.started_at,
             ack_cmd_id: ack_cmd_id.map(|s| s.to_string()),
             ack_status: ack_status.map(|s| s.to_string()),
+            tunnels,
+            connections,
         };
 
         debug!(
@@ -583,6 +671,8 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                 pid,
                 &config.listen_addr.to_string(),
                 &initial_status,
+                None,
+                None,
                 None,
                 None,
             )
@@ -864,6 +954,10 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                 None => (None, None),
             };
 
+            // トンネル・接続情報を毎回送信（CP キャッシュを更新）
+            let tunnels = Some(dp_for_status.get_tunnels().await);
+            let connections = Some(dp_for_status.get_connections().await);
+
             let mut client = http_client_for_status.lock().await;
             match client
                 .send_status(
@@ -873,6 +967,8 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                     &status,
                     ack_cmd_id,
                     ack_status_str,
+                    tunnels,
+                    connections,
                 )
                 .await
             {
@@ -904,6 +1000,8 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                                 dp_for_status.pid,
                                 &config_for_status_task.listen_addr.to_string(),
                                 &status,
+                                None,
+                                None,
                                 None,
                                 None,
                             )
@@ -1100,6 +1198,8 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                 &status,
                 None,
                 None,
+                None,
+                None,
             )
             .await
         {
@@ -1146,10 +1246,15 @@ async fn process_ipc_command(data_plane: &DataPlane, cmd: ControlCommand) {
         }
 
         ControlCommand::GetConnections => {
-            // GetConnections の結果は現状では SendStatus で送信されないため、
-            // 将来的に対応が必要な場合は SendStatusRequest に connections フィールドを追加する
+            // 接続情報は定期 SendStatus で自動的に送信される
             let connections = data_plane.get_connections().await;
             debug!("GetConnections command received: {} connections", connections.len());
+        }
+
+        ControlCommand::GetTunnels => {
+            // トンネル情報は定期 SendStatus で自動的に送信される
+            let tunnels = data_plane.get_tunnels().await;
+            debug!("GetTunnels command received: {} tunnels", tunnels.len());
         }
     }
 }
@@ -1247,15 +1352,24 @@ async fn handle_quic_tunnel(data_plane: Arc<DataPlane>, tunnel: Connection) -> R
                 remote_addr, port, protocol, local_destination
             );
 
-            handle_remote_forward(
+            // トンネルを登録
+            let (tunnel_id, _tunnel_bytes_sent, _tunnel_bytes_received) =
+                data_plane.register_tunnel(remote_addr, "RPF").await;
+
+            let result = handle_remote_forward(
                 port,
                 protocol,
                 tunnel,
                 control_stream,
                 conn_manager,
-                data_plane,
+                data_plane.clone(),
+                tunnel_id,
             )
-            .await?;
+            .await;
+
+            // トンネルを登録解除
+            data_plane.unregister_tunnel(tunnel_id).await;
+            result?;
         }
         ControlMessage::LocalForwardRequest {
             remote_destination,
@@ -1267,15 +1381,24 @@ async fn handle_quic_tunnel(data_plane: Arc<DataPlane>, tunnel: Connection) -> R
                 remote_addr, remote_destination, protocol, local_source
             );
 
-            handle_local_forward(
+            // トンネルを登録
+            let (tunnel_id, _tunnel_bytes_sent, _tunnel_bytes_received) =
+                data_plane.register_tunnel(remote_addr, "LPF").await;
+
+            let result = handle_local_forward(
                 tunnel,
                 control_stream,
                 &remote_destination,
                 protocol,
                 conn_manager,
-                data_plane,
+                data_plane.clone(),
+                tunnel_id,
             )
-            .await?;
+            .await;
+
+            // トンネルを登録解除
+            data_plane.unregister_tunnel(tunnel_id).await;
+            result?;
         }
         _ => {
             warn!("Unexpected message type from {}", remote_addr);
@@ -1341,6 +1464,7 @@ async fn handle_remote_forward(
     mut control_stream: ControlStream,
     conn_manager: Arc<Mutex<ConnectionManager>>,
     data_plane: Arc<DataPlane>,
+    tunnel_id: u64,
 ) -> Result<()> {
     let bind_addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
 
@@ -1463,9 +1587,11 @@ async fn handle_remote_forward(
                                     cancel_token.clone(),
                                 );
                                 let (conn_sent, conn_recv) = data_plane.register_connection(conn_id, Protocol::Tcp, tcp_addr).await;
+                                data_plane.add_connection_to_tunnel(tunnel_id, conn_id).await;
 
                                 let conn_manager_clone = conn_manager.clone();
                                 let dp_clone = data_plane.clone();
+                                let tid = tunnel_id;
                                 tokio::spawn(async move {
                                     if let Err(e) = relay_tcp_stream(
                                         conn_id,
@@ -1481,6 +1607,7 @@ async fn handle_remote_forward(
                                         debug!("TCP relay ended for {}: {}", conn_id, e);
                                     }
                                     conn_manager_clone.lock().await.remove_connection(conn_id);
+                                    dp_clone.remove_connection_from_tunnel(tid, conn_id).await;
                                     dp_clone.unregister_connection(conn_id).await;
                                 }.instrument(tracing::Span::current()));
                             }
@@ -1664,6 +1791,7 @@ async fn handle_remote_forward(
                                         udp_connections.lock().await.insert(src_addr, (conn_id, tx.clone()));
                                     }
                                     let (conn_sent, conn_recv) = data_plane.register_connection(conn_id, Protocol::Udp, src_addr).await;
+                                    data_plane.add_connection_to_tunnel(tunnel_id, conn_id).await;
 
                                     // 最初のパケットを送信（ロック外で await）
                                     let _ = tx.send(packet).await;
@@ -1673,6 +1801,7 @@ async fn handle_remote_forward(
                                     let udp_connections_clone = udp_connections.clone();
                                     let dp_clone = data_plane.clone();
                                     let socket_clone = socket.clone();
+                                    let tid = tunnel_id;
                                     tokio::spawn(async move {
                                         if let Err(e) = relay_rpf_udp_stream(
                                             conn_id,
@@ -1692,6 +1821,7 @@ async fn handle_remote_forward(
                                         // ロック順序を統一: conn_manager → udp_connections
                                         conn_manager_clone.lock().await.remove_connection(conn_id);
                                         udp_connections_clone.lock().await.remove(&src_addr);
+                                        dp_clone.remove_connection_from_tunnel(tid, conn_id).await;
                                         dp_clone.unregister_connection(conn_id).await;
                                     }.instrument(tracing::Span::current()));
                                 }
@@ -1759,6 +1889,7 @@ async fn handle_local_forward(
     protocol: Protocol,
     conn_manager: Arc<Mutex<ConnectionManager>>,
     data_plane: Arc<DataPlane>,
+    tunnel_id: u64,
 ) -> Result<()> {
     let response = ControlMessage::LocalForwardResponse {
         status: ResponseStatus::Success,
@@ -1839,9 +1970,11 @@ async fn handle_local_forward(
                                                     cancel_token.clone(),
                                                 );
                                                 let (conn_sent, conn_recv) = data_plane.register_connection(conn_id, Protocol::Tcp, remote_addr).await;
+                                                data_plane.add_connection_to_tunnel(tunnel_id, conn_id).await;
 
                                                 let conn_manager_clone = conn_manager.clone();
                                                 let dp_clone = data_plane.clone();
+                                                let tid = tunnel_id;
                                                 tokio::spawn(async move {
                                                     if let Err(e) = relay_tcp_stream(
                                                         conn_id,
@@ -1857,6 +1990,7 @@ async fn handle_local_forward(
                                                         debug!("LPF TCP relay ended for {}: {}", conn_id, e);
                                                     }
                                                     conn_manager_clone.lock().await.remove_connection(conn_id);
+                                                    dp_clone.remove_connection_from_tunnel(tid, conn_id).await;
                                                     dp_clone.unregister_connection(conn_id).await;
                                                 }.instrument(tracing::Span::current()));
                                             }
@@ -1894,9 +2028,11 @@ async fn handle_local_forward(
                                                     cancel_token.clone(),
                                                 );
                                                 let (conn_sent, conn_recv) = data_plane.register_connection(conn_id, Protocol::Udp, remote_addr).await;
+                                                data_plane.add_connection_to_tunnel(tunnel_id, conn_id).await;
 
                                                 let conn_manager_clone = conn_manager.clone();
                                                 let dp_clone = data_plane.clone();
+                                                let tid = tunnel_id;
                                                 tokio::spawn(async move {
                                                     if let Err(e) = relay_lpf_udp_stream(
                                                         conn_id,
@@ -1912,6 +2048,7 @@ async fn handle_local_forward(
                                                         debug!("LPF UDP relay ended for {}: {}", conn_id, e);
                                                     }
                                                     conn_manager_clone.lock().await.remove_connection(conn_id);
+                                                    dp_clone.remove_connection_from_tunnel(tid, conn_id).await;
                                                     dp_clone.unregister_connection(conn_id).await;
                                                 }.instrument(tracing::Span::current()));
                                             }

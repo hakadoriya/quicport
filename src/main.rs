@@ -353,6 +353,30 @@ enum AdminCommands {
         #[arg(long = "control-plane-addr", default_value = "127.0.0.1:39000")]
         control_plane_addr: SocketAddr,
     },
+
+    /// List active tunnels (optionally filtered by data plane ID)
+    #[command(name = "list-tunnels")]
+    ListTunnels {
+        /// Data plane ID (optional, if not specified, list all)
+        #[arg(long)]
+        dp_id: Option<String>,
+
+        /// Control plane address to connect to
+        #[arg(long = "control-plane-addr", default_value = "127.0.0.1:39000")]
+        control_plane_addr: SocketAddr,
+    },
+
+    /// List active connections (optionally filtered by data plane ID)
+    #[command(name = "list-connections")]
+    ListConnections {
+        /// Data plane ID (optional, if not specified, list all)
+        #[arg(long)]
+        dp_id: Option<String>,
+
+        /// Control plane address to connect to
+        #[arg(long = "control-plane-addr", default_value = "127.0.0.1:39000")]
+        control_plane_addr: SocketAddr,
+    },
 }
 
 /// Admin API にリクエストを送信し、レスポンス JSON を pretty-print して出力する。
@@ -719,6 +743,36 @@ async fn main() -> Result<()> {
                     control_plane_addr,
                     quicport::ipc::api_paths::GET_CONNECTIONS,
                     serde_json::json!({ "dp_id": dp_id }),
+                )
+                .await?;
+            }
+            AdminCommands::ListTunnels {
+                dp_id,
+                control_plane_addr,
+            } => {
+                let body = match dp_id {
+                    Some(id) => serde_json::json!({ "dp_id": id }),
+                    None => serde_json::json!({}),
+                };
+                call_admin_api(
+                    control_plane_addr,
+                    quicport::ipc::api_paths::LIST_TUNNELS,
+                    body,
+                )
+                .await?;
+            }
+            AdminCommands::ListConnections {
+                dp_id,
+                control_plane_addr,
+            } => {
+                let body = match dp_id {
+                    Some(id) => serde_json::json!({ "dp_id": id }),
+                    None => serde_json::json!({}),
+                };
+                call_admin_api(
+                    control_plane_addr,
+                    quicport::ipc::api_paths::LIST_CONNECTIONS,
+                    body,
                 )
                 .await?;
             }
