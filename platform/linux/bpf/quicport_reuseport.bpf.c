@@ -61,9 +61,22 @@ struct {
  * - UDP ヘッダーを指す場合
  * がある。
  *
- * UDP ヘッダーの length フィールド（オフセット 4-5）と ctx->len を比較して判断する。
- * UDP length = ヘッダー(8バイト) + ペイロードの長さ
- * ctx->len が UDP length と一致する場合、ctx->data は UDP ヘッダーを指している。
+ * 判定ロジック (3 層チェック):
+ *
+ * Layer 1: bytes[0] に QUIC Fixed Bit (0x40) がセットされていない場合
+ *   -> 有効な QUIC パケットではありえない（RFC 9000 により Long/Short Header
+ *      共に Fixed Bit は必ずセットされる）
+ *   -> UDP length フィールド (bytes[4-5]) が ctx_len と一致すれば UDP ヘッダー
+ *
+ * Layer 2: bytes[0] に Fixed Bit がセットされていて、bytes[4-5] != ctx_len の場合
+ *   -> UDP ヘッダーではない（QUIC ペイロード）
+ *
+ * Layer 3: bytes[0] に Fixed Bit がセットされていて、bytes[4-5] == ctx_len の場合
+ *   -> 曖昧なケース（UDP source port の上位バイトが 0x40 以上の場合に
+ *      Fixed Bit が立つため）
+ *   -> bytes[8]（想定される UDP ヘッダー直後のバイト）を確認:
+ *      - bytes[8] に Fixed Bit がセットされていれば、UDP ヘッダー + QUIC ペイロード
+ *      - bytes[8] に Fixed Bit がなければ、QUIC ペイロード（偶然の length 一致）
  *
  * UDP Header format:
  *   +------------------+------------------+
@@ -89,12 +102,48 @@ is_udp_header(void *data, void *data_end, __u32 ctx_len)
     __u8 *bytes = (__u8 *)data;
 
     /*
-     * UDP length is at offset 4-5 (big endian)
-     * If UDP length matches ctx->len, this is UDP header
+     * Layer 1: bytes[0] に QUIC Fixed Bit (0x40) がない場合
+     *
+     * 有効な QUIC パケットの先頭バイトは必ず Fixed Bit がセットされている。
+     * セットされていなければ QUIC ペイロードではないので、
+     * UDP length フィールドの一致で UDP ヘッダーかどうか判定する。
      */
-    __u16 udp_len = ((__u16)bytes[4] << 8) | bytes[5];
+    if (!(bytes[0] & QUIC_FLAGS_FIXED_BIT)) {
+        __u16 udp_len = ((__u16)bytes[4] << 8) | bytes[5];
+        return udp_len == ctx_len;
+    }
 
-    return udp_len == ctx_len;
+    /*
+     * Layer 2: Fixed Bit がセットされていて、bytes[4-5] != ctx_len
+     *
+     * UDP length フィールドが一致しないので、UDP ヘッダーではない。
+     * これは QUIC ペイロードが直接始まっているケース。
+     */
+    __u16 possible_udp_len = ((__u16)bytes[4] << 8) | bytes[5];
+    if (possible_udp_len != ctx_len) {
+        return 0;
+    }
+
+    /*
+     * Layer 3: Fixed Bit がセットされていて、bytes[4-5] == ctx_len（曖昧なケース）
+     *
+     * この状況は 2 通りの解釈が可能:
+     *   A) UDP ヘッダーで、source port の上位バイトが 0x40 以上
+     *      -> bytes[8] は QUIC ペイロードの先頭（Fixed Bit あり）
+     *   B) QUIC ペイロードで、CID 内のバイトが偶然 ctx_len と一致
+     *      -> bytes[8] は CID の一部（Fixed Bit がある保証なし）
+     *
+     * bytes[8] に Fixed Bit がセットされていれば解釈 A（UDP ヘッダー）を採用。
+     */
+    if (data + UDP_HEADER_LEN + 1 > data_end) {
+        /*
+         * bytes[8] が読めない場合、UDP length の一致だけで判定する。
+         * パケットが極端に短い場合のフォールバック。
+         */
+        return 1;
+    }
+
+    return (bytes[UDP_HEADER_LEN] & QUIC_FLAGS_FIXED_BIT) ? 1 : 0;
 }
 
 /*
@@ -212,12 +261,12 @@ extract_server_id(struct sk_reuseport_md *ctx, __u32 *server_id)
      * 一致すれば UDP ヘッダーを指しているので、8 バイトスキップする。
      */
 
-    /* Debug: show UDP length field and ctx->len for comparison */
+    /* Debug: show first byte, UDP length field, and ctx->len for comparison */
     if (data + 6 <= data_end) {
         __u8 *dbg_bytes = (__u8 *)data;
         __u16 dbg_udp_len = ((__u16)dbg_bytes[4] << 8) | dbg_bytes[5];
-        bpf_printk("quicport: UDP len field=%u, ctx->len=%u\n",
-                   (unsigned int)dbg_udp_len, ctx->len);
+        bpf_printk("quicport: byte[0]=0x%02x, UDP len field=%u, ctx->len=%u\n",
+                   dbg_bytes[0], (unsigned int)dbg_udp_len, ctx->len);
     }
 
     if (is_udp_header(data, data_end, ctx->len)) {

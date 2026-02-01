@@ -120,10 +120,31 @@ static long (*bpf_skb_load_bytes)(
 ) = (void *) 26;
 
 /*
- * bpf_trace_printk - Print formatted string to trace pipe
+ * bpf_trace_printk - BPF helper #6 (Linux 4.1+)
  *
- * For debugging only. Requires CAP_SYS_ADMIN.
- * Output goes to /sys/kernel/debug/tracing/trace_pipe
+ * デバッグ用。CAP_SYS_ADMIN が必要。
+ * 出力先: /sys/kernel/debug/tracing/trace_pipe
+ *
+ * 【フォーマット引数の制限: 最大 3 個】
+ *
+ * BPF ヘルパーの呼び出し規約上、レジスタは R1〜R5 の 5 個に制限される。
+ * bpf_trace_printk は R1 (fmt), R2 (fmt_size) で 2 枠消費するため、
+ * 残りの R3〜R5 の 3 枠分、フォーマット引数は最大 3 個までしか渡せない。
+ *
+ *   NG: bpf_printk("a=%d b=%d c=%d d=%d", a, b, c, d);  // 4 個 → エラー
+ *   OK: bpf_printk("a=%d b=%d c=%d", a, b, c);           // 3 個 → OK
+ *
+ * 【bpf_trace_vprintk (helper #177, Linux 5.16+) との違い】
+ *
+ * Linux 5.16 以降では bpf_trace_vprintk が利用可能で、引数をスタック上の
+ * u64 配列にパックして渡すことでフォーマット引数の個数制限を回避できる。
+ * libbpf の bpf_printk マクロは引数数に応じて自動的に使い分ける:
+ *   - 3 個以下 → bpf_trace_printk
+ *   - 4 個以上 → bpf_trace_vprintk
+ *
+ * 本プロジェクトでは古いカーネル (Linux 4.1+) との互換性を維持するため、
+ * bpf_trace_vprintk は使用せず、常に bpf_trace_printk を直接呼び出す。
+ * そのためフォーマット引数は最大 3 個に制限される点に注意すること。
  */
 static long (*bpf_trace_printk)(
     const char *fmt,
