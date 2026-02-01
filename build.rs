@@ -11,7 +11,86 @@
 //! - clang: BPF バイトコードへのコンパイル
 //! - bpftool (オプション): vmlinux.h の生成 (手動で用意済みのため不要)
 
+/// コマンドを実行し、stdout を文字列として返す。失敗時は fallback を返す。
+fn run_command(program: &str, args: &[&str], fallback: &str) -> String {
+    std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// ビルド時のメタ情報を cargo:rustc-env で埋め込む
+fn emit_build_info() {
+    // Git コミットハッシュ
+    let git_hash = run_command("git", &["rev-parse", "HEAD"], "unknown");
+    let git_hash_short = run_command("git", &["rev-parse", "--short", "HEAD"], "unknown");
+
+    // ビルドプロファイル（debug or release）
+    let build_profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+
+    // ビルドタイムスタンプ (UTC, ISO 8601)
+    let build_timestamp = {
+        use std::time::SystemTime;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // 手動で ISO 8601 形式に変換（追加クレート不要）
+        let (secs_per_day, secs_per_hour, secs_per_min) = (86400u64, 3600u64, 60u64);
+        let days = now / secs_per_day;
+        let time_of_day = now % secs_per_day;
+        let hours = time_of_day / secs_per_hour;
+        let minutes = (time_of_day % secs_per_hour) / secs_per_min;
+        let seconds = time_of_day % secs_per_min;
+
+        // 日数からグレゴリオ暦の年月日を計算（Unix epoch = 1970-01-01）
+        // civil_from_days アルゴリズム (Howard Hinnant)
+        let z = days as i64 + 719468;
+        let era = if z >= 0 { z } else { z - 146096 } / 146097;
+        let doe = (z - era * 146097) as u64;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe as i64 + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if m <= 2 { y + 1 } else { y };
+
+        format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hours, minutes, seconds)
+    };
+
+    // ターゲットトリプル
+    let build_target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
+
+    // Rustc バージョン
+    let rustc_version = run_command("rustc", &["--version"], "unknown");
+
+    // cargo:rustc-env で環境変数をセット
+    println!("cargo:rustc-env=BUILD_PROFILE={}", build_profile);
+    println!("cargo:rustc-env=BUILD_GIT_HASH={}", git_hash);
+    println!("cargo:rustc-env=BUILD_GIT_HASH_SHORT={}", git_hash_short);
+    println!("cargo:rustc-env=BUILD_TIMESTAMP={}", build_timestamp);
+    println!("cargo:rustc-env=BUILD_TARGET={}", build_target);
+    println!("cargo:rustc-env=BUILD_RUSTC_VERSION={}", rustc_version);
+
+    // Git HEAD の変更を監視して再ビルドをトリガー
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs");
+}
+
 fn main() {
+    // ビルド情報の埋め込み
+    emit_build_info();
+
     // 再ビルドトリガー
     println!("cargo:rerun-if-changed=build.rs");
 

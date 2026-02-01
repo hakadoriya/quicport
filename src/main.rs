@@ -206,6 +206,9 @@ enum Commands {
         quic_idle_timeout: u64,
     },
 
+    /// Show version and build information (JSON)
+    Version,
+
     /// Run as client (connect to server and forward ports)
     ///
     /// Supports two modes:
@@ -666,10 +669,25 @@ async fn main() -> Result<()> {
         Commands::SshProxy { .. } => "ssh-proxy",
         Commands::ControlPlane { .. } => "control-plane",
         Commands::Client { .. } => "client",
+        Commands::Version => "version",
     };
     let _root_span = tracing::info_span!("quicport", pid, subcommand).entered();
 
     match cli.command {
+        Commands::Version => {
+            let info = serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "commit": env!("BUILD_GIT_HASH"),
+                "commit_short": env!("BUILD_GIT_HASH_SHORT"),
+                "build_profile": env!("BUILD_PROFILE"),
+                "build_timestamp": env!("BUILD_TIMESTAMP"),
+                "target": env!("BUILD_TARGET"),
+                "rustc_version": env!("BUILD_RUSTC_VERSION"),
+            });
+            println!("{}", serde_json::to_string_pretty(&info)?);
+            return Ok(());
+        }
+
         Commands::DataPlane {
             data_plane_addr,
             control_plane_url,
