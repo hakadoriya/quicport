@@ -89,6 +89,9 @@ pub enum ControlCommand {
 
     /// アクティブトンネルの一覧を取得
     GetTunnels,
+
+    /// デフォルト ACTIVE DP (key=0) を登録
+    SetDefaultActive,
 }
 
 /// 接続情報
@@ -435,13 +438,13 @@ pub struct DataPlaneConfig {
     #[serde(default)]
     pub enable_ebpf_routing: bool,
 
-    /// stale データプレーンの検出タイムアウト（秒）
+    /// 応答不能データプレーンの検出タイムアウト（秒）
     ///
     /// CP のバックグラウンドタスクが DP の `last_active` をチェックし、
-    /// この値を超過した DP を stale と判定して eBPF map エントリを削除する。
+    /// この値を超過した DP を応答不能と判定して eBPF map エントリを削除する。
     /// SendStatus の送信間隔（デフォルト 1 秒）より十分大きくする必要がある。
-    #[serde(default = "default_stale_dp_timeout")]
-    pub stale_dp_timeout: u64,
+    #[serde(default = "default_unresponsive_dp_timeout")]
+    pub unresponsive_dp_timeout: u64,
 
     /// QUIC keep-alive interval（秒）
     /// NAT テーブル維持のために定期的に ping を送信する間隔
@@ -462,7 +465,7 @@ fn default_idle_connection_timeout() -> u64 {
     3600 // 1 hour
 }
 
-fn default_stale_dp_timeout() -> u64 {
+fn default_unresponsive_dp_timeout() -> u64 {
     300 // 5 minutes
 }
 
@@ -482,7 +485,7 @@ impl Default for DataPlaneConfig {
             idle_connection_timeout: default_idle_connection_timeout(),
             server_id: None,
             enable_ebpf_routing: false,
-            stale_dp_timeout: default_stale_dp_timeout(),
+            unresponsive_dp_timeout: default_unresponsive_dp_timeout(),
             quic_keep_alive_secs: default_quic_keep_alive_secs(),
             quic_idle_timeout_secs: default_quic_idle_timeout_secs(),
         }

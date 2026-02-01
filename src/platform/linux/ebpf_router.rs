@@ -688,21 +688,8 @@ impl Drop for EbpfRouter {
             }
         }
 
-        // key=0（デフォルト ACTIVE DP）も削除する
-        // DP プロセス終了後はソケットが無効になるため、key=0 が stale エントリになる
-        // 新しい DP が起動すれば再度 key=0 を登録する
-        let default_key = 0u32.to_ne_bytes();
-        match self.skel.maps.socket_map.delete(&default_key) {
-            Ok(()) => {
-                debug!("Deleted default active DP (key=0) from socket_map");
-            }
-            Err(e) => {
-                debug!(
-                    "Failed to delete default active DP (key=0) from socket_map: {}",
-                    e
-                );
-            }
-        }
+        // NOTE: key=0（デフォルト ACTIVE DP）は drop では削除しない。
+        //       複数 DP で共有される可能性があるため、CP 側の定期 GC に任せる。
 
         // 注意: Drop 時の動作:
         //
@@ -755,10 +742,10 @@ pub fn ebpf_unavailable_reason() -> Option<String> {
     None
 }
 
-/// ピン留めされた eBPF map から stale エントリを削除
+/// ピン留めされた eBPF map から応答不能エントリを削除
 ///
 /// `EbpfRouter` のインスタンスを作らず、ピン留めされた map だけを操作する軽量な関数。
-/// CP がバックグラウンドタスクで stale な DP のエントリを削除するために使用する。
+/// CP がバックグラウンドタスクで応答不能な DP のエントリを削除するために使用する。
 ///
 /// # Arguments
 ///
@@ -770,7 +757,7 @@ pub fn ebpf_unavailable_reason() -> Option<String> {
 /// - ピン留めされた map が存在しない
 /// - map fd の取得に失敗
 /// - エントリの削除に失敗
-pub fn cleanup_stale_entry(pin_path: &std::path::Path, server_id: u32) -> Result<()> {
+pub fn cleanup_unresponsive_entry(pin_path: &std::path::Path, server_id: u32) -> Result<()> {
     let socket_map_pin_path = pin_path.join("socket_map");
 
     if !socket_map_pin_path.exists() {
@@ -824,7 +811,7 @@ pub fn cleanup_stale_entry(pin_path: &std::path::Path, server_id: u32) -> Result
     }
 
     info!(
-        "Cleaned up stale eBPF map entry: server_id={} from {:?}",
+        "Cleaned up unresponsive eBPF map entry: server_id={} from {:?}",
         server_id, socket_map_pin_path
     );
     Ok(())

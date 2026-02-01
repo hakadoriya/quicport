@@ -112,6 +112,8 @@ pub struct HttpIpcState {
     pub dp_config: RwLock<DataPlaneConfig>,
     /// 使用中の server_id 一覧（eBPF ルーティング用）
     pub active_server_ids: RwLock<HashSet<u32>>,
+    /// デフォルト ACTIVE として指定された dp_id
+    pub default_active_dp_id: RwLock<Option<String>>,
 }
 
 impl HttpIpcState {
@@ -124,6 +126,7 @@ impl HttpIpcState {
             auth_policy: RwLock::new(None),
             dp_config: RwLock::new(DataPlaneConfig::default()),
             active_server_ids: RwLock::new(HashSet::new()),
+            default_active_dp_id: RwLock::new(None),
         }
     }
 
@@ -169,6 +172,43 @@ impl HttpIpcState {
         self.command_notify.notify_waiters();
     }
 
+    /// ACTIVE DP の中から最新のものをデフォルト ACTIVE として指示
+    pub async fn update_default_active_dp(&self) {
+        let candidate_dp_id = {
+            let data_planes = self.data_planes.read().await;
+            data_planes
+                .values()
+                .filter(|dp| dp.state == DataPlaneState::Active)
+                .max_by_key(|dp| dp.last_active)
+                .map(|dp| dp.dp_id.clone())
+        };
+
+        let current_dp_id = self.default_active_dp_id.read().await.clone();
+        if candidate_dp_id == current_dp_id {
+            return;
+        }
+
+        if let Some(dp_id) = candidate_dp_id.clone() {
+            match self.send_command(&dp_id, ControlCommand::SetDefaultActive).await {
+                Ok(_) => {
+                    let mut current = self.default_active_dp_id.write().await;
+                    *current = candidate_dp_id;
+                    info!("Assigned default active DP: {}", dp_id);
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to assign default active DP (dp_id={}): {}",
+                        dp_id, e
+                    );
+                }
+            }
+        } else {
+            let mut current = self.default_active_dp_id.write().await;
+            *current = None;
+            info!("Cleared default active DP (no ACTIVE data planes)");
+        }
+    }
+
     /// 全データプレーンのペンディングコマンドが配信されるまで待機
     ///
     /// 指定されたタイムアウト内にすべてのコマンドが配信されなかった場合でも終了する
@@ -208,15 +248,18 @@ impl HttpIpcState {
         }
     }
 
-    /// stale データプレーンを検出（削除はしない）
+    /// 応答不能データプレーンを検出（削除はしない）
     ///
-    /// `last_active` + `timeout_secs` < 現在時刻 の DP を stale と判定する。
+    /// `last_active` + `timeout_secs` < 現在時刻 の DP を応答不能と判定する。
     /// 実際の削除は eBPF map クリーンアップ成功後に `remove_data_planes()` で行う。
     ///
     /// # Returns
     ///
-    /// stale と判定された (dp_id, server_id) のリスト
-    pub async fn detect_stale_data_planes(&self, timeout_secs: u64) -> Vec<(String, u32)> {
+    /// 応答不能と判定された (dp_id, server_id) のリスト
+    pub async fn detect_unresponsive_data_planes(
+        &self,
+        timeout_secs: u64,
+    ) -> Vec<(String, u32)> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -245,7 +288,7 @@ impl HttpIpcState {
             data_planes.remove(dp_id);
             active_ids.remove(server_id);
             warn!(
-                "Removed stale data plane: dp_id={}, server_id={}",
+                "Removed unresponsive data plane: dp_id={}, server_id={}",
                 dp_id, server_id
             );
         }
