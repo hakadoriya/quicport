@@ -34,6 +34,7 @@ words:
   - HMAC # Hash-based Message Authentication Code
   - joho # github.com/joho/godotenv
   - libc # C library bindings
+  - Logsh # https://github.com/hakadoriya/log.sh
   - mlugg # https://github.com/mlugg
   - msvc # x86_64-pc-windows-msvc
   - NISTP # NISTP256
