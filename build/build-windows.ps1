@@ -1,19 +1,10 @@
 param(
-    [Parameter(Mandatory=$true)][string]$Target
+    [Parameter(Mandatory=$true)][string]$Target,
+    [Parameter(Mandatory=$true)][string]$OsName,
+    [Parameter(Mandatory=$true)][string]$Arch
 )
 
 $ErrorActionPreference = "Stop"
-
-# ps1 は Windows 上でしか動かす想定にないので固定値
-$OsName = "Windows"
-
-# $env:PROCESSOR_ARCHITECTURE を uname -m 相当の文字列にマッピング
-$Arch = switch ($env:PROCESSOR_ARCHITECTURE) {
-    "AMD64" { "x86_64" }
-    "ARM64" { "arm64" }
-    "x86"   { "i686" }
-    default { Write-Error "Unknown architecture: $env:PROCESSOR_ARCHITECTURE"; exit 1 }
-}
 
 $BinName = "quicport"
 
