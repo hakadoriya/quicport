@@ -106,15 +106,10 @@ jobs:
             cargo install cargo-zigbuild --locked
           fi
 
-      - name: Build and package (Linux)
-        if: startsWith(matrix.runner, 'ubuntu')
+      - name: Build and package (Unix)
+        if: matrix.kind == 'unix'
         shell: bash
-        run: ./build/build-linux.sh "${{ matrix.target }}"
-
-      - name: Build and package (macOS)
-        if: startsWith(matrix.runner, 'macos')
-        shell: bash
-        run: ./build/build-darwin.sh "${{ matrix.target }}"
+        run: ./build/build-unix.sh "${{ matrix.target }}"
 
       - name: Build and package (Windows)
         if: matrix.kind == 'windows'

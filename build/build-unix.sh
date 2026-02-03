@@ -26,7 +26,19 @@ ARCH=$(uname -m)
 BIN_NAME="quicport"
 
 # ビルド
-LogshExec cargo build --release --locked --target "$TARGET"
+if [[ "$TARGET" == *"linux"* ]]; then
+  # glibc バージョンマッピング
+  case "$TARGET" in
+    x86_64-unknown-linux-gnu)  GLIBC_VERSION="2.17" ;;
+    aarch64-unknown-linux-gnu) GLIBC_VERSION="2.28" ;;
+    *) echo "Error: Unknown Linux target: $TARGET" >&2; exit 1 ;;
+  esac
+  # zigbuild でビルド
+  LogshExec cargo zigbuild --release --locked --target "${TARGET}.${GLIBC_VERSION}"
+elif [[ "$TARGET" == *"darwin"* ]]; then
+  # ビルド
+  LogshExec cargo build --release --locked --target "${TARGET}"
+fi
 
 # パッケージング
 STAGE="stage/${TARGET}"
