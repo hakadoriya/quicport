@@ -19,11 +19,17 @@ LogshAlert() { test "    ${LOGSH_LEVEL:-0}" -gt 700 || echo "$*" | awk "{print  
 LogshEmergency() { test "${LOGSH_LEVEL:-0}" -gt 800 || echo "$*" | awk "{print \"$(_logshRFC3339) [${LOGSH_COLOR:+\\033[0;1;41m}EMERGENCY${LOGSH_COLOR:+\\033[0m}] \"\$0\"\"}" 1>&2; }
 LogshExec() { LogshInfo "$ $(_logshCmd "$@")" && "$@"; }
 
-TARGET="${1:?Usage: $0 <target>}"
-OS_NAME=$(uname -s)
-ARCH=$(uname -m)
+USAGE="Usage: $0 <target> <os_name> <arch>"
+TARGET="${1:?${USAGE}}"
+OS_NAME="${2:?${USAGE}}"
+ARCH="${3:?${USAGE}}"
 
 BIN_NAME="quicport"
+
+# require: cargo install cargo-zigbuild --locked                          # Install zigbuild
+# require: sudo apt-get install -qqy autoconf automake libtool pkg-config # Required for building
+# require: sudo apt-get install -qqy gawk flex bison                      # Required for building libbpf-sys
+# require: sudo apt-get install -qqy clang llvm                           # Required for building eBPF program
 
 # ビルド
 if [[ "$TARGET" == *"linux"* ]]; then
