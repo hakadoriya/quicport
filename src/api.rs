@@ -227,41 +227,53 @@ async fn send_status(
     } else {
         // ========== 状態更新 ==========
 
-        let mut data_planes = state.http_ipc.data_planes.write().await;
-        if let Some(dp) = data_planes.get_mut(&dp_id) {
-            // 全状態を更新（冪等）
-            dp.server_id = Some(dp_id_u32);
-            dp.pid = req.pid;
-            dp.state = req.state;
-            dp.active_tunnels = req.active_tunnels;
-            dp.bytes_sent = req.bytes_sent;
-            dp.bytes_received = req.bytes_received;
-            dp.listen_addr = req.listen_addr.clone();
-            dp.last_active = now;
+        // data_planes の write lock を update_default_active_dp() 呼び出し前に解放する。
+        // update_default_active_dp() 内部で data_planes の read lock を取得するため、
+        // write lock を保持したまま呼び出すとデッドロックになる（tokio の RwLock は非リエントラント）。
+        let dp_found = {
+            let mut data_planes = state.http_ipc.data_planes.write().await;
+            if let Some(dp) = data_planes.get_mut(&dp_id) {
+                // 全状態を更新（冪等）
+                dp.server_id = Some(dp_id_u32);
+                dp.pid = req.pid;
+                dp.state = req.state;
+                dp.active_tunnels = req.active_tunnels;
+                dp.bytes_sent = req.bytes_sent;
+                dp.bytes_received = req.bytes_received;
+                dp.listen_addr = req.listen_addr.clone();
+                dp.last_active = now;
 
-            // トンネル・接続情報が送信された場合はキャッシュを更新
-            if let Some(tunnels) = req.tunnels {
-                dp.tunnels = tunnels;
-            }
-            if let Some(connections) = req.connections {
-                dp.connections = connections;
-            }
+                // トンネル・接続情報が送信された場合はキャッシュを更新
+                if let Some(tunnels) = req.tunnels {
+                    dp.tunnels = tunnels;
+                }
+                if let Some(connections) = req.connections {
+                    dp.connections = connections;
+                }
 
-            // dp_id を使用中として登録（CP 再起動後の復旧用）
-            {
-                let mut active_ids = state.http_ipc.active_server_ids.write().await;
-                active_ids.insert(dp_id_u32);
-            }
+                // dp_id を使用中として登録（CP 再起動後の復旧用）
+                {
+                    let mut active_ids = state.http_ipc.active_server_ids.write().await;
+                    active_ids.insert(dp_id_u32);
+                }
 
-            // コマンド応答がある場合はログ出力
-            if let (Some(cmd_id), Some(ack_status)) = (&req.ack_cmd_id, &req.ack_status) {
-                debug!(
-                    "Command acknowledged: dp_id={}, cmd_id={}, status={}",
-                    dp_id, cmd_id, ack_status
-                );
-            }
+                // コマンド応答がある場合はログ出力
+                if let (Some(cmd_id), Some(ack_status)) = (&req.ack_cmd_id, &req.ack_status) {
+                    debug!(
+                        "Command acknowledged: dp_id={}, cmd_id={}, status={}",
+                        dp_id, cmd_id, ack_status
+                    );
+                }
 
+                true
+            } else {
+                false
+            }
+        }; // ← data_planes の write lock がここで解放される
+
+        if dp_found {
             // 最新の ACTIVE をデフォルト ACTIVE として指示
+            // （data_planes の write lock 解放後に呼び出すことでデッドロックを回避）
             state.http_ipc.update_default_active_dp().await;
 
             (
