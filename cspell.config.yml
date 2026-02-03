@@ -33,6 +33,7 @@ words:
   - hakadoriya # https://github.com/hakadoriya
   - HMAC # Hash-based Message Authentication Code
   - joho # github.com/joho/godotenv
+  - libbpf # libbpf
   - libc # C library bindings
   - Logsh # https://github.com/hakadoriya/log.sh
   - mlugg # https://github.com/mlugg
