@@ -109,17 +109,17 @@ jobs:
       - name: Build and package (Linux)
         if: startsWith(matrix.runner, 'ubuntu')
         shell: bash
-        run: ./build/build-linux.sh "${{ matrix.target }}" "${{ matrix.os_name }}" "${{ matrix.arch }}"
+        run: ./build/build-linux.sh "${{ matrix.target }}"
 
       - name: Build and package (macOS)
         if: startsWith(matrix.runner, 'macos')
         shell: bash
-        run: ./build/build-darwin.sh "${{ matrix.target }}" "${{ matrix.os_name }}" "${{ matrix.arch }}"
+        run: ./build/build-darwin.sh "${{ matrix.target }}"
 
       - name: Build and package (Windows)
         if: matrix.kind == 'windows'
         shell: pwsh
-        run: .\build\build-windows.ps1 -Target "${{ matrix.target }}" -OsName "${{ matrix.os_name }}" -Arch "${{ matrix.arch }}"
+        run: .\build\build-windows.ps1 -Target "${{ matrix.target }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
