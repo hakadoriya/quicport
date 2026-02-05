@@ -143,10 +143,12 @@ impl Default for EbpfRouterConfig {
 pub struct EbpfRouter {
     /// ロード済み BPF オブジェクト (スケルトン)
     /// Box でヒープに配置し、自己参照構造を避ける
-    skel: QuicportReuseportSkel<'static>,
+    /// ピン留めプログラム・マップを再利用した場合は None（skel をロードしない）
+    skel: Option<QuicportReuseportSkel<'static>>,
     /// OpenObject の所有権を保持（skel がこれを参照する）
     /// Box<MaybeUninit<...>> で安定したアドレスを確保
-    _open_object: Box<MaybeUninit<OpenObject>>,
+    /// skel が None の場合は None
+    _open_object: Option<Box<MaybeUninit<OpenObject>>>,
     /// 設定
     #[allow(dead_code)]
     config: EbpfRouterConfig,
@@ -160,6 +162,8 @@ pub struct EbpfRouter {
     /// ピン留めプログラムの fd（再利用時に保持）
     /// SO_ATTACH_REUSEPORT_EBPF で使用する
     pinned_prog_fd: Option<OwnedFd>,
+    /// ピン留めマップの fd（skel なしで map を操作するために使用）
+    pinned_map_fd: Option<OwnedFd>,
 }
 
 // SAFETY: EbpfRouter は単一の tokio タスクに move されて使用される。
@@ -231,6 +235,41 @@ impl EbpfRouter {
                 }
             } else {
                 debug!("No pinned program found at {:?}", prog_pin_path);
+            }
+        }
+
+        // ピン留めプログラムを再利用できた場合、ピン留めマップも直接開いて
+        // skel のロードをスキップする（新しい BPF プログラムをカーネルに作成しない）
+        if reused_pinned_prog {
+            if let Some(ref pin_dir) = config.pin_path {
+                let socket_map_pin_path = pin_dir.join("socket_map");
+                if socket_map_pin_path.exists() {
+                    match Self::open_pinned_map(&socket_map_pin_path) {
+                        Ok(map_fd) => {
+                            info!(
+                                "Reusing pinned program and map without skel load (no new BPF program created)"
+                            );
+                            return Ok(Self {
+                                skel: None,
+                                _open_object: None,
+                                config,
+                                registered_server_ids: Vec::new(),
+                                reused_pinned_map: true,
+                                reused_pinned_prog: true,
+                                pinned_prog_fd,
+                                pinned_map_fd: Some(map_fd),
+                            });
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to open pinned socket_map: {}. Falling back to full skel load.",
+                                e
+                            );
+                        }
+                    }
+                } else {
+                    warn!("Pinned program exists but pinned map not found, falling back to full skel load");
+                }
             }
         }
 
@@ -312,8 +351,9 @@ impl EbpfRouter {
         }
 
         // eBPF プログラムをカーネルにロード
-        // NOTE: ピン留めプログラムを再利用する場合でも、socket_map を参照するために
-        //       スケルトンをロードする必要がある
+        // NOTE: ここに到達するのは以下のケース:
+        //   - 初回起動（ピン留めプログラム・マップが存在しない）
+        //   - ピン留めプログラムはあるがマップのオープンに失敗した場合（フォールバック）
         let mut skel = open_skel
             .load()
             .context("Failed to load eBPF program into kernel")?;
@@ -350,13 +390,14 @@ impl EbpfRouter {
         let skel: QuicportReuseportSkel<'static> = unsafe { std::mem::transmute(skel) };
 
         Ok(Self {
-            skel,
-            _open_object: open_object,
+            skel: Some(skel),
+            _open_object: Some(open_object),
             config,
             registered_server_ids: Vec::new(),
             reused_pinned_map,
             reused_pinned_prog,
             pinned_prog_fd,
+            pinned_map_fd: None,
         })
     }
 
@@ -372,6 +413,78 @@ impl EbpfRouter {
                 )
             })?;
             debug!("Created BPF pin directory: {:?}", pin_dir);
+        }
+        Ok(())
+    }
+
+    /// ピン留めされた socket_map の fd を取得するヘルパー
+    ///
+    /// `cleanup_unresponsive_entry()` や skel スキップパスで共通的に使用する。
+    fn open_pinned_map(socket_map_pin_path: &std::path::Path) -> Result<OwnedFd> {
+        let path_cstr = std::ffi::CString::new(socket_map_pin_path.to_string_lossy().as_bytes())
+            .context("Invalid pin path for socket_map")?;
+        let map_fd = unsafe { libbpf_sys::bpf_obj_get(path_cstr.as_ptr()) };
+        if map_fd < 0 {
+            let err = std::io::Error::last_os_error();
+            return Err(anyhow::anyhow!(
+                "Failed to open pinned socket_map at {:?}: {}",
+                socket_map_pin_path, err
+            ));
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(map_fd) })
+    }
+
+    /// socket_map にエントリを追加・更新する内部ヘルパー
+    ///
+    /// skel がある場合は skel 経由で、ない場合は pinned_map_fd 経由で操作する。
+    fn map_update(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        if let Some(ref skel) = self.skel {
+            skel.maps.socket_map.update(key, value, MapFlags::ANY)
+                .context("Failed to update socket_map via skel")?;
+        } else if let Some(ref map_fd) = self.pinned_map_fd {
+            let ret = unsafe {
+                libbpf_sys::bpf_map_update_elem(
+                    map_fd.as_raw_fd(),
+                    key.as_ptr() as *const std::ffi::c_void,
+                    value.as_ptr() as *const std::ffi::c_void,
+                    libbpf_sys::BPF_ANY as u64,
+                )
+            };
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                return Err(anyhow::anyhow!("Failed to update socket_map via pinned fd: {}", err));
+            }
+        } else {
+            return Err(anyhow::anyhow!("No map handle available (neither skel nor pinned_map_fd)"));
+        }
+        Ok(())
+    }
+
+    /// socket_map からエントリを削除する内部ヘルパー
+    ///
+    /// skel がある場合は skel 経由で、ない場合は pinned_map_fd 経由で操作する。
+    /// エントリが存在しない場合 (ENOENT) は成功として扱う。
+    fn map_delete(&self, key: &[u8]) -> Result<()> {
+        if let Some(ref skel) = self.skel {
+            skel.maps.socket_map.delete(key)
+                .context("Failed to delete from socket_map via skel")?;
+        } else if let Some(ref map_fd) = self.pinned_map_fd {
+            let ret = unsafe {
+                libbpf_sys::bpf_map_delete_elem(
+                    map_fd.as_raw_fd(),
+                    key.as_ptr() as *const std::ffi::c_void,
+                )
+            };
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                let errno = err.raw_os_error().unwrap_or(-1);
+                if errno == libc::ENOENT {
+                    return Ok(());
+                }
+                return Err(anyhow::anyhow!("Failed to delete from socket_map via pinned fd: {}", err));
+            }
+        } else {
+            return Err(anyhow::anyhow!("No map handle available (neither skel nor pinned_map_fd)"));
         }
         Ok(())
     }
@@ -409,8 +522,12 @@ impl EbpfRouter {
         //   - スケルトンのプログラムを使用（これがピン留めされる）
         let prog_fd = if let Some(ref pinned_fd) = self.pinned_prog_fd {
             pinned_fd.as_raw_fd()
+        } else if let Some(ref skel) = self.skel {
+            skel.progs.quicport_select_socket.as_fd().as_raw_fd()
         } else {
-            self.skel.progs.quicport_select_socket.as_fd().as_raw_fd()
+            return Err(anyhow::anyhow!(
+                "No program handle available (neither pinned_prog_fd nor skel)"
+            ));
         };
 
         debug!(
@@ -556,10 +673,7 @@ impl EbpfRouter {
         let key = server_id.to_ne_bytes();
         let value = (sock_fd as u64).to_ne_bytes();
 
-        self.skel
-            .maps
-            .socket_map
-            .update(&key, &value, MapFlags::ANY)
+        self.map_update(&key, &value)
             .with_context(|| {
                 format!(
                     "Failed to register server_id={} in socket_map. sock_fd={}, local_addr={:?}. \
@@ -598,10 +712,7 @@ impl EbpfRouter {
         let key = 0u32.to_ne_bytes();
         let value = (sock_fd as u64).to_ne_bytes();
 
-        self.skel
-            .maps
-            .socket_map
-            .update(&key, &value, MapFlags::ANY)
+        self.map_update(&key, &value)
             .with_context(|| {
                 format!(
                     "Failed to register default active DP (key=0) in socket_map. sock_fd={}, local_addr={:?}",
@@ -622,10 +733,7 @@ impl EbpfRouter {
     pub fn unregister_default_active(&mut self) -> Result<()> {
         let key = 0u32.to_ne_bytes();
 
-        self.skel
-            .maps
-            .socket_map
-            .delete(&key)
+        self.map_delete(&key)
             .with_context(|| "Failed to unregister default active DP (key=0) from socket_map")?;
 
         debug!("Unregistered default active DP (key=0)");
@@ -642,10 +750,7 @@ impl EbpfRouter {
     pub fn unregister_server(&mut self, server_id: u32) -> Result<()> {
         let key = server_id.to_ne_bytes();
 
-        self.skel
-            .maps
-            .socket_map
-            .delete(&key)
+        self.map_delete(&key)
             .with_context(|| {
                 format!("Failed to unregister server_id={} from socket_map", server_id)
             })?;
@@ -678,7 +783,7 @@ impl Drop for EbpfRouter {
         // - マップがピン留めされているため、プロセス終了後もマップは BPF filesystem に残る
         for server_id in &self.registered_server_ids {
             let key = server_id.to_ne_bytes();
-            match self.skel.maps.socket_map.delete(&key) {
+            match self.map_delete(&key) {
                 Ok(()) => {
                     debug!("Deleted server_id={} from socket_map", server_id);
                 }
@@ -773,22 +878,8 @@ pub fn cleanup_unresponsive_entry(pin_path: &std::path::Path, server_id: u32) ->
         return Ok(());
     }
 
-    // bpf_obj_get() でピン留めされた map の fd を取得
-    let path_cstr = std::ffi::CString::new(socket_map_pin_path.to_string_lossy().as_bytes())
-        .context("Invalid pin path for socket_map")?;
-    let map_fd = unsafe { libbpf_sys::bpf_obj_get(path_cstr.as_ptr()) };
-
-    if map_fd < 0 {
-        let err = std::io::Error::last_os_error();
-        return Err(anyhow::anyhow!(
-            "Failed to open pinned socket_map at {:?}: {}",
-            socket_map_pin_path,
-            err
-        ));
-    }
-
-    // SAFETY: map_fd は有効な BPF map fd
-    let map_fd = unsafe { OwnedFd::from_raw_fd(map_fd) };
+    // ピン留めされた map の fd を取得
+    let map_fd = EbpfRouter::open_pinned_map(&socket_map_pin_path)?;
 
     // bpf_map_delete_elem() で server_id のエントリを削除
     let key = server_id.to_ne_bytes();
