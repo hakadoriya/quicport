@@ -77,6 +77,7 @@ enum bpf_map_type {
  * These are kernel functions callable from BPF programs.
  * The actual implementation is in the kernel.
  */
+static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *) 1;
 
 /*
  * bpf_sk_select_reuseport - Select socket from reuseport group
