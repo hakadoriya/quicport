@@ -97,7 +97,11 @@ jobs:
         if: startsWith(matrix.runner, 'ubuntu')
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -qqy autopoint
+          sudo apt-get install -qqy autopoint clang llvm libbpf-dev linux-libc-dev libelf-dev zlib1g-dev linux-tools-common linux-tools-generic
+          # bpftool が入ったか確認（入ってなければログで分かる）
+          command -v bpftool && bpftool version || true
+          # BTF があるか確認（無いと skeleton 生成で落ちることがある）
+          ls -l /sys/kernel/btf/vmlinux || true
 
       # Use Zig for Linux builds (glibc 2.17 target for broad compatibility)
       - name: Install Zig (ubuntu only)
@@ -114,14 +118,31 @@ jobs:
           fi
 
       - name: Build and package (Unix)
+        env:
+          CARGO_TERM_VERBOSE: "true"
+          RUST_LOG: "debug"
+          # ここがポイント: まずは eBPF 側が clang を掴めるように戻して挙動を見る
+          CC: clang
+          CXX: clang++
         if: matrix.kind == 'unix'
         shell: bash
-        run: ./build/build-unix.sh "${{ matrix.target }}" "${{ matrix.os_name }}" "${{ matrix.arch }}"
+        run: |
+          set -euxo pipefail
+          echo "CC=${CC-}"
+          echo "CXX=${CXX-}"
+          echo "PATH=$PATH"
+          which clang || true
+          clang --version || true
+          clang -print-targets | grep -E 'bpf|bpfel|bpfeb' || echo "no bpf targets"
+          which zig || true
+          zig version || true
+          ./build/build-unix.sh "${{ matrix.target }}" "${{ matrix.os_name }}" "${{ matrix.arch }}"
 
       - name: Build and package (Windows)
         if: matrix.kind == 'windows'
         shell: pwsh
-        run: .\build\build-windows.ps1 -Target "${{ matrix.target }}" -OsName "${{ matrix.os_name }}" -Arch "${{ matrix.arch }}"
+        run: |
+          .\build\build-windows.ps1 -Target "${{ matrix.target }}" -OsName "${{ matrix.os_name }}" -Arch "${{ matrix.arch }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6

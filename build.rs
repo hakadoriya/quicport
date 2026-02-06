@@ -65,7 +65,10 @@ fn emit_build_info() {
         let m = if mp < 10 { mp + 3 } else { mp - 9 };
         let y = if m <= 2 { y + 1 } else { y };
 
-        format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hours, minutes, seconds)
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            y, m, d, hours, minutes, seconds
+        )
     };
 
     // ターゲットトリプル
@@ -115,6 +118,20 @@ fn build_ebpf() {
     use libbpf_cargo::SkeletonBuilder;
     use std::env;
     use std::path::PathBuf;
+
+    println!(
+        "cargo:warning=TARGET={}",
+        env::var("TARGET").unwrap_or_default()
+    );
+    println!(
+        "cargo:warning=HOST={}",
+        env::var("HOST").unwrap_or_default()
+    );
+    println!("cargo:warning=CC={}", env::var("CC").unwrap_or_default());
+    println!(
+        "cargo:warning=PATH={}",
+        env::var("PATH").unwrap_or_default()
+    );
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -183,9 +200,15 @@ fn build_ebpf() {
             // - clang が BPF ターゲットをサポートしていない
             // - C ソースコードにエラーがある
             println!("cargo:warning=Failed to build eBPF program: {}", e);
-            println!("cargo:warning=Make sure clang is installed with BPF target support");
-            println!("cargo:warning=On Ubuntu/Debian: sudo apt install clang llvm");
-            println!("cargo:warning=On Fedora/RHEL: sudo dnf install clang llvm");
+            println!(
+                "cargo:warning=Failed to build eBPF program (debug): {:#?}",
+                e
+            );
+
+            // anyhow::Error の原因チェーンを列挙する
+            for (i, cause) in e.chain().enumerate() {
+                println!("cargo:warning=cause[{}]: {}", i, cause);
+            }
 
             // ビルドを失敗させる（ebpf feature が明示的に有効なため）
             panic!("eBPF build failed: {}", e);
