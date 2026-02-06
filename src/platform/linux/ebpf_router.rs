@@ -249,36 +249,43 @@ impl EbpfRouter {
                     match Self::open_pinned_map(&socket_map_pin_path) {
                         Ok(map_fd) => {
                             // active_server_id_map も開く
+                            // 存在しない場合は skel ロードにフォールバック（古いバージョンからのアップグレード対応）
                             let active_map_pin_path = pin_dir.join("active_server_id_map");
-                            let active_map_fd = if active_map_pin_path.exists() {
+                            if !active_map_pin_path.exists() {
+                                warn!(
+                                    "Pinned active_server_id_map not found at {:?}. \
+                                     Falling back to full skel load to create it.",
+                                    active_map_pin_path
+                                );
+                                // skel ロードにフォールバック（下に続く）
+                            } else {
                                 match Self::open_pinned_map(&active_map_pin_path) {
-                                    Ok(fd) => Some(fd),
+                                    Ok(active_map_fd) => {
+                                        info!(
+                                            "Reusing pinned program and map without skel load (no new BPF program created)"
+                                        );
+                                        return Ok(Self {
+                                            skel: None,
+                                            _open_object: None,
+                                            config,
+                                            registered_server_ids: Vec::new(),
+                                            reused_pinned_map: true,
+                                            reused_pinned_prog: true,
+                                            pinned_prog_fd,
+                                            pinned_map_fd: Some(map_fd),
+                                            pinned_active_map_fd: Some(active_map_fd),
+                                        });
+                                    }
                                     Err(e) => {
                                         warn!(
-                                            "Failed to open pinned active_server_id_map: {}. Continuing without it.",
+                                            "Failed to open pinned active_server_id_map: {}. \
+                                             Falling back to full skel load.",
                                             e
                                         );
-                                        None
+                                        // skel ロードにフォールバック（下に続く）
                                     }
                                 }
-                            } else {
-                                None
-                            };
-
-                            info!(
-                                "Reusing pinned program and map without skel load (no new BPF program created)"
-                            );
-                            return Ok(Self {
-                                skel: None,
-                                _open_object: None,
-                                config,
-                                registered_server_ids: Vec::new(),
-                                reused_pinned_map: true,
-                                reused_pinned_prog: true,
-                                pinned_prog_fd,
-                                pinned_map_fd: Some(map_fd),
-                                pinned_active_map_fd: active_map_fd,
-                            });
+                            }
                         }
                         Err(e) => {
                             warn!(
