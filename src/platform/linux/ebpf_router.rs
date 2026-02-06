@@ -164,6 +164,8 @@ pub struct EbpfRouter {
     pinned_prog_fd: Option<OwnedFd>,
     /// ピン留めマップの fd（skel なしで map を操作するために使用）
     pinned_map_fd: Option<OwnedFd>,
+    /// ピン留め active_server_id_map の fd（skel なしで map を操作するために使用）
+    pinned_active_map_fd: Option<OwnedFd>,
 }
 
 // SAFETY: EbpfRouter は単一の tokio タスクに move されて使用される。
@@ -246,6 +248,23 @@ impl EbpfRouter {
                 if socket_map_pin_path.exists() {
                     match Self::open_pinned_map(&socket_map_pin_path) {
                         Ok(map_fd) => {
+                            // active_server_id_map も開く
+                            let active_map_pin_path = pin_dir.join("active_server_id_map");
+                            let active_map_fd = if active_map_pin_path.exists() {
+                                match Self::open_pinned_map(&active_map_pin_path) {
+                                    Ok(fd) => Some(fd),
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to open pinned active_server_id_map: {}. Continuing without it.",
+                                            e
+                                        );
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+
                             info!(
                                 "Reusing pinned program and map without skel load (no new BPF program created)"
                             );
@@ -258,6 +277,7 @@ impl EbpfRouter {
                                 reused_pinned_prog: true,
                                 pinned_prog_fd,
                                 pinned_map_fd: Some(map_fd),
+                                pinned_active_map_fd: active_map_fd,
                             });
                         }
                         Err(e) => {
@@ -348,6 +368,54 @@ impl EbpfRouter {
                         )
                     })?;
             }
+
+            // active_server_id_map のピン留め設定
+            let active_map_pin_path = pin_dir.join("active_server_id_map");
+            if active_map_pin_path.exists() {
+                info!(
+                    "Reusing existing pinned active_server_id_map at {:?}",
+                    active_map_pin_path
+                );
+                match open_skel.maps.active_server_id_map.reuse_pinned_map(&active_map_pin_path) {
+                    Ok(()) => {
+                        info!("Successfully reusing pinned active_server_id_map");
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to reuse pinned active_server_id_map: {}. Recreating...",
+                            e
+                        );
+                        if let Err(remove_err) = std::fs::remove_file(&active_map_pin_path) {
+                            warn!(
+                                "Failed to remove corrupted pin file {:?}: {}",
+                                active_map_pin_path, remove_err
+                            );
+                        }
+                        open_skel
+                            .maps
+                            .active_server_id_map
+                            .set_pin_path(&active_map_pin_path)
+                            .with_context(|| {
+                                format!(
+                                    "Failed to set pin path for active_server_id_map: {:?}",
+                                    active_map_pin_path
+                                )
+                            })?;
+                    }
+                }
+            } else {
+                info!("Creating new pinned active_server_id_map at {:?}", active_map_pin_path);
+                open_skel
+                    .maps
+                    .active_server_id_map
+                    .set_pin_path(&active_map_pin_path)
+                    .with_context(|| {
+                        format!(
+                            "Failed to set pin path for active_server_id_map: {:?}",
+                            active_map_pin_path
+                        )
+                    })?;
+            }
         }
 
         // eBPF プログラムをカーネルにロード
@@ -398,6 +466,7 @@ impl EbpfRouter {
             reused_pinned_prog,
             pinned_prog_fd,
             pinned_map_fd: None,
+            pinned_active_map_fd: None,
         })
     }
 
@@ -485,6 +554,36 @@ impl EbpfRouter {
             }
         } else {
             return Err(anyhow::anyhow!("No map handle available (neither skel nor pinned_map_fd)"));
+        }
+        Ok(())
+    }
+
+    /// active_server_id_map にエントリを書き込む内部ヘルパー
+    ///
+    /// skel がある場合は skel 経由で、ない場合は pinned_active_map_fd 経由で操作する。
+    /// ARRAY マップなので key は常に 0。
+    fn active_map_update(&self, value: u32) -> Result<()> {
+        let key = 0u32.to_ne_bytes();
+        let value_bytes = value.to_ne_bytes();
+
+        if let Some(ref skel) = self.skel {
+            skel.maps.active_server_id_map.update(&key, &value_bytes, MapFlags::ANY)
+                .context("Failed to update active_server_id_map via skel")?;
+        } else if let Some(ref map_fd) = self.pinned_active_map_fd {
+            let ret = unsafe {
+                libbpf_sys::bpf_map_update_elem(
+                    map_fd.as_raw_fd(),
+                    key.as_ptr() as *const std::ffi::c_void,
+                    value_bytes.as_ptr() as *const std::ffi::c_void,
+                    libbpf_sys::BPF_ANY as u64,
+                )
+            };
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                return Err(anyhow::anyhow!("Failed to update active_server_id_map via pinned fd: {}", err));
+            }
+        } else {
+            return Err(anyhow::anyhow!("No active_server_id_map handle available"));
         }
         Ok(())
     }
@@ -692,51 +791,43 @@ impl EbpfRouter {
         Ok(())
     }
 
-    /// デフォルト ACTIVE DP を登録 (key=0)
+    /// ACTIVE な server_id を設定
     ///
-    /// ACTIVE な DP のソケットを socket_map の key=0 に登録します。
-    /// eBPF プログラムが server_id ルックアップに失敗した際の fallback 先として使用されます。
+    /// active_server_id_map に ACTIVE な server_id を登録します。
+    /// eBPF プログラムが server_id ルックアップに失敗した際、この値を使って
+    /// socket_map から間接ルックアップします。
     /// `MapFlags::ANY` で常に上書きするため、新しい ACTIVE DP が起動すると自動的に切り替わります。
     ///
     /// # Arguments
     ///
-    /// * `socket` - ACTIVE DP の UDP ソケット
-    pub fn register_default_active(&mut self, socket: &UdpSocket) -> Result<()> {
-        let sock_fd = socket.as_raw_fd();
-        let local_addr = socket.local_addr();
+    /// * `server_id` - ACTIVE な DP の server_id
+    pub fn set_active_server_id(&mut self, server_id: u32) -> Result<()> {
         info!(
-            "Registering default active DP (key=0) with socket fd={}, local_addr={:?}",
-            sock_fd, local_addr
+            "Setting active_server_id={} in active_server_id_map",
+            server_id
         );
 
-        let key = 0u32.to_ne_bytes();
-        let value = (sock_fd as u64).to_ne_bytes();
-
-        self.map_update(&key, &value)
+        self.active_map_update(server_id)
             .with_context(|| {
                 format!(
-                    "Failed to register default active DP (key=0) in socket_map. sock_fd={}, local_addr={:?}",
-                    sock_fd, local_addr
+                    "Failed to set active_server_id={} in active_server_id_map",
+                    server_id
                 )
             })?;
 
-        info!(
-            "Registered default active DP (key=0) in REUSEPORT_SOCKARRAY: sock_fd={}, local_addr={:?}",
-            sock_fd, local_addr
-        );
+        info!("Set active_server_id={}", server_id);
         Ok(())
     }
 
-    /// デフォルト ACTIVE DP の登録を解除 (key=0)
+    /// ACTIVE な server_id をクリア
     ///
-    /// key=0 のエントリを socket_map から削除します。
-    pub fn unregister_default_active(&mut self) -> Result<()> {
-        let key = 0u32.to_ne_bytes();
+    /// active_server_id_map の値を 0 に設定します。
+    /// ARRAY マップは delete できないため、0 を書き込んでクリアとみなします。
+    pub fn clear_active_server_id(&mut self) -> Result<()> {
+        self.active_map_update(0)
+            .with_context(|| "Failed to clear active_server_id in active_server_id_map")?;
 
-        self.map_delete(&key)
-            .with_context(|| "Failed to unregister default active DP (key=0) from socket_map")?;
-
-        debug!("Unregistered default active DP (key=0)");
+        debug!("Cleared active_server_id");
         Ok(())
     }
 
@@ -909,6 +1000,72 @@ pub fn cleanup_unresponsive_entry(pin_path: &std::path::Path, server_id: u32) ->
     info!(
         "Cleaned up unresponsive eBPF map entry: server_id={} from {:?}",
         server_id, socket_map_pin_path
+    );
+    Ok(())
+}
+
+/// ピン留めされた active_server_id_map をクリア
+///
+/// `EbpfRouter` のインスタンスを作らず、ピン留めされた map だけを操作する軽量な関数。
+/// CP が ACTIVE な DP が存在しなくなった際に呼び出す。
+///
+/// # Arguments
+///
+/// * `pin_path` - eBPF map のピン留めディレクトリ（例: `/sys/fs/bpf/quicport`）
+///
+/// # Errors
+///
+/// - ピン留めされた map が存在しない
+/// - map fd の取得に失敗
+/// - 値の書き込みに失敗
+pub fn clear_active_server_id_entry(pin_path: &std::path::Path) -> Result<()> {
+    let active_map_pin_path = pin_path.join("active_server_id_map");
+
+    if !active_map_pin_path.exists() {
+        debug!(
+            "Pinned active_server_id_map not found at {:?}, skipping clear",
+            active_map_pin_path
+        );
+        return Ok(());
+    }
+
+    // ピン留めされた map の fd を取得
+    let path_cstr = std::ffi::CString::new(active_map_pin_path.to_string_lossy().as_bytes())
+        .context("Invalid pin path for active_server_id_map")?;
+    let map_fd = unsafe { libbpf_sys::bpf_obj_get(path_cstr.as_ptr()) };
+    if map_fd < 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(anyhow::anyhow!(
+            "Failed to open pinned active_server_id_map at {:?}: {}",
+            active_map_pin_path,
+            err
+        ));
+    }
+    let map_fd = unsafe { OwnedFd::from_raw_fd(map_fd) };
+
+    // ARRAY マップなので key=0 に value=0 を書き込んでクリア
+    let key = 0u32.to_ne_bytes();
+    let value = 0u32.to_ne_bytes();
+    let ret = unsafe {
+        libbpf_sys::bpf_map_update_elem(
+            map_fd.as_raw_fd(),
+            key.as_ptr() as *const std::ffi::c_void,
+            value.as_ptr() as *const std::ffi::c_void,
+            libbpf_sys::BPF_ANY as u64,
+        )
+    };
+
+    if ret < 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(anyhow::anyhow!(
+            "Failed to clear active_server_id_map: {}",
+            err
+        ));
+    }
+
+    info!(
+        "Cleared active_server_id_map (no ACTIVE DP exists) at {:?}",
+        active_map_pin_path
     );
     Ok(())
 }

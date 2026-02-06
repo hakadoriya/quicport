@@ -54,6 +54,24 @@ struct {
 } socket_map SEC(".maps");
 
 /*
+ * active_server_id_map - ACTIVE な server_id を格納する補助マップ
+ *
+ * BPF_MAP_TYPE_ARRAY (key=0 の 1 エントリのみ)
+ * Key: 0 (固定)
+ * Value: ACTIVE な server_id (u32)
+ *
+ * REUSEPORT_SOCKARRAY は同じソケットを複数キーに登録できないため、
+ * key=0 に直接ソケットを登録する代わりに、ACTIVE な server_id を
+ * この補助マップに格納し、socket_map から間接的にルックアップする。
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u32);
+} active_server_id_map SEC(".maps");
+
+/*
  * Check if data points to UDP header instead of UDP payload
  *
  * SK_REUSEPORT の ctx->data は、カーネルバージョンによって:
@@ -287,13 +305,13 @@ extract_server_id(struct sk_reuseport_md *ctx, __u32 *server_id)
 }
 
 /*
- * Fallback to default active DP (key=0)
+ * Fallback to active server_id
  *
- * socket_map の key=0 は「デフォルト ACTIVE DP」として予約されている。
- * server_id の抽出やソケット選択に失敗した場合、key=0 で再ルックアップすることで
- * 新規コネクション（Initial パケット等）を ACTIVE な DP にルーティングする。
+ * active_server_id_map から ACTIVE な server_id を取得し、
+ * その server_id を使って socket_map からソケットをルックアップする。
  *
- * key=0 にエントリがない場合はカーネルデフォルト（ハッシュベース分散）にフォールスルーする。
+ * active_server_id_map に有効なエントリがない場合（値が 0 または存在しない）、
+ * カーネルデフォルト（ハッシュベース分散）にフォールスルーする。
  *
  * @param ctx: sk_reuseport_md context
  * @return: SK_PASS
@@ -301,15 +319,19 @@ extract_server_id(struct sk_reuseport_md *ctx, __u32 *server_id)
 static __always_inline int
 fallback_to_default_active(struct sk_reuseport_md *ctx)
 {
-    __u32 default_key = 0;
-    long ret;
-
-    ret = bpf_sk_select_reuseport(ctx, &socket_map, &default_key, 0);
-    if (ret < 0) {
-        bpf_printk("quicport: no default active DP (key=0), using kernel routing\n");
+    __u32 key = 0;
+    __u32 *active_sid = bpf_map_lookup_elem(&active_server_id_map, &key);
+    if (!active_sid || *active_sid == 0) {
+        bpf_printk("quicport: no active server_id registered, using kernel routing\n");
         return SK_PASS;
     }
-    bpf_printk("quicport: routed to default active DP (key=0)\n");
+
+    long ret = bpf_sk_select_reuseport(ctx, &socket_map, active_sid, 0);
+    if (ret < 0) {
+        bpf_printk("quicport: active server_id=%u not found in socket_map\n", *active_sid);
+        return SK_PASS;
+    }
+    bpf_printk("quicport: routed to active server_id=%u\n", *active_sid);
     return SK_PASS;
 }
 
@@ -404,11 +426,11 @@ int quicport_select_socket(struct sk_reuseport_md *ctx)
          * or uses a different CID format (e.g., Initial packet with
          * client-generated random CID).
          *
-         * Fallback to default active DP (key=0) to route new connections
-         * to the ACTIVE DP instead of relying on kernel hash-based routing
-         * which might send to a DRAINING DP.
+         * Fallback to active server_id (from active_server_id_map) to route
+         * new connections to the ACTIVE DP instead of relying on kernel
+         * hash-based routing which might send to a DRAINING DP.
          */
-        bpf_printk("quicport: failed to extract server_id, trying default active DP\n");
+        bpf_printk("quicport: failed to extract server_id, trying active server_id\n");
         return fallback_to_default_active(ctx);
     }
 
@@ -421,7 +443,7 @@ int quicport_select_socket(struct sk_reuseport_md *ctx)
      * and assigns it to handle this packet.
      *
      * If the lookup fails (server_id not registered), we fallback
-     * to the default active DP (key=0).
+     * to the active server_id (from active_server_id_map).
      */
     ret = bpf_sk_select_reuseport(ctx, &socket_map, &server_id, 0);
     if (ret < 0) {
@@ -433,9 +455,9 @@ int quicport_select_socket(struct sk_reuseport_md *ctx)
          * - CID was generated before any Data Plane registered
          * - Map was reset/corrupted
          *
-         * Fallback to default active DP (key=0).
+         * Fallback to active server_id (from active_server_id_map).
          */
-        bpf_printk("quicport: server_id=%u not found, trying default active DP\n", server_id);
+        bpf_printk("quicport: server_id=%u not found, trying active server_id\n", server_id);
         return fallback_to_default_active(ctx);
     }
 

@@ -66,7 +66,7 @@ struct TrackedTunnel {
 
 #[derive(Debug)]
 enum EbpfCommand {
-    RegisterDefaultActive,
+    SetActiveServerId(u32),
 }
 
 /// データプレーンの共有状態
@@ -214,14 +214,14 @@ impl DataPlane {
         *tx = sender;
     }
 
-    async fn request_default_active_registration(&self) {
+    async fn request_set_active_server_id(&self, server_id: u32) {
         let tx = self.ebpf_cmd_tx.read().await.clone();
         if let Some(tx) = tx {
-            if let Err(e) = tx.send(EbpfCommand::RegisterDefaultActive).await {
+            if let Err(e) = tx.send(EbpfCommand::SetActiveServerId(server_id)).await {
                 debug!("Failed to send eBPF command (receiver closed): {}", e);
             }
         } else {
-            debug!("eBPF command sender not available (default active not registered)");
+            debug!("eBPF command sender not available (active server_id not set)");
         }
     }
 
@@ -897,18 +897,18 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                     );
                 }
 
-                // デフォルト ACTIVE DP (key=0) を登録
+                // active_server_id_map に server_id を登録
                 // 新規コネクション（Initial パケット等）の server_id ルックアップ失敗時に
                 // fallback 先として使用される。MapFlags::ANY で常に上書きするため、
                 // 最後に起動した ACTIVE DP が新規接続を受け付ける。
-                if let Err(e) = router.register_default_active(&socket) {
+                if let Err(e) = router.set_active_server_id(sid) {
                     warn!(
-                        "Failed to register default active DP (key=0) for dp_id={:#06x}: {}",
+                        "Failed to set active server_id for dp_id={:#06x}: {}",
                         sid, e
                     );
                 } else {
                     info!(
-                        "Default active DP (key=0) registered for dp_id={:#06x}",
+                        "Active server_id set for dp_id={:#06x}",
                         sid
                     );
                 }
@@ -932,17 +932,16 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                         tokio::spawn(async move {
                             while let Some(cmd) = rx.recv().await {
                                 match cmd {
-                                    EbpfCommand::RegisterDefaultActive => {
-                                        if let Err(e) =
-                                            router.register_default_active(&socket_for_ebpf)
-                                        {
+                                    EbpfCommand::SetActiveServerId(server_id) => {
+                                        if let Err(e) = router.set_active_server_id(server_id) {
                                             warn!(
-                                                "Failed to register default active DP (key=0) via command: {}",
+                                                "Failed to set active server_id via command: {}",
                                                 e
                                             );
                                         } else {
                                             info!(
-                                                "Default active DP (key=0) registered via command"
+                                                "Active server_id set via command: {:#06x}",
+                                                server_id
                                             );
                                         }
                                     }
@@ -952,7 +951,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                     }
                     Err(e) => {
                         warn!(
-                            "Failed to clone UDP socket for eBPF default active registration: {}",
+                            "Failed to clone UDP socket for eBPF active server_id setting: {}",
                             e
                         );
                     }
@@ -1114,6 +1113,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     // コマンド受信タスク（長ポーリング）
     let dp_for_cmd = dp_for_ipc.clone();
     let pending_acks_for_cmd = pending_acks.clone();
+    let server_id_for_cmd = server_id;
     tokio::spawn(async move {
         loop {
             // 登録されるまで待機
@@ -1164,7 +1164,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
 
             for cmd in commands {
                 debug!("Received command: id={}, {:?}", cmd.id, cmd.command);
-                process_ipc_command(&dp_for_cmd, cmd.command.clone()).await;
+                process_ipc_command(&dp_for_cmd, cmd.command.clone(), server_id_for_cmd).await;
 
                 // コマンド応答を保留リストに追加（次回の SendStatus で送信）
                 {
@@ -1296,7 +1296,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
 ///
 /// コマンドを実行し、必要な副作用（状態変更など）を適用する。
 /// 結果は次回の SendStatus で送信されるため、戻り値は不要。
-async fn process_ipc_command(data_plane: &DataPlane, cmd: ControlCommand) {
+async fn process_ipc_command(data_plane: &DataPlane, cmd: ControlCommand, server_id: u32) {
     match cmd {
         ControlCommand::SetAuthPolicy(policy) => {
             data_plane.set_auth_policy(policy).await;
@@ -1336,8 +1336,8 @@ async fn process_ipc_command(data_plane: &DataPlane, cmd: ControlCommand) {
         }
 
         ControlCommand::SetDefaultActive => {
-            data_plane.request_default_active_registration().await;
-            info!("Default active registration requested");
+            data_plane.request_set_active_server_id(server_id).await;
+            info!("Active server_id set requested: {:#06x}", server_id);
         }
     }
 }

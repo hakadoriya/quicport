@@ -341,8 +341,8 @@ impl ControlPlane {
                 // ACTIVE DP の変動を反映してデフォルト ACTIVE を再計算
                 self.http_ipc.update_default_active_dp().await;
 
-                // ACTIVE な DP が 1 つも存在しない場合、key=0（デフォルト ACTIVE DP）も削除
-                // key=0 が応答不能なソケットを指し続けることを防ぐ
+                // ACTIVE な DP が 1 つも存在しない場合、active_server_id_map をクリア
+                // 応答不能なソケットへのルーティングを防ぐ
                 #[cfg(target_os = "linux")]
                 {
                     use crate::ipc::DataPlaneState;
@@ -355,18 +355,15 @@ impl ControlPlane {
 
                     if !has_active_dp {
                         let ebpf_pin_path = Path::new("/sys/fs/bpf/quicport");
-                        match crate::platform::linux::ebpf_router::cleanup_unresponsive_entry(
+                        match crate::platform::linux::ebpf_router::clear_active_server_id_entry(
                             ebpf_pin_path,
-                            0, // key=0: デフォルト ACTIVE DP
                         ) {
                             Ok(()) => {
-                                info!(
-                                    "Cleaned up default active DP (key=0) from eBPF map (no ACTIVE DP exists)"
-                                );
+                                // ログは関数内で出力される
                             }
                             Err(e) => {
                                 debug!(
-                                    "Failed to cleanup default active DP (key=0): {} (may already be removed)",
+                                    "Failed to clear active_server_id_map: {} (may already be cleared)",
                                     e
                                 );
                             }
