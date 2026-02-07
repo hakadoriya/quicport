@@ -4,6 +4,35 @@
  *
  * This header provides macros and helper function declarations needed
  * for SK_REUSEPORT BPF programs.
+ *
+ * 【標準 <bpf/bpf_helpers.h> ではなく独自ヘッダーを使用する理由】
+ *
+ * 1. ビルド環境非依存
+ *    標準ヘッダーを使用するにはビルドマシンに libbpf 開発ヘッダー
+ *    (libbpf-dev 等) のインストールが必要になる。本プロジェクトでは
+ *    clang のインクルードパスを platform/linux/bpf/ のみに限定し
+ *    (build.rs 参照)、システムヘッダーに依存しないビルドを実現している。
+ *
+ * 2. 手書き vmlinux.h との整合性
+ *    本プロジェクトの vmlinux.h は bpftool btf dump による自動生成ではなく
+ *    SK_REUSEPORT に必要な型のみを手書きで定義した最小構成である。
+ *    標準 <bpf/bpf_helpers.h> は <linux/bpf.h> 等のカーネルヘッダーに
+ *    依存するため、この手書き vmlinux.h と型定義が衝突する。
+ *
+ * 3. 必要最小限のヘルパー宣言
+ *    標準ヘッダーには全 BPF プログラムタイプ向けの大量の宣言が含まれるが、
+ *    本プログラム (SK_REUSEPORT) が使用するヘルパーは以下の 4 つのみ:
+ *      - bpf_map_lookup_elem     (#1)  マップ検索
+ *      - bpf_trace_printk        (#6)  デバッグ出力
+ *      - bpf_skb_load_bytes      (#26) パケットデータ読み取り
+ *      - bpf_sk_select_reuseport (#82) ソケット選択
+ *    必要なものだけを宣言することで依存関係が明確になる。
+ *
+ * 4. bpf_printk マクロの互換性制御
+ *    標準 libbpf の bpf_printk は引数が 4 個以上の場合に bpf_trace_vprintk
+ *    (Linux 5.16+ 必須) を自動使用するが、本プロジェクトでは古いカーネル
+ *    (Linux 4.1+) との互換性のため常に bpf_trace_printk のみを使用する。
+ *    詳細は本ファイル末尾の bpf_trace_printk コメントを参照。
  */
 
 #ifndef __BPF_HELPERS_H__
