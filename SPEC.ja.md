@@ -314,6 +314,8 @@ quicport admin <COMMAND>
 | `drain-data-plane --dp-id <DP_ID>` | 特定のデータプレーンに DRAIN を送信 |
 | `shutdown-data-plane --dp-id <DP_ID>` | 特定のデータプレーンを即座にシャットダウン |
 | `get-connections --dp-id <DP_ID>` | 特定のデータプレーンのアクティブ接続一覧を表示 |
+| `list-tunnels [--dp-id <DP_ID>]` | トンネル一覧を表示（dp-id 省略時は全 DP 横断） |
+| `list-connections [--dp-id <DP_ID>]` | 接続一覧を表示（dp-id 省略時は全 DP 横断） |
 
 **共通オプション:**
 
@@ -325,7 +327,10 @@ quicport admin <COMMAND>
 
 | オプション | 必須 | 対象サブコマンド | 説明 |
 |-----------|------|-----------------|------|
-| `--dp-id` | Yes | `get-data-plane-status`, `drain-data-plane`, `shutdown-data-plane`, `get-connections` | 対象のデータプレーン ID（16 進数形式、例: `0x3039`） |
+| `--dp-id` | Yes* | `get-data-plane-status`, `drain-data-plane`, `shutdown-data-plane`, `get-connections` | 対象のデータプレーン ID（16 進数形式、例: `0x3039`） |
+| `--dp-id` | No | `list-tunnels`, `list-connections` | フィルタ用のデータプレーン ID（省略時は全 DP 横断） |
+
+\* `get-data-plane-status`, `drain-data-plane`, `shutdown-data-plane`, `get-connections` では必須
 
 **例:**
 
@@ -344,6 +349,18 @@ quicport admin shutdown-data-plane --dp-id 0x3039
 
 # 特定のデータプレーンの接続一覧を確認
 quicport admin get-connections --dp-id 0x3039
+
+# 全データプレーンのトンネル一覧を確認
+quicport admin list-tunnels
+
+# 特定のデータプレーンのトンネル一覧を確認
+quicport admin list-tunnels --dp-id 0x3039
+
+# 全データプレーンの接続一覧を確認
+quicport admin list-connections
+
+# 特定のデータプレーンの接続一覧を確認
+quicport admin list-connections --dp-id 0x3039
 
 # コントロールプレーンのアドレスを指定
 quicport admin list-data-planes --control-plane-addr 127.0.0.1:39001
@@ -1891,6 +1908,102 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
 }
 ```
 
+##### POST /api/v1/admin/ListTunnels
+
+トンネル一覧を取得（全 DP 横断可）。
+
+**リクエスト:**
+
+```json
+{
+  "dp_id": "0x3039"
+}
+```
+
+または全 DP 横断:
+
+```json
+{}
+```
+
+**レスポンス:**
+
+```json
+{
+  "tunnels": [
+    {
+      "dp_id": "0x3039",
+      "tunnel_id": 4294967297,
+      "remote_addr": "192.168.1.100:50000",
+      "forwarding_mode": "RPF",
+      "started_at": 1234567890,
+      "active_connections": 2,
+      "bytes_sent": 1024,
+      "bytes_received": 2048
+    }
+  ]
+}
+```
+
+**フィールド説明:**
+
+| フィールド | 説明 |
+|-----------|------|
+| `dp_id` | データプレーン ID（16 進数形式） |
+| `tunnel_id` | トンネル ID（`(server_id << 32) \| counter` 形式でグローバルユニーク） |
+| `remote_addr` | クライアントのリモートアドレス（QUIC 接続元） |
+| `forwarding_mode` | フォワーディングモード（`"RPF"` または `"LPF"`） |
+| `started_at` | 開始時刻（UNIX タイムスタンプ） |
+| `active_connections` | このトンネル内のアクティブ接続数（バックエンド TCP/UDP 接続） |
+| `bytes_sent` | 送信バイト数 |
+| `bytes_received` | 受信バイト数 |
+
+##### POST /api/v1/admin/ListConnections
+
+接続一覧を取得（全 DP 横断可）。
+
+**リクエスト:**
+
+```json
+{
+  "dp_id": "0x3039"
+}
+```
+
+または全 DP 横断:
+
+```json
+{}
+```
+
+**レスポンス:**
+
+```json
+{
+  "connections": [
+    {
+      "dp_id": "0x3039",
+      "connection_id": 1,
+      "remote_addr": "192.168.1.100:50000",
+      "protocol": "tcp",
+      "bytes_sent": 1024,
+      "bytes_received": 2048
+    }
+  ]
+}
+```
+
+**フィールド説明:**
+
+| フィールド | 説明 |
+|-----------|------|
+| `dp_id` | データプレーン ID（16 進数形式） |
+| `connection_id` | 接続 ID |
+| `remote_addr` | リモートアドレス（バックエンド接続先またはクライアント接続元） |
+| `protocol` | プロトコル（`"tcp"` または `"udp"`） |
+| `bytes_sent` | 送信バイト数 |
+| `bytes_received` | 受信バイト数 |
+
 **手動テスト例:**
 
 ```bash
@@ -1909,8 +2022,28 @@ curl -X POST http://127.0.0.1:39000/api/v1/admin/DrainDataPlane \
   -H "Content-Type: application/json" \
   -d '{"dp_id": "0x3039"}'
 
-# 接続一覧
+# 接続一覧（特定 DP）
 curl -X POST http://127.0.0.1:39000/api/v1/admin/GetConnections \
+  -H "Content-Type: application/json" \
+  -d '{"dp_id": "0x3039"}'
+
+# トンネル一覧（全 DP 横断）
+curl -X POST http://127.0.0.1:39000/api/v1/admin/ListTunnels \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# トンネル一覧（特定 DP）
+curl -X POST http://127.0.0.1:39000/api/v1/admin/ListTunnels \
+  -H "Content-Type: application/json" \
+  -d '{"dp_id": "0x3039"}'
+
+# 接続一覧（全 DP 横断）
+curl -X POST http://127.0.0.1:39000/api/v1/admin/ListConnections \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# 接続一覧（特定 DP）
+curl -X POST http://127.0.0.1:39000/api/v1/admin/ListConnections \
   -H "Content-Type: application/json" \
   -d '{"dp_id": "0x3039"}'
 ```
