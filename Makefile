@@ -85,7 +85,7 @@ vendor:  ## Vendor dependencies
 
 .PHONY: build-remote
 build-remote:  ## Run build binary workflow on GitHub Actions
-	gh workflow run rust-build.yml --ref ${CURRENT_BRANCH}
+	gh workflow run rust-build.yml --ref ${CURRENT_BRANCH} ${BUILD_REMOTE_ARGS}
 
 .PHONY: build-remote-watch
 build-remote-watch:  ## Watch building workflow on GitHub Actions

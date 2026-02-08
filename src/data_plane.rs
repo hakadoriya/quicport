@@ -55,7 +55,8 @@ struct TrackedConnection {
 
 /// トンネルごとの追跡情報
 struct TrackedTunnel {
-    remote_addr: SocketAddr,
+    /// QUIC コネクション（Connection Migration 対応のため保持）
+    connection: quinn::Connection,
     forwarding_mode: String, // "RPF" or "LPF"
     started_at: u64,
     /// このトンネルに紐づくバックエンド接続 ID の集合
@@ -296,9 +297,14 @@ impl DataPlane {
     }
 
     /// トンネルを登録し、tunnel_id とバイトカウンターを返す
+    ///
+    /// # Arguments
+    ///
+    /// * `connection` - QUIC コネクション（Connection Migration 対応のため保持）
+    /// * `forwarding_mode` - フォワーディングモード ("RPF" or "LPF")
     pub async fn register_tunnel(
         &self,
-        remote_addr: SocketAddr,
+        connection: quinn::Connection,
         forwarding_mode: &str,
     ) -> (u64, Arc<AtomicU64>, Arc<AtomicU64>) {
         let tunnel_id = self.tunnel_id_counter.fetch_add(1, Ordering::SeqCst);
@@ -312,7 +318,7 @@ impl DataPlane {
         self.tunnel_list.write().await.insert(
             tunnel_id,
             TrackedTunnel {
-                remote_addr,
+                connection,
                 forwarding_mode: forwarding_mode.to_string(),
                 started_at: now,
                 connection_ids: HashSet::new(),
@@ -344,6 +350,9 @@ impl DataPlane {
     }
 
     /// トンネル一覧を取得
+    ///
+    /// `remote_addr` は Connection から動的に取得するため、
+    /// クライアントの IP アドレス変更（Connection Migration）に追従します。
     pub async fn get_tunnels(&self) -> Vec<TunnelInfo> {
         self.tunnel_list
             .read()
@@ -351,7 +360,7 @@ impl DataPlane {
             .iter()
             .map(|(id, tracked)| TunnelInfo {
                 tunnel_id: *id,
-                remote_addr: tracked.remote_addr.to_string(),
+                remote_addr: tracked.connection.remote_address().to_string(),
                 forwarding_mode: tracked.forwarding_mode.clone(),
                 started_at: tracked.started_at,
                 active_connections: tracked.connection_ids.len() as u32,
@@ -1435,9 +1444,9 @@ async fn handle_quic_tunnel(data_plane: Arc<DataPlane>, tunnel: Connection) -> R
                 remote_addr, port, protocol, local_destination
             );
 
-            // トンネルを登録
+            // トンネルを登録（Connection を保持して Connection Migration に対応）
             let (tunnel_id, _tunnel_bytes_sent, _tunnel_bytes_received) =
-                data_plane.register_tunnel(remote_addr, "RPF").await;
+                data_plane.register_tunnel(tunnel.clone(), "RPF").await;
 
             let result = handle_remote_forward(
                 port,
@@ -1464,9 +1473,9 @@ async fn handle_quic_tunnel(data_plane: Arc<DataPlane>, tunnel: Connection) -> R
                 remote_addr, remote_destination, protocol, local_source
             );
 
-            // トンネルを登録
+            // トンネルを登録（Connection を保持して Connection Migration に対応）
             let (tunnel_id, _tunnel_bytes_sent, _tunnel_bytes_received) =
-                data_plane.register_tunnel(remote_addr, "LPF").await;
+                data_plane.register_tunnel(tunnel.clone(), "LPF").await;
 
             let result = handle_local_forward(
                 tunnel,
