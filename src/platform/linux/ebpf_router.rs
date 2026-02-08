@@ -872,33 +872,18 @@ impl Drop for EbpfRouter {
     fn drop(&mut self) {
         info!("Dropping eBPF SK_REUSEPORT router");
 
-        // 自分が登録した server_id のエントリのみを削除
-        // マップ自体は削除しない（他のプロセスが使用中の可能性があるため）
+        // 【重要】socket_map からエントリを削除しない
         //
-        // ピン留めマップを使用している場合:
-        // - 他の Data Plane プロセスが同じマップを共有している可能性がある
-        // - 自分が登録した server_id のみ削除することで、他プロセスの接続には影響しない
-        // - マップがピン留めされているため、プロセス終了後もマップは BPF filesystem に残る
-        for server_id in &self.registered_server_ids {
-            let key = server_id.to_ne_bytes();
-            match self.map_delete(&key) {
-                Ok(()) => {
-                    debug!("Deleted server_id={} from socket_map", server_id);
-                }
-                Err(e) => {
-                    // エントリが既に存在しない場合もエラーになる可能性があるので、
-                    // デバッグログにとどめる
-                    debug!(
-                        "Failed to delete server_id={} from socket_map: {}",
-                        server_id, e
-                    );
-                }
-            }
-        }
-
-        // NOTE: key=0（デフォルト ACTIVE DP）は drop では削除しない。
-        //       複数 DP で共有される可能性があるため、CP 側の定期 GC に任せる。
-
+        // Graceful restart の要件:
+        // - DRAINING 状態の DP は既存の QUIC 接続を継続処理する
+        // - 既存接続のパケットは DRAINING 中の DP にルーティングされ続ける必要がある
+        // - socket_map エントリを削除すると、fallback_to_default_active により
+        //   新しい DP にルーティングされ、stateless reset が送信されてしまう
+        //
+        // エントリの削除は CP 側で管理する:
+        // - DP が TERMINATED 状態になったタイミングで削除
+        // - 応答不能 DP の GC で削除
+        //
         // 注意: Drop 時の動作:
         //
         // 1. QuicportReuseportSkel の Drop:
@@ -916,7 +901,7 @@ impl Drop for EbpfRouter {
         //    - 最後のソケットが閉じられるとプログラムも解放される
         //    - ピン留めファイルは別途保持されるため、新しいプロセスが再利用可能
         info!(
-            "eBPF router dropped. Cleaned up {} server_id(s). Pinned map/program preserved for other processes.",
+            "eBPF router dropped. Registered {} server_id(s) preserved in socket_map for graceful restart.",
             self.registered_server_ids.len()
         );
     }

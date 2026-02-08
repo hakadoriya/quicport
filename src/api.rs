@@ -272,6 +272,32 @@ async fn send_status(
         }; // ← data_planes の write lock がここで解放される
 
         if dp_found {
+            // TERMINATED 状態の場合、socket_map からエントリを削除
+            // Graceful restart のため、DRAINING 中はエントリを維持し、
+            // TERMINATED になったタイミングで削除する
+            #[cfg(target_os = "linux")]
+            if req.state == crate::ipc::DataPlaneState::Terminated {
+                use std::path::Path;
+                let ebpf_pin_path = Path::new("/sys/fs/bpf/quicport");
+                match crate::platform::linux::ebpf_router::cleanup_unresponsive_entry(
+                    ebpf_pin_path,
+                    dp_id_u32,
+                ) {
+                    Ok(()) => {
+                        info!(
+                            "Cleaned up eBPF socket_map entry for TERMINATED dp_id={} (server_id={})",
+                            dp_id, dp_id_u32
+                        );
+                    }
+                    Err(e) => {
+                        debug!(
+                            "Failed to cleanup eBPF socket_map entry for dp_id={}: {} (may already be removed)",
+                            dp_id, e
+                        );
+                    }
+                }
+            }
+
             // 最新の ACTIVE をデフォルト ACTIVE として指示
             // （data_planes の write lock 解放後に呼び出すことでデッドロックを回避）
             state.http_ipc.update_default_active_dp().await;
