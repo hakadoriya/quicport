@@ -1211,9 +1211,46 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
         }
     }.instrument(tracing::Span::current()));
 
+    // シグナルハンドラ: シグナル受信時に即時終了ではなく DRAINING 状態に遷移する。
+    // KillMode=process の場合 DP は SIGTERM を受けないが、万が一受けた場合の防御策。
+    //   - Unix: SIGTERM + SIGINT
+    //   - Windows: Ctrl+C (Interrupt)
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::terminate(),
+    ).context("Failed to register SIGTERM handler")?;
+    #[cfg(unix)]
+    let mut sigint = tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::interrupt(),
+    ).context("Failed to register SIGINT handler")?;
+
     // メインループ
     loop {
         tokio::select! {
+            // Unix SIGTERM: DRAINING 状態に遷移（即座にプロセス終了しない）
+            _ = async {
+                #[cfg(unix)]
+                { let _ = sigterm.recv().await; }
+                #[cfg(not(unix))]
+                { std::future::pending::<()>().await; }
+            } => {
+                info!("Data plane received SIGTERM, entering DRAINING state");
+                data_plane.drain().await;
+                // break しない: DRAINING のまま既存接続を処理し続ける。
+                // ドレイン完了 or タイムアウトで break する既存ロジックに委譲。
+            }
+
+            // Unix SIGINT / Windows Ctrl+C: DRAINING 状態に遷移
+            _ = async {
+                #[cfg(unix)]
+                { let _ = sigint.recv().await; }
+                #[cfg(not(unix))]
+                { let _ = tokio::signal::ctrl_c().await; }
+            } => {
+                info!("Data plane received interrupt signal, entering DRAINING state");
+                data_plane.drain().await;
+            }
+
             // シャットダウン
             _ = shutdown_rx.recv() => {
                 info!("Data plane received shutdown signal");
