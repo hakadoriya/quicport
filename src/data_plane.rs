@@ -84,6 +84,8 @@ pub struct DataPlane {
     started_at: u64,
     /// PID
     pub pid: u32,
+    /// server_id（eBPF ルーティング用、tunnel_id 生成にも使用）
+    server_id: AtomicU32,
     /// シャットダウン通知用
     shutdown_tx: broadcast::Sender<()>,
     /// ドレイン通知用
@@ -96,8 +98,8 @@ pub struct DataPlane {
     closed_bytes_received: AtomicU64,
     /// 接続情報（GetConnections 用）
     connection_list: RwLock<HashMap<u32, TrackedConnection>>,
-    /// トンネル ID カウンター
-    tunnel_id_counter: AtomicU64,
+    /// トンネル ID カウンター（server_id と組み合わせてグローバルユニークな tunnel_id を生成）
+    tunnel_id_counter: AtomicU32,
     /// トンネル情報（ListTunnels 用）
     tunnel_list: RwLock<HashMap<u64, TrackedTunnel>>,
     /// eBPF 用の内部コマンド送信
@@ -122,13 +124,14 @@ impl DataPlane {
             statistics: Arc::new(ServerStatistics::new()),
             started_at,
             pid: std::process::id(),
+            server_id: AtomicU32::new(0), // 後から set_server_id() で設定
             shutdown_tx,
             drain_tx,
             active_tunnels: AtomicU32::new(0),
             closed_bytes_sent: AtomicU64::new(0),
             closed_bytes_received: AtomicU64::new(0),
             connection_list: RwLock::new(HashMap::new()),
-            tunnel_id_counter: AtomicU64::new(1),
+            tunnel_id_counter: AtomicU32::new(1),
             tunnel_list: RwLock::new(HashMap::new()),
             ebpf_cmd_tx: RwLock::new(None),
         })
@@ -142,6 +145,14 @@ impl DataPlane {
     /// 状態を設定
     pub async fn set_state(&self, state: DataPlaneState) {
         *self.state.write().await = state;
+    }
+
+    /// server_id を設定
+    ///
+    /// tunnel_id 生成時に使用され、グローバルにユニークな ID を保証する。
+    /// tunnel_id = (server_id << 32) | counter
+    pub fn set_server_id(&self, server_id: u32) {
+        self.server_id.store(server_id, Ordering::SeqCst);
     }
 
     /// 認証ポリシーを設定
@@ -298,6 +309,9 @@ impl DataPlane {
 
     /// トンネルを登録し、tunnel_id とバイトカウンターを返す
     ///
+    /// tunnel_id は `(server_id << 32) | counter` 形式で生成され、
+    /// 複数の DataPlane 間でもグローバルにユニークになる。
+    ///
     /// # Arguments
     ///
     /// * `connection` - QUIC コネクション（Connection Migration 対応のため保持）
@@ -307,7 +321,11 @@ impl DataPlane {
         connection: quinn::Connection,
         forwarding_mode: &str,
     ) -> (u64, Arc<AtomicU64>, Arc<AtomicU64>) {
-        let tunnel_id = self.tunnel_id_counter.fetch_add(1, Ordering::SeqCst);
+        let server_id = self.server_id.load(Ordering::SeqCst);
+        let counter = self.tunnel_id_counter.fetch_add(1, Ordering::SeqCst);
+        // tunnel_id = (server_id << 32) | counter でグローバルユニークに
+        let tunnel_id = ((server_id as u64) << 32) | (counter as u64);
+
         let bytes_sent = Arc::new(AtomicU64::new(0));
         let bytes_received = Arc::new(AtomicU64::new(0));
         let now = SystemTime::now()
@@ -775,6 +793,9 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
         "Generated random dp_id={:#06x} for eBPF routing",
         server_id
     );
+
+    // server_id を DataPlane に設定（tunnel_id 生成に使用）
+    data_plane.set_server_id(server_id);
 
     // 認証ポリシーと設定を適用
     data_plane.set_auth_policy(auth_policy).await;
