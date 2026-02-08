@@ -69,7 +69,7 @@ quicport control-plane --control-plane-addr <cp_address>:<port> --data-plane-add
 | `--data-plane-addr` | No | データプレーン QUIC リッスンアドレスとポート（デフォルト: `0.0.0.0:39000`） |
 | `--private-api-listen` | No | Private API サーバーのアドレスとポート（デフォルト: `127.0.0.1:<listen_port>`） |
 | `--no-public-api` | No | Public API サーバーを無効化 |
-| `--no-auto-dataplane` | No | データプレーンを自動起動しない（systemd-run 等で別途起動する場合に使用） |
+| `--no-auto-dataplane` | No | データプレーンを自動起動しない（手動で別途起動する場合に使用） |
 | `--privkey` | Yes** | サーバーの秘密鍵（Base64 形式、相互認証用）。環境変数 `QUICPORT_PRIVKEY` でも指定可 |
 | `--privkey-file` | Yes** | サーバーの秘密鍵ファイルパス。環境変数 `QUICPORT_PRIVKEY_FILE` でも指定可 |
 | `--client-pubkeys` | Yes* | 認可するクライアントの公開鍵（Base64 形式）。複数指定はカンマ区切り。環境変数 `QUICPORT_CLIENT_PUBKEYS` でも指定可 |
@@ -382,44 +382,45 @@ ID              PID        State        Connections  Bytes Sent      Bytes Recei
 
 quicport はサーバー再起動時の接続維持を実現するため、データプレーンとコントロールプレーンを分離したアーキテクチャを採用しています。
 
-#### cgroup 分離アーキテクチャ
+#### KillMode=process による分離アーキテクチャ
 
-コントロールプレーン (cp) とデータプレーン (dp) は **異なる cgroup** で動作します。
+コントロールプレーン (cp) とデータプレーン (dp) は同一 cgroup 内で動作しますが、
+`KillMode=process` により systemd は CP のみに SIGTERM を送信します。
 これにより、cp が終了しても dp は独立して動作を継続できます。
 
 ```
 +------------------------------------------------------------------+
 | systemd (quicport.service)                                       |
-|   └─ ExecStart: /path/to/quicport.sh                             |
+|   └─ ExecStart: /usr/local/bin/quicport-starter                  |
 +------------------------------------------------------------------+
                           |
                           v
 +------------------------------------------------------------------+
-| quicport.sh (シェルスクリプト)                                     |
-|   1. systemd-run で data-plane を別 cgroup に起動                 |
-|   2. exec で control-plane に置き換わる（PID 引き継ぎ）            |
+| quicport-starter (シェルスクリプト)                                 |
+|   exec で control-plane に置き換わる（PID 引き継ぎ）                |
 +------------------------------------------------------------------+
-          |                                   |
-          v                                   v
-+------------------------+    +------------------------------------+
-| cgroup A (systemd)     |    | cgroup B (systemd-run)             |
-| +--------------------+ |    | +--------------------------------+ |
-| | Control Plane      | |    | | Data Plane                     | |
-| | (quicport cp)      |<-----| | (quicport dp)                  | |
-| |                    | |    | |                                | |
-| | - 認証ポリシー管理  | |    | | - QUIC 終端                     | |
-| | - API サーバー     | |    | | - 認証実行                      | |
-| | - dp の管理        | |    | | - データ転送                    | |
-| +--------------------+ |    | | - SO_REUSEPORT で LISTEN       | |
-+------------------------+    | +--------------------------------+ |
-                              +------------------------------------+
+                          |
+                          v
++------------------------------------------------------------------+
+| systemd cgroup (quicport.service)                                |
+| KillMode=process → SIGTERM は CP のみに送信                       |
+|                                                                  |
+| +--------------------+    +------------------------------------+ |
+| | Control Plane      |    | Data Plane (子プロセス)             | |
+| | (quicport cp)      |<-->| (quicport dp)                      | |
+| |                    |    |                                    | |
+| | - 認証ポリシー管理  |    | - QUIC 終端                         | |
+| | - API サーバー     |    | - 認証実行                          | |
+| | - dp の管理        |    | - データ転送                        | |
+| +--------------------+    | - SO_REUSEPORT で LISTEN           | |
+|                           +------------------------------------+ |
++------------------------------------------------------------------+
 ```
 
 **プラットフォーム非依存設計:**
 
-- quicport バイナリ自体はプラットフォーム固有の機能（systemd-run, cgroup 等）に依存しない
-- プラットフォーム依存の部分はシェルスクリプトに切り出す
-- **Linux (systemd)**: `quicport.sh` で systemd-run を使用した cgroup 分離
+- quicport バイナリ自体はプラットフォーム固有の機能に依存しない
+- **Linux (systemd)**: `KillMode=process` + CP による DP 自動起動。`quicport-starter` で CP を exec 起動
 - **UNIX (非 systemd)**: control-plane が data-plane を自動起動（setsid で独立セッション化）。graceful restart は eBPF 非対応のため非サポート
 - **Windows**: 自動起動は未サポート。手動で cp と dp を別々に起動
 
@@ -427,7 +428,7 @@ quicport はサーバー再起動時の接続維持を実現するため、デ�
 
 | コンポーネント | 責務 |
 |--------------|------|
-| **シェルスクリプト** | systemd-run での dp 起動、exec での cp 起動 |
+| **シェルスクリプト** | exec での cp 起動、環境変数の設定 |
 | **コントロールプレーン** | 認証ポリシー管理、API サーバー、HTTP IPC での dp 管理 |
 | **データプレーン** | QUIC 終端、クライアント認証、TCP/UDP 接続維持、データ転送 |
 
@@ -439,15 +440,8 @@ quicport はサーバー再起動時の接続維持を実現するため、デ�
 # 設定例:
 #   QUICPORT_DP_ADDR=0.0.0.0:39000       # DP QUIC リッスンアドレス
 #   QUICPORT_CP_ADDR=127.0.0.1:39000      # CP HTTP IPC アドレス
-#   QUICPORT_CP_URL=http://127.0.0.1:39000
 
-# 1. データプレーンを別 cgroup で起動（HTTP IPC モード）
-systemd-run --slice=user.slice --unit="quicport-dp-$$.service" \
-  quicport data-plane \
-    --data-plane-addr "${QUICPORT_DP_ADDR}" \
-    --control-plane-url "${QUICPORT_CP_URL}"
-
-# 2. コントロールプレーンを起動（PID を引き継ぎ）
+# control-plane を起動（DP は CP が子プロセスとして自動起動）
 exec quicport control-plane \
   --control-plane-addr "${QUICPORT_CP_ADDR}" \
   --data-plane-addr "${QUICPORT_DP_ADDR}" \
@@ -492,35 +486,30 @@ control-plane                           data-plane (子プロセス)
 #### 起動シーケンス
 
 ```
-systemd                quicport.sh              data-plane              control-plane
+systemd                quicport-starter         control-plane            data-plane
    |                        |                        |                        |
    |-- ExecStart ---------->|                        |                        |
-   |                        |                        |                        |
-   |                        |-- systemd-run -------->|                        |
-   |                        |   (別 cgroup で起動)    |                        |
-   |                        |                        |                        |
-   |                        |                        |-- cp への接続をリトライ -->|
-   |                        |                        |   (cp 起動待ち)          |
    |                        |                        |                        |
    |                        |-- exec --------------->|                        |
    |                        |   (PID 引き継ぎ)        |                        |
    |                        |                        |                        |
    |<-- systemd は cp を追跡 -------------------------|                        |
    |                        |                        |                        |
-   |                        |                        |<-- 接続成功 -------------|
+   |                        |                        |-- dp を子プロセスで起動 ->|
    |                        |                        |                        |
-   |                        |                        |-- ACTIVE 状態に遷移 ---->|
+   |                        |                        |<-- HTTP IPC で登録 ------|
    |                        |                        |                        |
-   |                        |                        |-- SO_REUSEPORT で LISTEN |
+   |                        |                        |                        |-- ACTIVE 状態に遷移
+   |                        |                        |                        |
+   |                        |                        |                        |-- SO_REUSEPORT で LISTEN
    |                        |                        |                        |
 ```
 
-1. systemd が `quicport.sh` を起動
-2. シェルスクリプトが `systemd-run` で dp を別 cgroup に起動
-3. dp は cp への接続を試行（cp 起動まで接続リトライ）
-4. シェルスクリプトが `exec` で cp に置き換わる（systemd から直接 cp が見える）
-5. dp が cp への接続に成功し、ACTIVE 状態に遷移
-6. dp が SO_REUSEPORT で QUIC ポートを LISTEN 開始
+1. systemd が `quicport-starter` を起動
+2. シェルスクリプトが `exec` で cp に置き換わる（systemd から直接 cp が見える）
+3. cp が dp を子プロセスとして自動起動
+4. dp が cp への HTTP IPC 接続に成功し、ACTIVE 状態に遷移
+5. dp が SO_REUSEPORT で QUIC ポートを LISTEN 開始
 
 #### 終了シーケンス（graceful shutdown）
 
@@ -543,7 +532,7 @@ systemd                control-plane            data-plane
    |<-- cp 終了を検知 -------|                        |
    |                        |                        |
    |                        |                        |-- 既存トンネル処理継続
-   |                        |                        |   (別 cgroup なので独立動作)
+   |                        |                        |   (KillMode=process により SIGTERM は CP のみ)
    |                        |                        |
    |                        |                        |-- 全トンネル終了
    |                        |                        |-- または drain_timeout 経過
@@ -560,7 +549,7 @@ systemd                control-plane            data-plane
 3. cp は dp がコマンドを受信するまで待機（最大 5 秒）
 4. dp が新規接続の受付を停止し、DRAINING 状態に遷移
 5. cp がプロセス終了
-6. dp は別 cgroup で独立して動作を継続
+6. dp は KillMode=process により SIGTERM を受けず、独立して動作を継続
 7. dp は既存トンネルをすべて処理完了（または drain_timeout 経過）後、TERMINATED 状態を SendStatus で CP に明示的に通知してから終了
 
 **DRAINING 状態での動作:**

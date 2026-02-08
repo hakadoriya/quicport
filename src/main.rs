@@ -61,7 +61,7 @@ enum Commands {
     /// Run as data plane (QUIC tunnel handler)
     ///
     /// This command is typically invoked by the control plane (quicport control-plane) or
-    /// by quicport.sh script for cgroup separation.
+    /// by quicport-starter script (via exec).
     /// The data plane handles QUIC tunnels and maintains backend TCP connections.
     /// It operates independently of the control plane after startup.
     DataPlane {
@@ -173,7 +173,7 @@ enum Commands {
         private_api_listen: Option<SocketAddr>,
 
         /// Do not automatically start a data-plane process.
-        /// Use this when data-plane is started separately (e.g., via systemd-run)
+        /// Use this when data-plane is started separately (e.g., manually)
         #[arg(long, default_value = "false")]
         no_auto_dataplane: bool,
 

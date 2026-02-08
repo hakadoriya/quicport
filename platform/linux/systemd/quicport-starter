@@ -60,7 +60,7 @@ if [[ -n "${QUICPORT_CLIENT_PUBKEYS_FILE:-}" ]]; then
   QUICPORT_AUTH_ARGS+=("--client-pubkeys-file" "${QUICPORT_CLIENT_PUBKEYS_FILE}")
 fi
 
-LogshInfoJSON "[${PROGRAM_NAME}] Starting data-plane in separate cgroup..."
+LogshInfoJSON "[${PROGRAM_NAME}] Starting quicport..."
 LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_BIN=${QUICPORT_BIN}"
 LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_CP_ADDR=${QUICPORT_CP_ADDR}"
 LogshInfoJSON "[${PROGRAM_NAME}] QUICPORT_DP_ADDR=${QUICPORT_DP_ADDR}"

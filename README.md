@@ -242,7 +242,7 @@ Example is available in [`platform/linux/systemd/quicport.service`](platform/lin
 
 **Why not `systemctl restart`?**
 
-systemd manages processes by **cgroup**. When a service stops, all processes in its cgroup are terminated. This includes data-plane processes that maintain active connections. Unlike sshd (where `systemd-logind` moves SSH sessions to a separate cgroup), quicport data-planes remain in the service's cgroup.
+The quicport systemd service uses `KillMode=process`, which sends SIGTERM only to the main process (control-plane). Data-plane child processes are not affected and continue serving existing connections. However, `systemctl restart` would still disrupt the startup sequence.
 
 The solution: Use `systemctl reload` for graceful restarts. This triggers `ExecReload` which sends DRAIN commands to existing data-planes while starting new ones. Data-planes continue serving existing connections until they naturally close.
 

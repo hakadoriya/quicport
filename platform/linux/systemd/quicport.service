@@ -6,8 +6,8 @@ Wants=network-online.target
 
 [Service]
 Type=exec
-# NOTE: systemd-run --scope を使用するため root で実行
-# data-plane を別 cgroup に起動するには root 権限が必要
+# NOTE: KillMode=process により SIGTERM は CP (メインプロセス) のみに送信される
+# DP (子プロセス) は影響を受けず、既存接続を処理し続ける
 ## Create a group and user for the service
 ## $ sudo groupadd --system quicport
 ## $ sudo useradd --system --gid quicport --shell /usr/sbin/nologin --create-home --home-dir /var/lib/quicport --comment "quicport service user" quicport
@@ -24,12 +24,12 @@ Type=exec
 ## NOTE: BPF ファイルシステムへのアクセス (eBPF マップのピン留め用)
 #ReadWritePaths=/sys/fs/bpf
 
-# NOTE: cgroup 分離アーキテクチャ
-# quicport-starter は以下を行います:
-# 1. data-plane を systemd-run --scope で別 cgroup に起動
-# 2. control-plane に exec で置き換わる
-# これにより systemctl restart 時に:
-# - cp のみ再起動され、旧 dp は DRAINING 状態で継続（既存接続を処理）
+# NOTE: KillMode=process によるプロセス分離
+# quicport-starter は exec で control-plane に置き換わり、
+# control-plane が data-plane を子プロセスとして自動起動する。
+# KillMode=process により systemctl reload 時に:
+# - SIGTERM は cp (メインプロセス) のみに送信
+# - 旧 dp は DRAINING 状態で継続（既存接続を処理）
 # - 新しい cp + dp が起動
 # - graceful restart が実現
 ExecStart=/usr/local/bin/quicport-starter
