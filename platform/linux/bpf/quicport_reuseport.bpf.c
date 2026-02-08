@@ -145,23 +145,24 @@ is_udp_header(void *data, void *data_end, __u32 ctx_len)
     /*
      * Layer 3: Fixed Bit がセットされていて、bytes[4-5] == ctx_len（曖昧なケース）
      *
-     * この状況は 2 通りの解釈が可能:
-     *   A) UDP ヘッダーで、source port の上位バイトが 0x40 以上
-     *      -> bytes[8] は QUIC ペイロードの先頭（Fixed Bit あり）
-     *   B) QUIC ペイロードで、CID 内のバイトが偶然 ctx_len と一致
-     *      -> bytes[8] は CID の一部（Fixed Bit がある保証なし）
+     * bytes[0] に Fixed Bit があり、かつ bytes[4-5] が ctx_len と一致する場合:
+     *   A) UDP ヘッダー: source port 上位バイトが 0x40 以上で、length フィールドが一致
+     *   B) QUIC ペイロード: CID 内バイトが偶然 ctx_len と一致
      *
-     * bytes[8] に Fixed Bit がセットされていれば解釈 A（UDP ヘッダー）を採用。
+     * 解釈 B の確率は実用上無視できるほど低い（< 1/65536）ため、
+     * UDP ヘッダーと判定する。
+     *
+     * 誤検出リスク分析:
+     *   - QUIC Short Header: bytes[4-5] は CID[3..4]、ctx_len と一致する確率 ≈ 1/65536
+     *   - QUIC v1 Long Header: bytes[4-5] = 0x0108 → ctx_len=264 のときのみ。
+     *     QUIC Initial は ≥1200 bytes にパディングされるため事実上発生しない
+     *   - QUIC v2 Long Header: bytes[4-5] = 0xcf08 → ctx_len=53000 → UDP では発生しない
+     *
+     * NOTE: 以前は bytes[8]（想定 QUIC 先頭バイト）の Fixed Bit で判定していたが、
+     * RFC 9287 "Greasing the Fixed Bit" により QUIC パケットの Fixed Bit が
+     * クリアされることがあるため、この判定は信頼できない。
      */
-    if (data + UDP_HEADER_LEN + 1 > data_end) {
-        /*
-         * bytes[8] が読めない場合、UDP length の一致だけで判定する。
-         * パケットが極端に短い場合のフォールバック。
-         */
-        return 1;
-    }
-
-    return (bytes[UDP_HEADER_LEN] & QUIC_FLAGS_FIXED_BIT) ? 1 : 0;
+    return 1;
 }
 
 /*
