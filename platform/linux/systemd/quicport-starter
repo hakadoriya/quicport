@@ -1,20 +1,5 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-# =============================================================================
-# quicport-starter - systemd cgroup isolation architecture startup script
-#
-# This script is called from systemd and performs the following:
-# 1. Starts the data-plane in a separate cgroup using systemd-run
-# 2. Replaces the control-plane with exec
-#
-# This ensures:
-# - control-plane and data-plane run in different cgroups
-# - systemctl restart only restarts the control-plane, leaving data-plane running
-# - graceful restart is possible
-#
-# Note: systemd-run --scope requires root privileges.
-#       The systemd service must be run as root.
-# =============================================================================
 
 export PATH="${PATH:-}${PATH:+:}~/.cargo/bin:~/bin:~/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 
