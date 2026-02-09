@@ -320,14 +320,12 @@ impl DataPlane {
         &self,
         connection: quinn::Connection,
         forwarding_mode: &str,
-    ) -> (u64, Arc<AtomicU64>, Arc<AtomicU64>) {
+    ) -> u64 {
         let server_id = self.server_id.load(Ordering::SeqCst);
         let counter = self.tunnel_id_counter.fetch_add(1, Ordering::SeqCst);
         // tunnel_id = (server_id << 32) | counter でグローバルユニークに
         let tunnel_id = ((server_id as u64) << 32) | (counter as u64);
 
-        let bytes_sent = Arc::new(AtomicU64::new(0));
-        let bytes_received = Arc::new(AtomicU64::new(0));
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -340,12 +338,12 @@ impl DataPlane {
                 forwarding_mode: forwarding_mode.to_string(),
                 started_at: now,
                 connection_ids: HashSet::new(),
-                bytes_sent: bytes_sent.clone(),
-                bytes_received: bytes_received.clone(),
+                bytes_sent: Arc::new(AtomicU64::new(0)),
+                bytes_received: Arc::new(AtomicU64::new(0)),
             },
         );
 
-        (tunnel_id, bytes_sent, bytes_received)
+        tunnel_id
     }
 
     /// トンネルを登録解除
@@ -360,10 +358,29 @@ impl DataPlane {
         }
     }
 
-    /// 接続のトンネル紐付けを解除
+    /// 接続のトンネル紐付けを解除し、接続のバイトカウンターをトンネルの累計に加算する。
+    ///
+    /// この関数は `unregister_connection()` より先に呼ばれるため、
+    /// `connection_list` にはまだ接続情報が残っている。
     pub async fn remove_connection_from_tunnel(&self, tunnel_id: u64, connection_id: u32) {
+        // 接続のバイトカウンターを読み取り（まだ connection_list に存在する）
+        let (sent, received) = {
+            let connections = self.connection_list.read().await;
+            connections
+                .get(&connection_id)
+                .map_or((0, 0), |conn| {
+                    (
+                        conn.bytes_sent.load(Ordering::Relaxed),
+                        conn.bytes_received.load(Ordering::Relaxed),
+                    )
+                })
+        };
+
+        // トンネルの累計カウンターに加算し、接続 ID を除去
         if let Some(tunnel) = self.tunnel_list.write().await.get_mut(&tunnel_id) {
             tunnel.connection_ids.remove(&connection_id);
+            tunnel.bytes_sent.fetch_add(sent, Ordering::Relaxed);
+            tunnel.bytes_received.fetch_add(received, Ordering::Relaxed);
         }
     }
 
@@ -371,19 +388,38 @@ impl DataPlane {
     ///
     /// `remote_addr` は Connection から動的に取得するため、
     /// クライアントの IP アドレス変更（Connection Migration）に追従します。
+    ///
+    /// バイトカウンターは以下の 2 つを合算して返す:
+    /// - `TrackedTunnel.bytes_sent/bytes_received`: 閉じた接続の累計
+    /// - アクティブ接続の現在値: `connection_list` から動的に集計
     pub async fn get_tunnels(&self) -> Vec<TunnelInfo> {
+        let connections = self.connection_list.read().await;
         self.tunnel_list
             .read()
             .await
             .iter()
-            .map(|(id, tracked)| TunnelInfo {
-                tunnel_id: *id,
-                remote_addr: tracked.connection.remote_address().to_string(),
-                forwarding_mode: tracked.forwarding_mode.clone(),
-                started_at: tracked.started_at,
-                active_connections: tracked.connection_ids.len() as u32,
-                bytes_sent: tracked.bytes_sent.load(Ordering::Relaxed),
-                bytes_received: tracked.bytes_received.load(Ordering::Relaxed),
+            .map(|(id, tracked)| {
+                // アクティブ接続のバイトを合算
+                let (active_sent, active_received) =
+                    tracked.connection_ids.iter().filter_map(|cid| connections.get(cid)).fold(
+                        (0u64, 0u64),
+                        |(sent, recv), conn| {
+                            (
+                                sent + conn.bytes_sent.load(Ordering::Relaxed),
+                                recv + conn.bytes_received.load(Ordering::Relaxed),
+                            )
+                        },
+                    );
+
+                TunnelInfo {
+                    tunnel_id: *id,
+                    remote_addr: tracked.connection.remote_address().to_string(),
+                    forwarding_mode: tracked.forwarding_mode.clone(),
+                    started_at: tracked.started_at,
+                    active_connections: tracked.connection_ids.len() as u32,
+                    bytes_sent: tracked.bytes_sent.load(Ordering::Relaxed) + active_sent,
+                    bytes_received: tracked.bytes_received.load(Ordering::Relaxed) + active_received,
+                }
             })
             .collect()
     }
@@ -1503,8 +1539,7 @@ async fn handle_quic_tunnel(data_plane: Arc<DataPlane>, tunnel: Connection) -> R
             );
 
             // トンネルを登録（Connection を保持して Connection Migration に対応）
-            let (tunnel_id, _tunnel_bytes_sent, _tunnel_bytes_received) =
-                data_plane.register_tunnel(tunnel.clone(), "RPF").await;
+            let tunnel_id = data_plane.register_tunnel(tunnel.clone(), "RPF").await;
 
             let result = handle_remote_forward(
                 port,
@@ -1532,8 +1567,7 @@ async fn handle_quic_tunnel(data_plane: Arc<DataPlane>, tunnel: Connection) -> R
             );
 
             // トンネルを登録（Connection を保持して Connection Migration に対応）
-            let (tunnel_id, _tunnel_bytes_sent, _tunnel_bytes_received) =
-                data_plane.register_tunnel(tunnel.clone(), "LPF").await;
+            let tunnel_id = data_plane.register_tunnel(tunnel.clone(), "LPF").await;
 
             let result = handle_local_forward(
                 tunnel,
