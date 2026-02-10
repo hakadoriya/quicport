@@ -1,0 +1,9 @@
+/var/log/quicport/quicport.log {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

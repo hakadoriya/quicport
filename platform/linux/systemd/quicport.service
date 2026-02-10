@@ -46,7 +46,9 @@ RestartSec=5
 # NOTE: Log settings
 # Create a log directory
 # $ sudo mkdir -m 755 -p /var/log/quicport
-# $ sudo chown quicport:quicport /var/log/quicport
+# $ sudo chown -R quicport:quicport /var/log/quicport
+# Install logrotate config
+# $ sudo cp -a platform/linux/logrotate/quicport /etc/logrotate.d/quicport
 StandardOutput=append:/var/log/quicport/quicport.log
 StandardError=inherit
 SyslogIdentifier=quicport
