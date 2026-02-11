@@ -13,7 +13,7 @@
 //!
 //! | メソッド | 説明 | 方向 |
 //! |----------|------|------|
-//! | `POST /api/v1/ipc/SendStatus` | 状態送信（登録・更新・応答すべて統合） | DP → CP |
+//! | `POST /api/v1/ipc/UpsertStatus` | 状態送信（登録・更新・応答すべて統合） | DP → CP |
 //! | `POST /api/v1/ipc/ReceiveCommand` | コマンド受信（長ポーリング） | CP → DP |
 //!
 //! #### 管理用 API (`/api/v1/admin/*`)
@@ -41,7 +41,7 @@ use thiserror::Error;
 /// IPC 用 API パス
 pub mod api_paths {
     // DP → CP（データプレーン用）
-    pub const SEND_STATUS: &str = "/api/v1/ipc/SendStatus";
+    pub const UPSERT_STATUS: &str = "/api/v1/ipc/UpsertStatus";
     pub const RECEIVE_COMMAND: &str = "/api/v1/ipc/ReceiveCommand";
 
     // CLI/外部 → CP（管理用）
@@ -132,7 +132,7 @@ pub struct TunnelInfo {
 // HTTP IPC リクエスト/レスポンス型（DP 用 API）
 // =============================================================================
 
-/// SendStatus リクエスト (DP → CP)
+/// UpsertStatus リクエスト (DP → CP)
 ///
 /// 状態送信（登録・更新・コマンド応答すべて統合）
 /// 毎回全状態を冪等に送信することで、CP 再起動後も状態を復旧可能
@@ -140,7 +140,7 @@ pub struct TunnelInfo {
 /// - 初回呼び出し: DP 登録
 /// - 以降の呼び出し: 状態更新 + コマンド応答
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SendStatusRequest {
+pub struct UpsertStatusRequest {
     // ========== DP 識別情報 ==========
     /// Data Plane ID（eBPF ルーティング用、16 進数文字列 "0x0001" 形式）
     /// 重複時は 409 Conflict エラーが返る
@@ -179,9 +179,9 @@ pub struct SendStatusRequest {
     pub connections: Option<Vec<ConnectionInfo>>,
 }
 
-/// SendStatus レスポンス (CP → DP)
+/// UpsertStatus レスポンス (CP → DP)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SendStatusResponse {
+pub struct UpsertStatusResponse {
     /// Data Plane ID（server_id から生成、初回登録時に割り当て）
     pub dp_id: String,
     /// 認証ポリシー（初回登録時または更新時のみ Some）
@@ -442,7 +442,7 @@ pub struct DataPlaneConfig {
     ///
     /// CP のバックグラウンドタスクが DP の `last_active` をチェックし、
     /// この値を超過した DP を応答不能と判定して eBPF map エントリを削除する。
-    /// SendStatus の送信間隔（デフォルト 1 秒）より十分大きくする必要がある。
+    /// UpsertStatus の送信間隔（デフォルト 1 秒）より十分大きくする必要がある。
     #[serde(default = "default_unresponsive_dp_timeout")]
     pub unresponsive_dp_timeout: u64,
 
@@ -558,8 +558,8 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_send_status_request() {
-        let req = SendStatusRequest {
+    fn test_serialize_upsert_status_request() {
+        let req = UpsertStatusRequest {
             dp_id: "0x1234".to_string(),
             pid: 12345,
             listen_addr: "0.0.0.0:39000".to_string(),

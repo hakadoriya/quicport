@@ -29,7 +29,7 @@ use tracing::{debug, error, info, warn, Instrument};
 
 use crate::ipc::{
     AuthPolicy, CommandWithId, ControlCommand, DataPlaneConfig, DataPlaneState, DataPlaneStatus,
-    ReceiveCommandRequest, ReceiveCommandResponse, SendStatusRequest, SendStatusResponse,
+    ReceiveCommandRequest, ReceiveCommandResponse, UpsertStatusRequest, UpsertStatusResponse,
     TunnelInfo,
 };
 use crate::protocol::{
@@ -469,7 +469,7 @@ impl HttpIpcClient {
     ///
     /// # Arguments
     /// * `dp_id_u32` - Data Plane ID（eBPF ルーティング用 u32 値）
-    pub async fn send_status(
+    pub async fn upsert_status(
         &mut self,
         dp_id_u32: u32,
         pid: u32,
@@ -479,11 +479,11 @@ impl HttpIpcClient {
         ack_status: Option<&str>,
         tunnels: Option<Vec<TunnelInfo>>,
         connections: Option<Vec<crate::ipc::ConnectionInfo>>,
-    ) -> anyhow::Result<SendStatusResponse> {
-        let url = format!("{}{}", self.base_url, crate::ipc::api_paths::SEND_STATUS);
+    ) -> anyhow::Result<UpsertStatusResponse> {
+        let url = format!("{}{}", self.base_url, crate::ipc::api_paths::UPSERT_STATUS);
         // dp_id を 16 進数文字列にフォーマット（eBPF デバッグとの一貫性のため）
         let dp_id_hex = format!("{:#06x}", dp_id_u32);
-        let request = SendStatusRequest {
+        let request = UpsertStatusRequest {
             dp_id: dp_id_hex.clone(),
             pid,
             listen_addr: listen_addr.to_string(),
@@ -499,7 +499,7 @@ impl HttpIpcClient {
         };
 
         debug!(
-            "SendStatus: url={}, dp_id={}, state={:?}",
+            "UpsertStatus: url={}, dp_id={}, state={:?}",
             url, dp_id_hex, status.state
         );
 
@@ -509,7 +509,7 @@ impl HttpIpcClient {
             .json(&request)
             .send()
             .await
-            .context("Failed to send SendStatus request")?;
+            .context("Failed to send UpsertStatus request")?;
 
         let status_code = response.status();
         if !status_code.is_success() {
@@ -522,16 +522,16 @@ impl HttpIpcClient {
                 ));
             }
             return Err(anyhow::anyhow!(
-                "SendStatus failed: status={}, body={}",
+                "UpsertStatus failed: status={}, body={}",
                 status_code,
                 text
             ));
         }
 
-        let resp: SendStatusResponse = response
+        let resp: UpsertStatusResponse = response
             .json()
             .await
-            .context("Failed to parse SendStatus response")?;
+            .context("Failed to parse UpsertStatus response")?;
 
         // dp_id を保存（初回登録時）
         if self.dp_id.is_none() {
@@ -741,7 +741,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     let mut cp_connect_retries = 0;
 
     // コントロールプレーンに登録（server_id 重複時はリトライ）
-    // SendStatus で初回登録を行い、auth_policy と config を取得
+    // UpsertStatus で初回登録を行い、auth_policy と config を取得
     let (auth_policy, dp_config) = loop {
         // 初期状態を作成
         let initial_status = DataPlaneStatus {
@@ -754,7 +754,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
         };
 
         match http_client
-            .send_status(
+            .upsert_status(
                 server_id,
                 pid,
                 &config.listen_addr.to_string(),
@@ -778,7 +778,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                     }
                     _ => {
                         return Err(anyhow::anyhow!(
-                            "SendStatus response missing auth_policy or config on initial registration"
+                            "UpsertStatus response missing auth_policy or config on initial registration"
                         ));
                     }
                 }
@@ -1058,7 +1058,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     let drain_timeout = data_plane.get_config().await.drain_timeout;
 
     // HTTP IPC タスク
-    // - 状態送信タスク: 1 秒間隔で SendStatus を呼び出し、状態を同期
+    // - 状態送信タスク: 1 秒間隔で UpsertStatus を呼び出し、状態を同期
     // - コマンド受信タスク: ReceiveCommand で長ポーリング
     let dp_for_ipc = data_plane.clone();
     let http_client = std::sync::Arc::new(tokio::sync::Mutex::new(http_client));
@@ -1103,7 +1103,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
 
             let mut client = http_client_for_status.lock().await;
             match client
-                .send_status(
+                .upsert_status(
                     server_id_for_ipc,
                     dp_for_status.pid,
                     &config_for_status_task.listen_addr.to_string(),
@@ -1119,11 +1119,11 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                     // auth_policy や config が更新された場合は適用
                     if let Some(auth_policy) = resp.auth_policy {
                         dp_for_status.set_auth_policy(auth_policy).await;
-                        info!("Authentication policy updated via SendStatus");
+                        info!("Authentication policy updated via UpsertStatus");
                     }
                     if let Some(dp_config) = resp.config {
                         dp_for_status.set_config(dp_config).await;
-                        info!("Configuration updated via SendStatus");
+                        info!("Configuration updated via UpsertStatus");
                     }
                 }
                 Err(e) => {
@@ -1136,17 +1136,20 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                             "Registration lost (state={:?}), attempting re-registration...",
                             current_state
                         );
+                        // 再登録時にもトンネル・接続情報を送信する（CP 側で冪等に適用される）
+                        let re_tunnels = Some(dp_for_status.get_tunnels().await);
+                        let re_connections = Some(dp_for_status.get_connections().await);
                         client.reset_registration();
                         match client
-                            .send_status(
+                            .upsert_status(
                                 server_id_for_ipc,
                                 dp_for_status.pid,
                                 &config_for_status_task.listen_addr.to_string(),
                                 &status,
                                 None,
                                 None,
-                                None,
-                                None,
+                                re_tunnels,
+                                re_connections,
                             )
                             .await
                         {
@@ -1169,7 +1172,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                     } else if err_str.contains("connect") || err_str.contains("Connection refused") {
                         debug!("Connection error sending status: {}", e);
                     } else {
-                        debug!("SendStatus error: {}", e);
+                        debug!("UpsertStatus error: {}", e);
                     }
                 }
             }
@@ -1193,7 +1196,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
             }
 
             // NOTE: receive_command は長ポーリング（最大 30 秒待機）するため、
-            //       Mutex ロックを保持したまま await すると SendStatus タスクが
+            //       Mutex ロックを保持したまま await すると UpsertStatus タスクが
             //       ロック取得待ちでブロックされてしまう。
             //       そのため、必要な情報をロック内でクローンしてからロックを解放し、
             //       ロック外で HTTP リクエストを実行する。
@@ -1232,7 +1235,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
                 debug!("Received command: id={}, {:?}", cmd.id, cmd.command);
                 process_ipc_command(&dp_for_cmd, cmd.command.clone(), server_id_for_cmd).await;
 
-                // コマンド応答を保留リストに追加（次回の SendStatus で送信）
+                // コマンド応答を保留リストに追加（次回の UpsertStatus で送信）
                 {
                     let mut acks = pending_acks_for_cmd.lock().await;
                     acks.push((cmd.id.clone(), "completed".to_string()));
@@ -1366,13 +1369,13 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
     // 終了処理
     data_plane.set_state(DataPlaneState::Terminated).await;
 
-    // CP に TERMINATED 状態を通知（最終 SendStatus）
-    // NOTE: SendStatus タスクは tokio::spawn で独立動作しているため、プロセス終了が先に来ると
+    // CP に TERMINATED 状態を通知（最終 UpsertStatus）
+    // NOTE: UpsertStatus タスクは tokio::spawn で独立動作しているため、プロセス終了が先に来ると
     //       TERMINATED 状態が送信されない。そのため、ここで明示的に 1 回送信する。
     if let Ok(status) = data_plane.get_status().await {
         let mut client = http_client.lock().await;
         if let Err(e) = client
-            .send_status(
+            .upsert_status(
                 server_id,
                 data_plane.pid,
                 &config.listen_addr.to_string(),
@@ -1398,7 +1401,7 @@ pub async fn run(config: DataPlaneConfig, cp_url: &str) -> Result<()> {
 /// IPC コマンドを処理
 ///
 /// コマンドを実行し、必要な副作用（状態変更など）を適用する。
-/// 結果は次回の SendStatus で送信されるため、戻り値は不要。
+/// 結果は次回の UpsertStatus で送信されるため、戻り値は不要。
 async fn process_ipc_command(data_plane: &DataPlane, cmd: ControlCommand, server_id: u32) {
     match cmd {
         ControlCommand::SetAuthPolicy(policy) => {
@@ -1422,18 +1425,18 @@ async fn process_ipc_command(data_plane: &DataPlane, cmd: ControlCommand, server
         }
 
         ControlCommand::GetStatus => {
-            // 状態は次回の SendStatus で自動的に送信される
-            debug!("GetStatus command received (status will be sent via SendStatus)");
+            // 状態は次回の UpsertStatus で自動的に送信される
+            debug!("GetStatus command received (status will be sent via UpsertStatus)");
         }
 
         ControlCommand::GetConnections => {
-            // 接続情報は定期 SendStatus で自動的に送信される
+            // 接続情報は定期 UpsertStatus で自動的に送信される
             let connections = data_plane.get_connections().await;
             debug!("GetConnections command received: {} connections", connections.len());
         }
 
         ControlCommand::GetTunnels => {
-            // トンネル情報は定期 SendStatus で自動的に送信される
+            // トンネル情報は定期 UpsertStatus で自動的に送信される
             let tunnels = data_plane.get_tunnels().await;
             debug!("GetTunnels command received: {} tunnels", tunnels.len());
         }

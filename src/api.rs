@@ -13,7 +13,7 @@
 //!
 //! | メソッド | 説明 | 方向 |
 //! |----------|------|------|
-//! | `POST /api/v1/ipc/SendStatus` | 状態送信（登録・更新・応答すべて統合） | DP → CP |
+//! | `POST /api/v1/ipc/UpsertStatus` | 状態送信（登録・更新・応答すべて統合） | DP → CP |
 //! | `POST /api/v1/ipc/ReceiveCommand` | コマンド受信（長ポーリング） | CP → DP |
 //!
 //! #### 管理用 API (`/api/v1/admin/*`)
@@ -55,8 +55,8 @@ use crate::ipc::{
     DrainDataPlaneResponse, ErrorResponse, GetConnectionsRequest, GetConnectionsResponse,
     GetDataPlaneStatusRequest, ListConnectionsRequest,
     ListConnectionsResponse, ListDataPlanesRequest, ListDataPlanesResponse, ListTunnelsRequest,
-    ListTunnelsResponse, ReceiveCommandRequest, ReceiveCommandResponse, SendStatusRequest,
-    SendStatusResponse, ShutdownDataPlaneRequest, ShutdownDataPlaneResponse,
+    ListTunnelsResponse, ReceiveCommandRequest, ReceiveCommandResponse, UpsertStatusRequest,
+    UpsertStatusResponse, ShutdownDataPlaneRequest, ShutdownDataPlaneResponse,
     TunnelInfoWithDpId,
 };
 use crate::statistics::ServerStatistics;
@@ -107,16 +107,16 @@ async fn metrics(State(state): State<PrivateApiState>) -> impl IntoResponse {
 // HTTP IPC ハンドラー（DP 用 API）
 // =============================================================================
 
-/// POST /api/v1/ipc/SendStatus
+/// POST /api/v1/ipc/UpsertStatus
 ///
 /// 状態送信（登録・更新・コマンド応答すべて統合）
 /// 毎回全状態を冪等に送信することで、CP 再起動後も状態を復旧可能
 ///
 /// - 初回呼び出し: DP 登録（dp_id が割り当てられ、auth_policy と config が返る）
 /// - 以降の呼び出し: 状態更新のみ（auth_policy と config は None）
-async fn send_status(
+async fn upsert_status(
     State(state): State<PrivateApiState>,
-    Json(req): Json<SendStatusRequest>,
+    Json(req): Json<UpsertStatusRequest>,
 ) -> impl IntoResponse {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -127,7 +127,7 @@ async fn send_status(
     let dp_id_u32 = match parse_hex_dp_id(&req.dp_id) {
         Ok(id) => id,
         Err(msg) => {
-            warn!("SendStatus: invalid dp_id format: {}", req.dp_id);
+            warn!("UpsertStatus: invalid dp_id format: {}", req.dp_id);
             return (
                 StatusCode::BAD_REQUEST, // 400
                 Json(serde_json::json!(ErrorResponse {
@@ -142,24 +142,35 @@ async fn send_status(
     let dp_id = format!("{:#06x}", dp_id_u32);
 
     debug!(
-        "SendStatus: dp_id={}, state={:?}, ack_cmd_id={:?}",
+        "UpsertStatus: dp_id={}, state={:?}, ack_cmd_id={:?}",
         dp_id, req.state, req.ack_cmd_id
     );
 
-    // 既存の DP かどうかを確認
-    let is_new_registration = {
+    // ========== 冪等な upsert で状態を更新 ==========
+    //
+    // 初回登録と状態更新を同一ロジックで処理する。
+    // これにより TOCTOU レース（read lock で存在確認 → write lock で更新の間に cleanup が DP を削除）を排除する。
+    //
+    // 処理フロー:
+    // 1. read lock で is_new を判定 + 初回登録の前提条件チェック（dp_id 重複、auth_policy）
+    // 2. write lock で upsert（entry().or_insert_with()）+ 全フィールドを冪等に適用
+    // 3. write lock 解放後に後処理（eBPF cleanup、update_default_active_dp）
+
+    // Step 1: 初回登録の前提条件チェック（write lock 外で実行）
+    let is_new = {
         let data_planes = state.http_ipc.data_planes.read().await;
         !data_planes.contains_key(&dp_id)
     };
 
-    if is_new_registration {
-        // ========== 初回登録 ==========
-
+    // 初回登録の前提条件（auth_policy と config の取得、dp_id 重複チェック）
+    let initial_auth_policy;
+    let initial_config;
+    if is_new {
         // dp_id 重複チェック
         {
             let active_ids = state.http_ipc.active_server_ids.read().await;
             if active_ids.contains(&dp_id_u32) {
-                warn!("SendStatus: dp_id={} is already in use", dp_id);
+                warn!("UpsertStatus: dp_id={} is already in use", dp_id);
                 return (
                     StatusCode::CONFLICT, // 409
                     Json(serde_json::json!(ErrorResponse {
@@ -172,8 +183,8 @@ async fn send_status(
 
         // 認証ポリシーを取得
         let auth_policy = state.http_ipc.auth_policy.read().await;
-        let auth_policy = match auth_policy.as_ref() {
-            Some(p) => p.clone(),
+        initial_auth_policy = match auth_policy.as_ref() {
+            Some(p) => Some(p.clone()),
             None => {
                 warn!("No auth policy configured");
                 return (
@@ -187,140 +198,104 @@ async fn send_status(
         };
 
         // 設定を取得
-        let config = state.http_ipc.dp_config.read().await.clone();
+        initial_config = Some(state.http_ipc.dp_config.read().await.clone());
+    } else {
+        initial_auth_policy = None;
+        initial_config = None;
+    }
 
-        // dp_id を使用中として登録
-        state
-            .http_ipc
-            .active_server_ids
-            .write()
-            .await
-            .insert(dp_id_u32);
+    // Step 2: upsert — 全フィールドを冪等に適用
+    //
+    // data_planes の write lock を update_default_active_dp() 呼び出し前に解放する。
+    // update_default_active_dp() 内部で data_planes の read lock を取得するため、
+    // write lock を保持したまま呼び出すとデッドロックになる（tokio の RwLock は非リエントラント）。
+    // Linux では eBPF cleanup 用に使用
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    let req_state = req.state;
+    {
+        let mut data_planes = state.http_ipc.data_planes.write().await;
 
-        // データプレーンを登録
-        {
-            let mut data_planes = state.http_ipc.data_planes.write().await;
-            let mut dp = HttpDataPlane::new(dp_id.clone(), req.pid, req.listen_addr.clone());
-            dp.server_id = Some(dp_id_u32);
-            dp.state = req.state;
-            dp.active_tunnels = req.active_tunnels;
-            dp.bytes_sent = req.bytes_sent;
-            dp.bytes_received = req.bytes_received;
-            dp.started_at = req.started_at;
-            dp.last_active = now;
-            data_planes.insert(dp_id.clone(), dp);
+        // upsert: 存在しなければ新規作成、存在すれば取得
+        let dp = data_planes
+            .entry(dp_id.clone())
+            .or_insert_with(|| HttpDataPlane::new(dp_id.clone(), req.pid, req.listen_addr.clone()));
+
+        // 全フィールドを冪等に適用（初回登録/更新の区別なし）
+        dp.server_id = Some(dp_id_u32);
+        dp.pid = req.pid;
+        dp.state = req.state;
+        dp.active_tunnels = req.active_tunnels;
+        dp.bytes_sent = req.bytes_sent;
+        dp.bytes_received = req.bytes_received;
+        dp.listen_addr = req.listen_addr.clone();
+        dp.started_at = req.started_at;
+        dp.last_active = now;
+        if let Some(tunnels) = req.tunnels {
+            dp.tunnels = tunnels;
+        }
+        if let Some(connections) = req.connections {
+            dp.connections = connections;
         }
 
+        // dp_id を使用中として登録（CP 再起動後の復旧用）
+        {
+            let mut active_ids = state.http_ipc.active_server_ids.write().await;
+            active_ids.insert(dp_id_u32);
+        }
+
+        // コマンド応答がある場合はログ出力
+        if let (Some(cmd_id), Some(ack_status)) = (&req.ack_cmd_id, &req.ack_status) {
+            debug!(
+                "Command acknowledged: dp_id={}, cmd_id={}, status={}",
+                dp_id, cmd_id, ack_status
+            );
+        }
+    } // ← data_planes の write lock がここで解放される
+
+    if is_new {
         info!("Data plane registered: dp_id={}", dp_id);
+    }
 
-        // 最新の ACTIVE をデフォルト ACTIVE として指示
-        state.http_ipc.update_default_active_dp().await;
+    // Step 3: 後処理（write lock 解放後に実行）
 
-        (
-            StatusCode::OK,
-            Json(serde_json::json!(SendStatusResponse {
-                dp_id,
-                auth_policy: Some(auth_policy),
-                config: Some(config),
-            })),
-        )
-    } else {
-        // ========== 状態更新 ==========
-
-        // data_planes の write lock を update_default_active_dp() 呼び出し前に解放する。
-        // update_default_active_dp() 内部で data_planes の read lock を取得するため、
-        // write lock を保持したまま呼び出すとデッドロックになる（tokio の RwLock は非リエントラント）。
-        let dp_found = {
-            let mut data_planes = state.http_ipc.data_planes.write().await;
-            if let Some(dp) = data_planes.get_mut(&dp_id) {
-                // 全状態を更新（冪等）
-                dp.server_id = Some(dp_id_u32);
-                dp.pid = req.pid;
-                dp.state = req.state;
-                dp.active_tunnels = req.active_tunnels;
-                dp.bytes_sent = req.bytes_sent;
-                dp.bytes_received = req.bytes_received;
-                dp.listen_addr = req.listen_addr.clone();
-                dp.last_active = now;
-
-                // トンネル・接続情報が送信された場合はキャッシュを更新
-                if let Some(tunnels) = req.tunnels {
-                    dp.tunnels = tunnels;
-                }
-                if let Some(connections) = req.connections {
-                    dp.connections = connections;
-                }
-
-                // dp_id を使用中として登録（CP 再起動後の復旧用）
-                {
-                    let mut active_ids = state.http_ipc.active_server_ids.write().await;
-                    active_ids.insert(dp_id_u32);
-                }
-
-                // コマンド応答がある場合はログ出力
-                if let (Some(cmd_id), Some(ack_status)) = (&req.ack_cmd_id, &req.ack_status) {
-                    debug!(
-                        "Command acknowledged: dp_id={}, cmd_id={}, status={}",
-                        dp_id, cmd_id, ack_status
-                    );
-                }
-
-                true
-            } else {
-                false
+    // TERMINATED 状態の場合、socket_map からエントリを削除
+    // Graceful restart のため、DRAINING 中はエントリを維持し、
+    // TERMINATED になったタイミングで削除する
+    #[cfg(target_os = "linux")]
+    if req_state == crate::ipc::DataPlaneState::Terminated {
+        use std::path::Path;
+        let ebpf_pin_path = Path::new("/sys/fs/bpf/quicport");
+        match crate::platform::linux::ebpf_router::cleanup_unresponsive_entry(
+            ebpf_pin_path,
+            dp_id_u32,
+        ) {
+            Ok(()) => {
+                info!(
+                    "Cleaned up eBPF socket_map entry for TERMINATED dp_id={} (server_id={})",
+                    dp_id, dp_id_u32
+                );
             }
-        }; // ← data_planes の write lock がここで解放される
-
-        if dp_found {
-            // TERMINATED 状態の場合、socket_map からエントリを削除
-            // Graceful restart のため、DRAINING 中はエントリを維持し、
-            // TERMINATED になったタイミングで削除する
-            #[cfg(target_os = "linux")]
-            if req.state == crate::ipc::DataPlaneState::Terminated {
-                use std::path::Path;
-                let ebpf_pin_path = Path::new("/sys/fs/bpf/quicport");
-                match crate::platform::linux::ebpf_router::cleanup_unresponsive_entry(
-                    ebpf_pin_path,
-                    dp_id_u32,
-                ) {
-                    Ok(()) => {
-                        info!(
-                            "Cleaned up eBPF socket_map entry for TERMINATED dp_id={} (server_id={})",
-                            dp_id, dp_id_u32
-                        );
-                    }
-                    Err(e) => {
-                        debug!(
-                            "Failed to cleanup eBPF socket_map entry for dp_id={}: {} (may already be removed)",
-                            dp_id, e
-                        );
-                    }
-                }
+            Err(e) => {
+                debug!(
+                    "Failed to cleanup eBPF socket_map entry for dp_id={}: {} (may already be removed)",
+                    dp_id, e
+                );
             }
-
-            // 最新の ACTIVE をデフォルト ACTIVE として指示
-            // （data_planes の write lock 解放後に呼び出すことでデッドロックを回避）
-            state.http_ipc.update_default_active_dp().await;
-
-            (
-                StatusCode::OK,
-                Json(serde_json::json!(SendStatusResponse {
-                    dp_id,
-                    auth_policy: None,
-                    config: None,
-                })),
-            )
-        } else {
-            // DP が見つからない（通常は発生しない）
-            (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!(ErrorResponse {
-                    error: "NOT_FOUND".to_string(),
-                    message: format!("Data plane not found: {}", dp_id),
-                })),
-            )
         }
     }
+
+    // 最新の ACTIVE をデフォルト ACTIVE として指示
+    // （data_planes の write lock 解放後に呼び出すことでデッドロックを回避）
+    state.http_ipc.update_default_active_dp().await;
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!(UpsertStatusResponse {
+            dp_id,
+            auth_policy: initial_auth_policy,
+            config: initial_config,
+        })),
+    )
 }
 
 /// POST /api/v1/ipc/ReceiveCommand
@@ -692,7 +667,7 @@ pub async fn run_private_with_http_ipc(
         .route("/metrics", get(metrics))
         // HTTP IPC API (v1)
         // DP 用 API
-        .route(crate::ipc::api_paths::SEND_STATUS, post(send_status))
+        .route(crate::ipc::api_paths::UPSERT_STATUS, post(upsert_status))
         .route(crate::ipc::api_paths::RECEIVE_COMMAND, post(receive_command))
         // 管理用 API
         .route(crate::ipc::api_paths::LIST_DATA_PLANES, post(list_data_planes))
