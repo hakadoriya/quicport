@@ -39,12 +39,16 @@ generate:  ## Generate code
 update:  ## Update dependencies
 	cargo update
 
+.PHONY: build-frontend
+build-frontend:  ## Build frontend dashboard
+	cd web && pnpm install --frozen-lockfile && pnpm run build
+
 .PHONY: build-debug
 build-debug:  ## Build binary for debug
 	cargo build --locked
 
 .PHONY: build
-build:  ## Build binary for release
+build: build-frontend  ## Build binary for release
 	cargo build --locked --release
 
 .PHONY: clean

@@ -50,3 +50,7 @@ vendor/**/.cache
 
 # coverage
 lcov.info
+
+# Frontend
+web/node_modules/
+web/dist/

@@ -683,6 +683,10 @@ pub async fn run_private_with_http_ipc(
         .route(crate::ipc::api_paths::GET_CONNECTIONS, post(get_connections))
         .route(crate::ipc::api_paths::LIST_TUNNELS, post(list_tunnels))
         .route(crate::ipc::api_paths::LIST_CONNECTIONS, post(list_connections))
+        // フロントエンドダッシュボード配信（/dashboard 以下で SPA を配信）
+        .nest("/dashboard",
+            Router::new().fallback(crate::embedded_frontend::serve_frontend)
+        )
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(listen).await?;

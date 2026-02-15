@@ -74,6 +74,7 @@
 
 pub mod api;
 pub mod cid_generator;
+pub mod embedded_frontend;
 pub mod client;
 pub mod control_plane;
 pub mod data_plane;
