@@ -297,6 +297,42 @@ quicport data-plane [OPTIONS]
 quicport data-plane --data-plane-addr 0.0.0.0:39000 --control-plane-url http://127.0.0.1:39000
 ```
 
+### バージョン情報 (version)
+
+ビルド情報を JSON 形式で表示します。
+
+```bash
+quicport version
+```
+
+**出力例:**
+
+```json
+{
+  "version": "0.0.1",
+  "commit": "b3cab2d1234567890abcdef1234567890abcdef1",
+  "commit_short": "b3cab2d",
+  "build_profile": "release",
+  "build_timestamp": "2025-12-15T14:30:45Z",
+  "target": "x86_64-unknown-linux-gnu",
+  "rustc_version": "rustc 1.75.0 (1d8b05fc5 2023-12-21)"
+}
+```
+
+**フィールド一覧:**
+
+| フィールド | 説明 |
+|-----------|------|
+| `version` | パッケージバージョン（`Cargo.toml` の `version`） |
+| `commit` | ビルド時の Git コミットハッシュ（40 文字） |
+| `commit_short` | Git コミットハッシュの短縮形（7 文字） |
+| `build_profile` | ビルドプロファイル（`debug` または `release`） |
+| `build_timestamp` | ビルド日時（ISO 8601 UTC 形式） |
+| `target` | ビルドターゲットトリプル（例: `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`） |
+| `rustc_version` | ビルドに使用した Rust コンパイラのバージョン |
+
+> **注意:** すべての値はコンパイル時に `build.rs` で収集され、バイナリに埋め込まれます。Git 情報が取得できない場合は `"unknown"` が使用されます。
+
 ### 制御コマンド (admin)
 
 実行中のデータプレーンを管理するためのコマンドです。
@@ -424,6 +460,8 @@ quicport はサーバー再起動時の接続維持を実現するため、デ�
 - **UNIX (非 systemd)**: control-plane が data-plane を自動起動（setsid で独立セッション化）。graceful restart は eBPF 非対応のため非サポート
 - **Windows**: 自動起動は未サポート。手動で cp と dp を別々に起動
 
+> **ログ管理**: systemd 環境でファイルにログを出力する場合、logrotate によるローテーションを推奨します。詳細は「[ログローテーション (logrotate)](#ログローテーション-logrotate)」セクションを参照してください。
+
 **責務分離:**
 
 | コンポーネント | 責務 |
@@ -538,7 +576,7 @@ systemd                control-plane            data-plane
    |                        |                        |-- または drain_timeout 経過
    |                        |                        |
    |                        |                        |-- TERMINATED 状態を CP に送信
-   |                        |                        |   (SendStatus で明示的に通知)
+   |                        |                        |   (UpsertStatus で明示的に通知)
    |                        |                        |
    |                        |                        |-- プロセス終了
    |                        |                        |
@@ -550,7 +588,7 @@ systemd                control-plane            data-plane
 4. dp が新規接続の受付を停止し、DRAINING 状態に遷移
 5. cp がプロセス終了
 6. dp は KillMode=process により SIGTERM を受けず、独立して動作を継続
-7. dp は既存トンネルをすべて処理完了（または drain_timeout 経過）後、TERMINATED 状態を SendStatus で CP に明示的に通知してから終了
+7. dp は既存トンネルをすべて処理完了（または drain_timeout 経過）後、TERMINATED 状態を UpsertStatus で CP に明示的に通知してから終了
 
 **DRAINING 状態での動作:**
 
@@ -558,6 +596,16 @@ systemd                control-plane            data-plane
 - 新規 QUIC ストリームの受付を拒否
 - 既存のリレータスク（データ転送）は継続
 - すべてのリレータスクが完了するまで待機してから終了
+
+**DP 直接シグナル受信時の動作（防御策）:**
+
+`KillMode=process` を使用する systemd 環境では、SIGTERM は CP のみに送信され DP には届きません。
+しかし、`KillMode=process` が設定されていない環境や、手動で DP プロセスにシグナルを送信した場合への防御策として、DP は直接 SIGTERM/SIGINT を受信した場合にも即時終了ではなく DRAINING 状態に遷移します。
+
+- **SIGTERM**: DRAINING 状態に遷移し、既存接続の処理を継続
+- **SIGINT**: DRAINING 状態に遷移し、既存接続の処理を継続
+- メインループを `break` しないため、ドレイン完了（全接続終了）または `drain_timeout` 経過まで待機
+- ドレイン完了後に TERMINATED 状態を UpsertStatus で CP に通知してから正常終了
 
 #### 再起動シーケンス（systemctl restart）
 
@@ -628,7 +676,7 @@ STARTING --> ACTIVE --> DRAINING --> TERMINATED
 
 **ID の形式:**
 
-- **server_id**: `u32` 型。値の範囲は `1..65535`（0 は eBPF map のデフォルト ACTIVE DP 用に予約、65536 は `BPF_MAP_TYPE_REUSEPORT_SOCKARRAY` の上限）
+- **server_id**: `u32` 型。値の範囲は `1..65535`（0 は `active_server_id_map` のクリア状態を示す特別な値として予約、65536 は `BPF_MAP_TYPE_REUSEPORT_SOCKARRAY` の上限）
 - **dp_id**: server_id の 16 進数文字列表現（`format!("{:#06x}", server_id)` → 例: `0x3039`）
 - server_id は QUIC Connection ID に埋め込まれ（`[server_id: 4B][counter: 4B]`）、eBPF ルーティングに使用される
 - CID の有効期限は 24 時間に設定されている（graceful restart を考慮）
@@ -646,7 +694,7 @@ server_id = (rand::random::<u32>() % 65535) + 1
 data-plane                              control-plane
     |                                        |
     |-- server_id をランダム生成              |
-    |-- SendStatus(dp_id, ...) ------------->|
+    |-- UpsertStatus(dp_id, ...) ------------->|
     |                                        |
     |   [成功: 200 OK]                        |
     |<-- { auth_policy, config } ------------|
@@ -654,12 +702,12 @@ data-plane                              control-plane
     |   [dp_id 重複: 409 Conflict]            |
     |<-- DP_ID_DUPLICATE --------------------|
     |-- 新しい server_id を再生成             |
-    |-- SendStatus(new_dp_id, ...) --------->|
+    |-- UpsertStatus(new_dp_id, ...) --------->|
     |   (最大 10 回リトライ)                   |
     |                                        |
     |   [CP 接続失敗: ネットワークエラー等]     |
     |-- 1 秒待機後にリトライ                   |
-    |-- SendStatus(dp_id, ...) ------------->|
+    |-- UpsertStatus(dp_id, ...) ------------->|
     |   (最大 30 回リトライ)                   |
 ```
 
@@ -678,7 +726,8 @@ data-plane                              control-plane
 #### eBPF パケットルーティング（Linux）
 
 - quicport は Linux 環境で `BPF_PROG_TYPE_SK_REUSEPORT` ベースの eBPF プログラムを使用し、QUIC Connection ID に基づいてパケットを正しい DP プロセスにルーティングする
-- `BPF_MAP_TYPE_REUSEPORT_SOCKARRAY` マップで server_id → ソケットの対応を管理
+- `BPF_MAP_TYPE_REUSEPORT_SOCKARRAY`（`socket_map`）で server_id → ソケットの対応を管理
+- `BPF_MAP_TYPE_ARRAY`（`active_server_id_map`, max_entries=1）で ACTIVE な server_id を保持し、Initial パケット等のフォールバックルーティングに使用
 - Connection ID フォーマット: `[server_id: 4B][counter: 4B]` (8 bytes, Big Endian)
 - マップとプログラムは `/sys/fs/bpf/quicport/` にピン留めされ、graceful restart 時に新旧プロセス間で共有される
 
@@ -693,34 +742,44 @@ data-plane                              control-plane
 3. `bind_udp_socket()` — ソケットをバインド
 4. `create_server_endpoint_with_socket()` — QUIC Endpoint 作成
 
-##### デフォルト ACTIVE DP ルーティング (key=0)
+##### デフォルト ACTIVE DP ルーティング (active_server_id_map)
 
 新規 QUIC トンネル（Initial パケット）の Destination CID はクライアントが生成したランダム値であるため、eBPF の `server_id` ルックアップが失敗する。この場合、カーネルの SO_REUSEPORT デフォルト（ハッシュベース分散）にフォールスルーすると、DRAINING な DP にも新規接続が届く可能性がある。
 
-これを防ぐため、`socket_map` の **key=0 をデフォルト ACTIVE DP エントリ**として使用する:
+これを防ぐため、**`active_server_id_map`（`BPF_MAP_TYPE_ARRAY`, max_entries=1）で ACTIVE な server_id を保持**し、`socket_map` から間接ルックアップする:
 
-**key=0 fallback が適用されるのは Initial パケット（最初のパケット）のみ。** コネクション確立後の流れは以下の通り:
+> **`socket_map` の key=0 に直接ソケットを登録しない理由:** `BPF_MAP_TYPE_REUSEPORT_SOCKARRAY` は同一ソケットを複数のキーに登録できない制約がある。そのため、ACTIVE な server_id を `active_server_id_map` に格納し、`socket_map` から間接的にルックアップする方式を採用している。
 
-1. **Initial パケット**: クライアントが生成したランダムな Destination CID → `server_id` 抽出失敗 → **key=0 fallback で ACTIVE DP にルーティング**
+**active_server_id_map fallback が適用されるのは Initial パケット（最初のパケット）のみ。** コネクション確立後の流れは以下の通り:
+
+1. **Initial パケット**: クライアントが生成したランダムな Destination CID → `server_id` 抽出失敗 → **`active_server_id_map` から ACTIVE な server_id を取得 → `socket_map` で間接ルックアップして ACTIVE DP にルーティング**
 2. **ハンドシェイク中**: DP が自身の `server_id` を埋め込んだ CID（`[server_id:4B][counter:4B]`）をクライアントに発行
 3. **以降のパケット**: クライアントは DP 発行の CID を Destination CID として使用 → eBPF が `server_id` を正しく抽出 → **key={server_id} で該当 DP に直接ルーティング**
 
-この仕組みにより、graceful restart 時に旧 DP の既存接続は旧 DP の `server_id` 入りの CID でルーティングされ続け、新規接続だけが key=0 経由で新 DP に向かう。
+この仕組みにより、graceful restart 時に旧 DP の既存接続は旧 DP の `server_id` 入りの CID でルーティングされ続け、新規接続だけが `active_server_id_map` 経由で新 DP に向かう。
+
+**eBPF プログラム内の間接ルックアップ (`fallback_to_default_active`):**
+
+```
+extract_server_id() 失敗 or socket_map ルックアップ失敗
+    → active_server_id_map[0] を参照
+    → 値が 0 または未登録: カーネルデフォルト（ハッシュベース分散）にフォールスルー
+    → 有効な server_id: その server_id で socket_map を再ルックアップ → ACTIVE DP にルーティング
+```
 
 **DP/CP 側の実装:**
 
-- **初回登録**: DP 起動時に `register_server(sid, socket)` の直後に `register_default_active(socket)` で key=0 に自身のソケットを登録（`MapFlags::ANY` で常に上書き）
-- **CP 指示による再登録**: CP が「最新の ACTIVE」を選び、`ReceiveCommand` で key=0 再登録を指示（DP は `register_default_active` を実行）
-- **eBPF fallback**: `extract_server_id()` 失敗時、または `bpf_sk_select_reuseport()` 失敗時に key=0 で再ルックアップ
-- **DRAINING 遷移時**: key=0 は削除しない（CP からの指示で上書きされるまで保持）
-- **CP unresponsive cleanup**: ACTIVE な DP が 0 台の場合、key=0 も削除
+- **ACTIVE 設定**: CP が「最新の ACTIVE」を選び、`SetDefaultActive` コマンドを送信 → DP が `set_active_server_id(server_id)` で `active_server_id_map[0]` に server_id を書き込み
+- **ACTIVE クリア**: ACTIVE な DP が 0 台の場合、CP が `clear_active_server_id()` で `active_server_id_map[0]` を 0 に設定（`BPF_MAP_TYPE_ARRAY` は delete 不可のため 0 書き込みでクリア）
+- **eBPF fallback**: `extract_server_id()` 失敗時、または `bpf_sk_select_reuseport()` 失敗時に `active_server_id_map` で間接ルックアップ
+- **DRAINING 遷移時**: `active_server_id_map` は更新しない（CP からの `SetDefaultActive` で上書きされるまで保持）
 
 | シナリオ | 動作 |
 |---------|------|
-| ACTIVE 1 台のみ | key=0 → ACTIVE DP。新規接続は確実にそこへ |
-| ACTIVE 1 + DRAINING 1 | key=0 → ACTIVE DP（新 DP が上書き済み）。既存接続は CID ベースルーティング |
-| 全 DP DRAINING（ACTIVE なし） | key=0 は最後の ACTIVE だった DP を指す → CP cleanup で key=0 削除 → カーネルデフォルト |
-| ACTIVE DP クラッシュ | key=0 のソケットは無効 → `bpf_sk_select_reuseport` 失敗 → カーネルデフォルト。CP unresponsive cleanup で key=0 も削除 |
+| ACTIVE 1 台のみ | `active_server_id_map[0]` → ACTIVE DP の server_id → `socket_map` で間接ルックアップ |
+| ACTIVE 1 + DRAINING 1 | `active_server_id_map[0]` → 新 ACTIVE DP の server_id（`SetDefaultActive` で更新済み）。既存接続は CID ベースルーティング |
+| 全 DP DRAINING（ACTIVE なし） | CP が `clear_active_server_id()` で 0 に設定 → フォールバック不可 → カーネルデフォルト |
+| ACTIVE DP クラッシュ | `active_server_id_map[0]` の server_id に対応するソケットが無効 → `bpf_sk_select_reuseport` 失敗 → カーネルデフォルト。CP unresponsive cleanup で `active_server_id_map` もクリア |
 
 ##### なぜ eBPF が必要か
 
@@ -769,11 +828,16 @@ Linux?
 ##### eBPF map のライフサイクル管理
 
 - **エントリ追加**: DP が起動時に `register_server(server_id, socket)` で自身のエントリを追加（ソケット fd が必要なため DP でのみ実行可能）
-- **エントリ削除（正常終了）**: DP が `EbpfRouter::drop()` で自身のエントリを削除
+- **エントリ削除（正常終了）**: DP が TERMINATED 状態を UpsertStatus で CP に通知 → CP がピン留めされた `socket_map` から該当 `server_id` のエントリを削除
 - **エントリ削除（異常終了フォールバック）**: CP がバックグラウンドタスクで定期的に unresponsive エントリを検出・削除
   - DP の `last_active`（最終ハートビート時刻）が設定可能なタイムアウト（デフォルト 300 秒）を超過した場合、unresponsive と判定
   - CP がピン留めされた eBPF map を開き、該当 server_id のエントリを削除
   - チェック間隔: 10 秒
+
+> **設計根拠（CP 一元管理）:** DP の `EbpfRouter::drop()` では `socket_map` エントリを削除しません。
+> DRAINING 状態の DP は既存の QUIC 接続を継続処理する必要があり、`socket_map` エントリが存在しないと
+> パケットが `fallback_to_default_active` で新 DP にルーティングされ、stateless reset が送信されてしまいます。
+> そのため、エントリ削除は DP が TERMINATED 状態になったタイミング（または unresponsive GC）で CP が行います。
 
 ##### 必要な権限
 
@@ -792,10 +856,10 @@ Linux?
 │                                                                     │
 │  Data Plane                       Control Plane                     │
 │       │                               │                             │
-│       │ ──POST /dp/SendStatus───────> │ (初回=登録 / 以降=1秒周期)  │
+│       │ ──POST /api/v1/ipc/UpsertStatus──> │ (初回=登録 / 以降=1秒周期)  │
 │       │ <─── { dp_id, auth_policy } ─ │                             │
 │       │                               │                             │
-│       │ ──POST /dp/ReceiveCommand───> │ (長ポーリング)              │
+│       │ ──POST /api/v1/ipc/ReceiveCommand> │ (長ポーリング)              │
 │       │ <─── { commands: [...] } ──── │ (例: SetDefaultActive)       │
 │       │                               │                             │
 │  CLI / 外部                                                         │
@@ -840,10 +904,10 @@ data-plane                    旧 control-plane              新 control-plane
      |-- ReceiveCommand ----------X---------------------->|       |
      |   (404 NOT_FOUND)            |                      |       |
      |                              |                      |       |
-     |-- SendStatus (初回登録) ------------------------------>|    |
+     |-- UpsertStatus (初回登録) ------------------------------>|    |
      |<-- { dp_id, auth_policy } --------------------------       |
      |                              |                              |
-     |-- SendStatus (状態更新) ---------------------------------->|
+     |-- UpsertStatus (状態更新) ---------------------------------->|
      |   (現在の状態を報告)           |                              |
      |                              |                              |
      |-- ReceiveCommand (継続) ---------------------------------->|
@@ -856,7 +920,7 @@ data-plane                    旧 control-plane              新 control-plane
 2. control-plane が終了すると、接続エラーまたは 404 NOT_FOUND が返る
 3. 404 NOT_FOUND を検出した場合、data-plane は自動的に再登録を試行
 4. 再登録成功後、現在の状態（ACTIVE または DRAINING）を Status イベントで報告
-5. control-plane は必要に応じて `SetDefaultActive` を送信し、key=0 再登録を指示
+5. control-plane は必要に応じて `SetDefaultActive` を送信し、`active_server_id_map` の更新を指示
 6. **DRAINING 状態は維持される**（古い data-plane が ACTIVE に戻らないようにする）
 
 **状態維持の重要性:**
@@ -1116,6 +1180,10 @@ example.com:9000 AB:CD:EF:...
 
 - **SIGINT** (Ctrl+C)
 - **SIGTERM** (Docker/systemd などからの終了要求)
+- **SIGHUP** (SSH ProxyCommand モードのみ: SSH セッション終了時に送信される)
+
+> **注意:** SIGHUP は SSH ProxyCommand モード (`ssh-proxy`) でのみ待機します。通常のクライアントモード（RPF/LPF）では SIGHUP は待機しません。
+> SSH は ProxyCommand プロセスに対して、セッション終了時に SIGHUP を送信するため、ssh-proxy モードではこれをグレースフルシャットダウンのトリガーとして扱います。
 
 シャットダウン時の動作:
 1. `SessionClose` メッセージをサーバーに送信
@@ -1543,6 +1611,49 @@ IPv6 アドレスを正しく扱うための設計:
 - **ログレベル**: 環境変数 `RUST_LOG` で制御（デフォルト: `info`）
 - **ルートスパン**: 全ログに `pid`（プロセス ID）と `subcommand`（実行中のサブコマンド名）がスパン属性として付与される。複数プロセス運用時のログ識別に有用
 
+### ログローテーション (logrotate)
+
+quicport の systemd サービスはログを `/var/log/quicport/quicport.log` にファイル出力する構成をサポートしています。
+ログローテーション設定は `platform/linux/logrotate/quicport` に用意されています。
+
+**設定内容:**
+
+| 項目 | 値 | 説明 |
+|------|-----|------|
+| `daily` | - | 毎日ローテーション |
+| `rotate 30` | 30 | 30 世代分のログを保持 |
+| `compress` | - | ローテーション後のログを gzip 圧縮 |
+| `delaycompress` | - | 直近のローテーションファイルは圧縮を遅延（デバッグ容易性のため） |
+| `missingok` | - | ログファイルが存在しなくてもエラーにしない |
+| `notifempty` | - | 空ファイルはローテーションしない |
+| `copytruncate` | - | ファイルをコピー後にトランケート（ファイルディスクリプタを維持） |
+
+**設定ファイル例:**
+
+```
+/var/log/quicport/quicport.log {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+```
+
+**インストール手順:**
+
+```bash
+sudo cp platform/linux/logrotate/quicport /etc/logrotate.d/quicport
+```
+
+**copytruncate を採用する理由:**
+
+systemd サービスの `StandardOutput=append:/var/log/quicport/quicport.log` によるログ出力では、プロセスがファイルディスクリプタを保持し続けます。
+通常の `create` 方式（rename + 新規作成）では、プロセスが旧ファイルへの書き込みを継続してしまうため、postrotate スクリプトでシグナルを送信してファイルを再オープンさせる必要があります。
+`copytruncate` はファイルをコピー後にその場でトランケートするため、ファイルディスクリプタが無効にならず、シグナル送信なしでローテーションが完了します。
+
 ### ファイル操作
 
 - **アトミック書き込み**: 証明書・秘密鍵などの重要ファイルは一時ファイル経由でアトミックに書き込み
@@ -1570,7 +1681,7 @@ localhost からのみアクセス可能な管理用 API です。
 |---------------|---------|------|
 | `/healthcheck` | GET | ヘルスチェック |
 | `/metrics` | GET | Prometheus 形式のメトリクス |
-| `/api/v1/ipc/SendStatus` | POST | 状態送信・登録（HTTP IPC） |
+| `/api/v1/ipc/UpsertStatus` | POST | 状態送信・登録（HTTP IPC） |
 | `/api/v1/ipc/ReceiveCommand` | POST | コマンド受信・長ポーリング（HTTP IPC） |
 | `/api/v1/admin/ListDataPlanes` | POST | 全データプレーン一覧 |
 | `/api/v1/admin/GetDataPlaneStatus` | POST | データプレーン状態取得 |
@@ -1664,7 +1775,7 @@ quicport_auth_x25519_failed_total 2
 
 #### DataPlaneConfig フィールド一覧
 
-CP から DP に配信される設定（`SendStatusResponse.config` および `SetConfig` コマンド）のフィールド一覧です。
+CP から DP に配信される設定（`UpsertStatusResponse.config` および `SetConfig` コマンド）のフィールド一覧です。
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|-----|-----------|------|
@@ -1679,7 +1790,7 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
 
 #### DP 用 API
 
-##### POST /api/v1/ipc/SendStatus
+##### POST /api/v1/ipc/UpsertStatus
 
 状態送信（登録・更新・コマンド応答すべて統合）。
 毎回全状態を冪等に送信することで、CP 再起動後も状態を復旧可能。
@@ -1772,7 +1883,7 @@ CP から DP に配信される設定（`SendStatusResponse.config` および `S
 **コマンド種別:**
 
 - `SetAuthPolicy` / `SetConfig` / `Drain` / `Shutdown` / `GetStatus` / `GetConnections` / `GetTunnels` / `SetDefaultActive`
-- `SetDefaultActive`: CP が選んだ「最新の ACTIVE DP」に key=0 再登録を指示する（eBPF ルーティング用）
+- `SetDefaultActive`: CP が選んだ「最新の ACTIVE DP」に `active_server_id_map` への server_id 登録を指示する（eBPF ルーティング用）
 
 #### 管理用 API
 
