@@ -53,4 +53,5 @@ lcov.info
 
 # Frontend
 web/node_modules/
-web/dist/
+# dashboard のビルド成果物はコミットしてしまう
+# web/dist/

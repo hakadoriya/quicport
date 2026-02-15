@@ -48,7 +48,7 @@ build-debug:  ## Build binary for debug
 	cargo build --locked
 
 .PHONY: build
-build: build-frontend  ## Build binary for release
+build:  ## Build binary for release
 	cargo build --locked --release
 
 .PHONY: clean
