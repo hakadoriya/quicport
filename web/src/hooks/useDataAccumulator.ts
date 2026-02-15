@@ -2,10 +2,11 @@
 //
 // - 5 秒間隔で listDataPlanes() をポーリングし、集計した DataPoint を蓄積
 // - 15 秒間隔で listTunnels() をポーリング
-// - 最大 360 ポイント保持（30 分間）
+// - 最大 1440 ポイント保持（2 時間）
 // - 転送速度は前回ポイントとの差分から算出
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { loadDataPoints, loadPrevPoint, saveDataPoints, savePrevPoint } from "../lib/storage";
 import { listConnections, listDataPlanes, listTunnels } from "../api/client";
 import type { ConnectionInfoWithDpId, DataPlaneSummary, TunnelInfoWithDpId } from "../types/api";
 
@@ -21,7 +22,7 @@ export interface DataPoint {
   recvRate: number;
 }
 
-const MAX_POINTS = 360;
+const MAX_POINTS = 1440;
 const DP_POLL_INTERVAL = 5_000; // 5 秒
 const TUNNEL_POLL_INTERVAL = 15_000; // 15 秒
 
@@ -34,13 +35,13 @@ export interface AccumulatorState {
 }
 
 export function useDataAccumulator(): AccumulatorState {
-  const [dataPoints, setDataPoints] = useState<DataPoint[]>([]);
+  const [dataPoints, setDataPoints] = useState<DataPoint[]>(() => loadDataPoints());
   const [latestDataPlanes, setLatestDataPlanes] = useState<DataPlaneSummary[]>([]);
   const [latestTunnels, setLatestTunnels] = useState<TunnelInfoWithDpId[]>([]);
   const [latestConnections, setLatestConnections] = useState<ConnectionInfoWithDpId[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const latestConnectionCountRef = useRef<number>(0);
-  const prevPointRef = useRef<{ bytesSent: number; bytesReceived: number; timestamp: number } | null>(null);
+  const prevPointRef = useRef<{ bytesSent: number; bytesReceived: number; timestamp: number } | null>(loadPrevPoint());
 
   // Data Planes ポーリング (5 秒間隔)
   const pollDataPlanes = useCallback(async () => {
@@ -66,6 +67,7 @@ export function useDataAccumulator(): AccumulatorState {
         }
       }
       prevPointRef.current = { bytesSent: totalSent, bytesReceived: totalRecv, timestamp: now };
+      savePrevPoint(prevPointRef.current);
 
       const point: DataPoint = {
         timestamp: now,
@@ -80,8 +82,10 @@ export function useDataAccumulator(): AccumulatorState {
 
       setDataPoints((prev) => {
         const next = [...prev, point];
-        // 最大 360 ポイント保持（30 分間）
-        return next.length > MAX_POINTS ? next.slice(next.length - MAX_POINTS) : next;
+        // 最大 1440 ポイント保持（2 時間）
+        const trimmed = next.length > MAX_POINTS ? next.slice(next.length - MAX_POINTS) : next;
+        saveDataPoints(trimmed);
+        return trimmed;
       });
     } catch {
       setIsConnected(false);
