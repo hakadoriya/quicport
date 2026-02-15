@@ -97,7 +97,7 @@ pub struct DataPlane {
     /// 閉じたコネクション分の累計受信バイト数
     closed_bytes_received: AtomicU64,
     /// 接続情報（GetConnections 用）
-    connection_list: RwLock<HashMap<u32, TrackedConnection>>,
+    connection_list: RwLock<HashMap<(u64, u32), TrackedConnection>>,
     /// トンネル ID カウンター（server_id と組み合わせてグローバルユニークな tunnel_id を生成）
     tunnel_id_counter: AtomicU32,
     /// トンネル情報（ListTunnels 用）
@@ -258,6 +258,7 @@ impl DataPlane {
     /// 接続情報を登録し、接続ごとのバイトカウンターを返す
     pub async fn register_connection(
         &self,
+        tunnel_id: u64,
         id: u32,
         protocol: Protocol,
         remote_addr: SocketAddr,
@@ -265,7 +266,7 @@ impl DataPlane {
         let bytes_sent = Arc::new(AtomicU64::new(0));
         let bytes_received = Arc::new(AtomicU64::new(0));
         self.connection_list.write().await.insert(
-            id,
+            (tunnel_id, id),
             TrackedConnection {
                 protocol,
                 remote_addr,
@@ -279,8 +280,8 @@ impl DataPlane {
     /// 接続情報を削除し、per-connection バイトカウンターの最終値をグローバルカウンターに加算する。
     /// これにより remove + bytes 加算が単一の write lock 内でアトミックに行われ、
     /// relay タスクの終了方法（正常・エラー・キャンセル）に関わらずバイトが保存される。
-    pub async fn unregister_connection(&self, id: u32) {
-        let tracked = self.connection_list.write().await.remove(&id);
+    pub async fn unregister_connection(&self, tunnel_id: u64, id: u32) {
+        let tracked = self.connection_list.write().await.remove(&(tunnel_id, id));
         if let Some(conn) = tracked {
             let final_sent = conn.bytes_sent.load(Ordering::Relaxed);
             let final_received = conn.bytes_received.load(Ordering::Relaxed);
@@ -297,8 +298,8 @@ impl DataPlane {
             .read()
             .await
             .iter()
-            .map(|(id, tracked)| crate::ipc::ConnectionInfo {
-                connection_id: *id,
+            .map(|((_tunnel_id, conn_id), tracked)| crate::ipc::ConnectionInfo {
+                connection_id: *conn_id,
                 remote_addr: tracked.remote_addr.to_string(),
                 protocol: tracked.protocol.to_string(),
                 bytes_sent: tracked.bytes_sent.load(Ordering::Relaxed),
@@ -367,7 +368,7 @@ impl DataPlane {
         let (sent, received) = {
             let connections = self.connection_list.read().await;
             connections
-                .get(&connection_id)
+                .get(&(tunnel_id, connection_id))
                 .map_or((0, 0), |conn| {
                     (
                         conn.bytes_sent.load(Ordering::Relaxed),
@@ -401,7 +402,7 @@ impl DataPlane {
             .map(|(id, tracked)| {
                 // アクティブ接続のバイトを合算
                 let (active_sent, active_received) =
-                    tracked.connection_ids.iter().filter_map(|cid| connections.get(cid)).fold(
+                    tracked.connection_ids.iter().filter_map(|cid| connections.get(&(*id, *cid))).fold(
                         (0u64, 0u64),
                         |(sent, recv), conn| {
                             (
@@ -1773,7 +1774,7 @@ async fn handle_remote_forward(
                                     tcp_addr,
                                     cancel_token.clone(),
                                 );
-                                let (conn_sent, conn_recv) = data_plane.register_connection(conn_id, Protocol::Tcp, tcp_addr).await;
+                                let (conn_sent, conn_recv) = data_plane.register_connection(tunnel_id, conn_id, Protocol::Tcp, tcp_addr).await;
                                 data_plane.add_connection_to_tunnel(tunnel_id, conn_id).await;
 
                                 let conn_manager_clone = conn_manager.clone();
@@ -1795,7 +1796,7 @@ async fn handle_remote_forward(
                                     }
                                     conn_manager_clone.lock().await.remove_connection(conn_id);
                                     dp_clone.remove_connection_from_tunnel(tid, conn_id).await;
-                                    dp_clone.unregister_connection(conn_id).await;
+                                    dp_clone.unregister_connection(tid, conn_id).await;
                                 }.instrument(tracing::Span::current()));
                             }
                             Err(e) => {
@@ -1977,7 +1978,7 @@ async fn handle_remote_forward(
                                         );
                                         udp_connections.lock().await.insert(src_addr, (conn_id, tx.clone()));
                                     }
-                                    let (conn_sent, conn_recv) = data_plane.register_connection(conn_id, Protocol::Udp, src_addr).await;
+                                    let (conn_sent, conn_recv) = data_plane.register_connection(tunnel_id, conn_id, Protocol::Udp, src_addr).await;
                                     data_plane.add_connection_to_tunnel(tunnel_id, conn_id).await;
 
                                     // 最初のパケットを送信（ロック外で await）
@@ -2009,7 +2010,7 @@ async fn handle_remote_forward(
                                         conn_manager_clone.lock().await.remove_connection(conn_id);
                                         udp_connections_clone.lock().await.remove(&src_addr);
                                         dp_clone.remove_connection_from_tunnel(tid, conn_id).await;
-                                        dp_clone.unregister_connection(conn_id).await;
+                                        dp_clone.unregister_connection(tid, conn_id).await;
                                     }.instrument(tracing::Span::current()));
                                 }
                             }
@@ -2156,7 +2157,7 @@ async fn handle_local_forward(
                                                     remote_addr,
                                                     cancel_token.clone(),
                                                 );
-                                                let (conn_sent, conn_recv) = data_plane.register_connection(conn_id, Protocol::Tcp, remote_addr).await;
+                                                let (conn_sent, conn_recv) = data_plane.register_connection(tunnel_id, conn_id, Protocol::Tcp, remote_addr).await;
                                                 data_plane.add_connection_to_tunnel(tunnel_id, conn_id).await;
 
                                                 let conn_manager_clone = conn_manager.clone();
@@ -2178,7 +2179,7 @@ async fn handle_local_forward(
                                                     }
                                                     conn_manager_clone.lock().await.remove_connection(conn_id);
                                                     dp_clone.remove_connection_from_tunnel(tid, conn_id).await;
-                                                    dp_clone.unregister_connection(conn_id).await;
+                                                    dp_clone.unregister_connection(tid, conn_id).await;
                                                 }.instrument(tracing::Span::current()));
                                             }
                                             Err(e) => {
@@ -2214,7 +2215,7 @@ async fn handle_local_forward(
                                                     remote_addr,
                                                     cancel_token.clone(),
                                                 );
-                                                let (conn_sent, conn_recv) = data_plane.register_connection(conn_id, Protocol::Udp, remote_addr).await;
+                                                let (conn_sent, conn_recv) = data_plane.register_connection(tunnel_id, conn_id, Protocol::Udp, remote_addr).await;
                                                 data_plane.add_connection_to_tunnel(tunnel_id, conn_id).await;
 
                                                 let conn_manager_clone = conn_manager.clone();
@@ -2236,7 +2237,7 @@ async fn handle_local_forward(
                                                     }
                                                     conn_manager_clone.lock().await.remove_connection(conn_id);
                                                     dp_clone.remove_connection_from_tunnel(tid, conn_id).await;
-                                                    dp_clone.unregister_connection(conn_id).await;
+                                                    dp_clone.unregister_connection(tid, conn_id).await;
                                                 }.instrument(tracing::Span::current()));
                                             }
                                             Err(e) => {
