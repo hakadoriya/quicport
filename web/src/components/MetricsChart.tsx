@@ -44,7 +44,7 @@ export default function MetricsChart({ dataPoints }: Props) {
     return (
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {[...Array(4)].map((_, i) => (
-          <div key={i} className="bg-gray-900 rounded-lg p-4 h-64 flex items-center justify-center text-gray-500">
+          <div key={i} className="bg-gray-900 rounded p-4 h-64 flex items-center justify-center text-gray-500">
             Collecting data...
           </div>
         ))}
@@ -55,108 +55,118 @@ export default function MetricsChart({ dataPoints }: Props) {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       {/* Data Planes 推移 */}
-      <div className="bg-gray-900 rounded-lg p-4">
+      <div className="bg-gray-900 rounded p-4">
         <h3 className="text-sm font-medium text-gray-400 mb-2">Data Planes</h3>
         <ResponsiveContainer width="100%" height={220}>
           <LineChart data={dataPoints} margin={chartMargin}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+            <CartesianGrid strokeDasharray="2 4" stroke="#374151" />
             <XAxis dataKey="timestamp" tickFormatter={formatTime} stroke="#6B7280" fontSize={11} />
             <YAxis stroke="#6B7280" fontSize={11} allowDecimals={false} />
             <Tooltip
-              contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151", borderRadius: "8px" }}
+              contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151", borderRadius: "2px" }}
               labelFormatter={formatTime}
             />
             <Line
-              type="monotone"
+              type="stepAfter"
               dataKey="dataPlaneCount"
               name="Data Planes"
               stroke="#3B82F6"
-              strokeWidth={2}
+              strokeWidth={1.5}
               dot={false}
+              animationDuration={200}
+              animationEasing="ease-out"
             />
           </LineChart>
         </ResponsiveContainer>
       </div>
 
       {/* Transfer Rate 推移 */}
-      <div className="bg-gray-900 rounded-lg p-4">
+      <div className="bg-gray-900 rounded p-4">
         <h3 className="text-sm font-medium text-gray-400 mb-2">Transfer Rate</h3>
         <ResponsiveContainer width="100%" height={220}>
           <AreaChart data={dataPoints} margin={chartMargin}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+            <CartesianGrid strokeDasharray="2 4" stroke="#374151" />
             <XAxis dataKey="timestamp" tickFormatter={formatTime} stroke="#6B7280" fontSize={11} />
             <YAxis stroke="#6B7280" fontSize={11} tickFormatter={formatRate} />
             <Tooltip
-              contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151", borderRadius: "8px" }}
+              contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151", borderRadius: "2px" }}
               labelFormatter={formatTime}
               formatter={(value: number) => formatRate(value)}
             />
             <Legend />
             <Area
-              type="monotone"
+              type="linear"
               dataKey="sendRate"
               name="Send"
               stroke="#06B6D4"
               fill="#06B6D4"
-              fillOpacity={0.15}
-              strokeWidth={2}
+              fillOpacity={0.2}
+              strokeWidth={1.5}
+              animationDuration={200}
+              animationEasing="ease-out"
             />
             <Area
-              type="monotone"
+              type="linear"
               dataKey="recvRate"
               name="Receive"
               stroke="#A855F7"
               fill="#A855F7"
-              fillOpacity={0.15}
-              strokeWidth={2}
+              fillOpacity={0.2}
+              strokeWidth={1.5}
+              animationDuration={200}
+              animationEasing="ease-out"
             />
           </AreaChart>
         </ResponsiveContainer>
       </div>
 
       {/* Active Tunnels 推移 */}
-      <div className="bg-gray-900 rounded-lg p-4">
+      <div className="bg-gray-900 rounded p-4">
         <h3 className="text-sm font-medium text-gray-400 mb-2">Active Tunnels</h3>
         <ResponsiveContainer width="100%" height={220}>
           <LineChart data={dataPoints} margin={chartMargin}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+            <CartesianGrid strokeDasharray="2 4" stroke="#374151" />
             <XAxis dataKey="timestamp" tickFormatter={formatTime} stroke="#6B7280" fontSize={11} />
             <YAxis stroke="#6B7280" fontSize={11} allowDecimals={false} />
             <Tooltip
-              contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151", borderRadius: "8px" }}
+              contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151", borderRadius: "2px" }}
               labelFormatter={formatTime}
             />
             <Line
-              type="monotone"
+              type="stepAfter"
               dataKey="activeTunnels"
               name="Active Tunnels"
               stroke="#10B981"
-              strokeWidth={2}
+              strokeWidth={1.5}
               dot={false}
+              animationDuration={200}
+              animationEasing="ease-out"
             />
           </LineChart>
         </ResponsiveContainer>
       </div>
 
       {/* Active Connections 推移 */}
-      <div className="bg-gray-900 rounded-lg p-4">
+      <div className="bg-gray-900 rounded p-4">
         <h3 className="text-sm font-medium text-gray-400 mb-2">Active Connections</h3>
         <ResponsiveContainer width="100%" height={220}>
           <LineChart data={dataPoints} margin={chartMargin}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+            <CartesianGrid strokeDasharray="2 4" stroke="#374151" />
             <XAxis dataKey="timestamp" tickFormatter={formatTime} stroke="#6B7280" fontSize={11} />
             <YAxis stroke="#6B7280" fontSize={11} allowDecimals={false} />
             <Tooltip
-              contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151", borderRadius: "8px" }}
+              contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151", borderRadius: "2px" }}
               labelFormatter={formatTime}
             />
             <Line
-              type="monotone"
+              type="stepAfter"
               dataKey="activeConnections"
               name="Active Connections"
               stroke="#F59E0B"
-              strokeWidth={2}
+              strokeWidth={1.5}
               dot={false}
+              animationDuration={200}
+              animationEasing="ease-out"
             />
           </LineChart>
         </ResponsiveContainer>

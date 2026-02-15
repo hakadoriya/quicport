@@ -26,7 +26,7 @@ const stateBadge: Record<DataPlaneState, string> = {
 
 export default function DataPlaneTable({ dataPlanes }: Props) {
   return (
-    <div className="bg-gray-900 rounded-lg overflow-hidden">
+    <div className="bg-gray-900 rounded overflow-hidden">
       <div className="px-4 py-3 border-b border-gray-800">
         <h3 className="text-sm font-medium text-gray-400">Data Planes</h3>
       </div>

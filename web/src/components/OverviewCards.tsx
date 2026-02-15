@@ -61,7 +61,7 @@ export default function OverviewCards({ dataPlanes }: Props) {
       {cards.map((card) => (
         <div
           key={card.label}
-          className={`bg-gray-900 rounded-lg p-4 border-l-4 ${card.color}`}
+          className={`bg-gray-900 rounded p-4 border-l-4 ${card.color}`}
         >
           <div className="text-sm text-gray-400">{card.label}</div>
           <div className="text-2xl font-bold mt-1">{card.value}</div>
