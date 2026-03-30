@@ -35,7 +35,7 @@ jobs:
         uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7
       - name: Restore Cargo cache
         id: cache-cargo-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -47,7 +47,7 @@ jobs:
             cargo-${{ runner.os }}-
       - name: Restore build cache
         id: cache-target-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: target/
           key: target-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
@@ -59,7 +59,7 @@ jobs:
           cargo clippy --all-features --all-targets
       - name: Save Cargo cache
         if: steps.cache-cargo-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -69,7 +69,7 @@ jobs:
           key: ${{ steps.cache-cargo-restore.outputs.cache-primary-key }}
       - name: Save build cache
         if: steps.cache-target-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: target/
           key: ${{ steps.cache-target-restore.outputs.cache-primary-key }}
